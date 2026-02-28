@@ -37,7 +37,7 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="POST" variant="note" /> | `/api/auth/login` | Log in with username and password |
 | <Badge text="POST" variant="note" /> | `/api/auth/logout` | Log out and clear session cookie |
 | <Badge text="GET" variant="success" /> | `/api/auth/me` | Get current user info |
-| <Badge text="POST" variant="note" /> | `/api/auth/change-password` | Change own password |
+| <Badge text="PUT" variant="caution" /> | `/api/auth/change-password` | Change own password |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/setup` | Begin 2FA setup, returns QR code |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/verify` | Verify TOTP code to complete 2FA setup |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/disable` | Disable 2FA on own account |
@@ -45,7 +45,9 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="POST" variant="note" /> | `/api/auth/users` | Create a new user (admin only) |
 | <Badge text="DELETE" variant="danger" /> | `/api/auth/users/{username}` | Delete a user (admin only) |
 | <Badge text="PUT" variant="caution" /> | `/api/auth/users/{username}` | Update user (role, etc.) (admin only) |
+| <Badge text="GET" variant="success" /> | `/api/auth/users/{username}/permissions` | Get per-bucket permissions (admin only) |
 | <Badge text="PUT" variant="caution" /> | `/api/auth/users/{username}/permissions` | Set per-bucket permissions (admin only) |
+| <Badge text="DELETE" variant="danger" /> | `/api/auth/users/{username}/permissions/{bucket}` | Remove bucket permission (admin only) |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/reset/{username}` | Reset a user's 2FA (admin only) |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/enable` | Enable 2FA after setup verification |
 | <Badge text="POST" variant="note" /> | `/api/auth/2fa/recover` | Log in with a recovery code |
@@ -85,6 +87,11 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/create-folder` | Create a folder (empty prefix) |
 | <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/preview` | Preview file content (first 500 KB) |
 | <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/presigned-url` | Generate a presigned download URL |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-info` | Get object metadata (size, ETag, etc.) |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/file-metadata` | Get file metadata (Parquet/ORC/Avro schema) |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/preview-tail` | Preview the tail of a file |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/folder-size` | Get total size of a folder prefix |
+| <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/refresh-prefix` | Refresh index for a specific prefix |
 
 ### Versions
 
@@ -96,6 +103,7 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/version-delete` | Delete a specific version |
 | <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/purge-versions` | Purge non-current versions |
 | <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/scan-versions` | Scan for all versions in a bucket |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/version-presigned-url` | Presigned URL for a specific version |
 
 ### Bucket Settings
 
@@ -113,6 +121,31 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="PUT" variant="caution" /> | `/api/buckets/{bucket}/policy` | Set bucket policy |
 | <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/tagging` | Get bucket tags |
 | <Badge text="PUT" variant="caution" /> | `/api/buckets/{bucket}/tagging` | Set bucket tags |
+| <Badge text="DELETE" variant="danger" /> | `/api/buckets/{bucket}/lifecycle` | Delete lifecycle rules |
+| <Badge text="DELETE" variant="danger" /> | `/api/buckets/{bucket}/cors` | Delete CORS configuration |
+| <Badge text="DELETE" variant="danger" /> | `/api/buckets/{bucket}/policy` | Delete bucket policy |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/website` | Get bucket website configuration |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/location` | Get bucket location |
+
+### Object Settings
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-acl` | Get object ACL |
+| <Badge text="PUT" variant="caution" /> | `/api/buckets/{bucket}/object-acl` | Set object ACL |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-tagging` | Get object tags |
+| <Badge text="PUT" variant="caution" /> | `/api/buckets/{bucket}/object-tagging` | Set object tags |
+| <Badge text="DELETE" variant="danger" /> | `/api/buckets/{bucket}/object-tagging` | Delete object tags |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-lock` | Get object lock configuration |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-retention` | Get object retention policy |
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/object-legal-hold` | Get object legal hold status |
+
+### Multipart Uploads
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/buckets/{bucket}/multipart-uploads` | List in-progress multipart uploads |
+| <Badge text="POST" variant="note" /> | `/api/buckets/{bucket}/abort-multipart` | Abort a multipart upload |
 
 ### Analytics
 
@@ -157,10 +190,23 @@ Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | <Badge text="POST" variant="note" /> | `/api/endpoints` | Add a new S3 endpoint (admin only) |
 | <Badge text="PUT" variant="caution" /> | `/api/endpoints/{id}` | Update an S3 endpoint (admin only) |
 | <Badge text="DELETE" variant="danger" /> | `/api/endpoints/{id}` | Remove an S3 endpoint (admin only) |
+| <Badge text="POST" variant="note" /> | `/api/endpoints/{id}/test` | Test endpoint connection (admin only) |
+| <Badge text="GET" variant="success" /> | `/api/all-buckets` | List buckets across all endpoints |
 
-### Health & Branding
+### License
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/license` | Get license info |
+| <Badge text="POST" variant="note" /> | `/api/license` | Activate a license key (admin only) |
+
+### Health & System
 
 | Method | Path | Description |
 |---|---|---|
 | <Badge text="GET" variant="success" /> | `/healthz` | Health check (no auth required) |
 | <Badge text="GET" variant="success" /> | `/api/branding` | Get branding configuration |
+| <Badge text="GET" variant="success" /> | `/api/health-detail` | Detailed health with S3, DB, and crawler status |
+| <Badge text="GET" variant="success" /> | `/api/health/s3` | S3 connectivity check |
+| <Badge text="POST" variant="note" /> | `/api/health/s3/refresh` | Refresh S3 health check |
+| <Badge text="GET" variant="success" /> | `/api/system-info` | System information |

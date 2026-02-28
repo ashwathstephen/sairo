@@ -177,7 +177,7 @@ print('yes' if '$bucket' in buckets else 'no')
 
     # Trigger crawl
     local start_time=$(python3 -c "import time; print(time.time())")
-    curl -s -X POST -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/crawl" > /dev/null
+    curl -s -X POST -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/crawl" > /dev/null
 
     # Poll until crawl completes (max 5 minutes)
     local max_wait=300
@@ -186,7 +186,7 @@ print('yes' if '$bucket' in buckets else 'no')
     while [ "$status" = "crawling" ] && [ $waited -lt $max_wait ]; do
       sleep 1
       waited=$((waited + 1))
-      status=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/crawl-status" | python3 -c "
+      status=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/crawl-status" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 print(data.get('status', 'unknown'))
@@ -198,7 +198,7 @@ print(data.get('status', 'unknown'))
 
     # Get object count
     local obj_count
-    obj_count=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/crawl-status" | python3 -c "
+    obj_count=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/crawl-status" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 print(data.get('total_objects', 0))
@@ -223,7 +223,7 @@ bench_search() {
   local bucket=""
   for b in bench-mixed bench-small bench-medium bench-large; do
     local status
-    status=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$b/crawl-status" 2>/dev/null | python3 -c "
+    status=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$b/crawl-status" 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -250,7 +250,7 @@ except: print('none')
     local times=()
     for i in $(seq 1 30); do
       local t
-      t=$(timed_curl "/api/b/$bucket/search?q=$query")
+      t=$(timed_curl "/api/buckets/$bucket/search?q=$query")
       times+=("$t")
     done
 
@@ -267,7 +267,7 @@ except: print('none')
 
     # Get result count
     local result_count
-    result_count=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/search?q=$query" | python3 -c "
+    result_count=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/search?q=$query" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -301,7 +301,7 @@ print('yes' if '$bucket' in buckets else 'no')
     log "Benchmarking listing for $bucket..."
 
     # Root listing
-    local result=$(bench_endpoint "root" "/api/b/$bucket/list?prefix=" 20)
+    local result=$(bench_endpoint "root" "/api/buckets/$bucket/list?prefix=" 20)
     local avg=$(echo "$result" | cut -d'|' -f3)
     local p50=$(echo "$result" | cut -d'|' -f4)
     local p95=$(echo "$result" | cut -d'|' -f5)
@@ -310,7 +310,7 @@ print('yes' if '$bucket' in buckets else 'no')
 
     # Deep prefix listing (pick a real prefix)
     local prefix
-    prefix=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/list?prefix=" | python3 -c "
+    prefix=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/list?prefix=" | python3 -c "
 import sys, json
 for line in sys.stdin:
     line = line.strip()
@@ -326,7 +326,7 @@ for line in sys.stdin:
 " 2>/dev/null || echo "")
 
     if [ -n "$prefix" ]; then
-      local result2=$(bench_endpoint "prefix" "/api/b/$bucket/list?prefix=$prefix" 20)
+      local result2=$(bench_endpoint "prefix" "/api/buckets/$bucket/list?prefix=$prefix" 20)
       local avg2=$(echo "$result2" | cut -d'|' -f3)
       local p502=$(echo "$result2" | cut -d'|' -f4)
       local p952=$(echo "$result2" | cut -d'|' -f5)
@@ -377,7 +377,7 @@ print('yes' if 'bench-small' in buckets else 'no')
       local upload_key="benchmark/upload-test-${size_label}-${i}.bin"
       local start=$(python3 -c "import time; print(time.time())")
       curl -s -o /dev/null -b "$COOKIE_JAR" \
-        -X POST "$BASE_URL/api/b/bench-small/upload?prefix=benchmark/" \
+        -X POST "$BASE_URL/api/buckets/bench-small/upload?prefix=benchmark/" \
         -F "files=@$file" 2>/dev/null
       local end=$(python3 -c "import time; print(time.time())")
       local elapsed_ms=$(python3 -c "print(f'{($end - $start) * 1000:.1f}')")
@@ -461,7 +461,7 @@ print('yes' if '$b' in buckets else 'no')
 
   # Find a real object key
   local key
-  key=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/list?prefix=" | python3 -c "
+  key=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/list?prefix=" | python3 -c "
 import sys, json
 for line in sys.stdin:
     line = line.strip()
@@ -478,7 +478,7 @@ for line in sys.stdin:
 
   if [ -z "$key" ]; then
     # Try listing a subfolder
-    key=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/search?q=dat" | python3 -c "
+    key=$(curl -s -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/search?q=dat" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -497,7 +497,7 @@ except: pass
 
   log "Benchmarking presigned URL generation for $bucket/$key..."
 
-  local result=$(bench_endpoint "presigned_url" "/api/b/$bucket/presigned-url?key=$key" 50)
+  local result=$(bench_endpoint "presigned_url" "/api/buckets/$bucket/presigned-url?key=$key" 50)
   local p50=$(echo "$result" | cut -d'|' -f4)
   local p95=$(echo "$result" | cut -d'|' -f5)
   local avg=$(echo "$result" | cut -d'|' -f3)
@@ -505,7 +505,7 @@ except: pass
   add_result "download" "presigned_url" "{\"p50_ms\":$p50,\"p95_ms\":$p95,\"avg_ms\":$avg}"
 
   # Object info
-  local result2=$(bench_endpoint "object_info" "/api/b/$bucket/object-info?key=$key" 50)
+  local result2=$(bench_endpoint "object_info" "/api/buckets/$bucket/object-info?key=$key" 50)
   local p502=$(echo "$result2" | cut -d'|' -f4)
   local p952=$(echo "$result2" | cut -d'|' -f5)
   ok "Object info: p50=${p502}ms  p95=${p952}ms"
@@ -548,7 +548,7 @@ print('yes' if '$b' in buckets else 'no')
       (
         for r in $(seq 1 10); do
           curl -s -o /dev/null -w "%{time_total}\n" \
-            -b "$COOKIE_JAR" "$BASE_URL/api/b/$bucket/list?prefix=" \
+            -b "$COOKIE_JAR" "$BASE_URL/api/buckets/$bucket/list?prefix=" \
             >> "$tmpdir/worker_$c.txt" 2>/dev/null
         done
       ) &
@@ -602,10 +602,10 @@ print('yes' if '$b' in buckets else 'no')
   fi
 
   local endpoints=(
-    "folder_size|/api/b/$bucket/folder-size?prefix=|30"
-    "storage_breakdown|/api/b/$bucket/storage-breakdown|20"
-    "storage_history|/api/b/$bucket/storage-history|20"
-    "crawl_status|/api/b/$bucket/crawl-status|50"
+    "folder_size|/api/buckets/$bucket/folder-size?prefix=|30"
+    "storage_breakdown|/api/buckets/$bucket/storage-breakdown|20"
+    "storage_history|/api/buckets/$bucket/storage-history|20"
+    "crawl_status|/api/buckets/$bucket/crawl-status|50"
   )
 
   for entry in "${endpoints[@]}"; do

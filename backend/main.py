@@ -243,11 +243,14 @@ class S3ClientManager:
             info = self._endpoints.get(endpoint_id)
             if not info:
                 raise HTTPException(404, f"S3 endpoint '{endpoint_id}' not found")
+            cfg = _S3_CONFIG
+            if info.get("path_style"):
+                cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
             kwargs = {
                 "endpoint_url": info["endpoint_url"],
                 "aws_access_key_id": info["access_key"],
                 "aws_secret_access_key": info["secret_key"],
-                "config": _S3_CONFIG,
+                "config": cfg,
             }
             if info["region"]:
                 kwargs["region_name"] = info["region"]
@@ -268,7 +271,9 @@ class S3ClientManager:
 
 _s3_manager = S3ClientManager()
 # Register default endpoint from env vars
-_s3_manager.register("default", S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY)
+_S3_PATH_STYLE = os.environ.get("S3_PATH_STYLE", "false").lower() in ("true", "1", "yes")
+_S3_REGION = os.environ.get("S3_REGION", "")
+_s3_manager.register("default", S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, _S3_REGION, _S3_PATH_STYLE)
 
 # Context variable for current endpoint — propagates across async/sync boundaries in Starlette
 _endpoint_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("_endpoint_ctx", default="default")

@@ -41,7 +41,7 @@ The bucket sidebar groups buckets by endpoint. Each endpoint appears as a collap
 Non-default endpoints use a namespaced URL pattern so that API calls are routed to the correct backend:
 
 ```
-/api/e/{endpoint_id}/b/{bucket}/objects/...
+/api/e/{endpoint_id}/buckets/{bucket}/objects/...
 ```
 
 The default endpoint omits the `/e/{endpoint_id}` segment for backward compatibility:
