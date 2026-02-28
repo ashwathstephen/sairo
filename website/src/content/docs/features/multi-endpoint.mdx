@@ -47,7 +47,7 @@ Non-default endpoints use a namespaced URL pattern so that API calls are routed 
 The default endpoint omits the `/e/{endpoint_id}` segment for backward compatibility:
 
 ```
-/api/b/{bucket}/objects/...
+/api/buckets/{bucket}/objects/...
 ```
 
 This means existing bookmarks, API integrations, and share links continue to work without modification after adding new endpoints.

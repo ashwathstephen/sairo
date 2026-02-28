@@ -1,7 +1,7 @@
-fastapi==0.115.6
+fastapi==0.134.0
 uvicorn==0.34.0
 boto3==1.36.14
-python-multipart==0.0.20
+python-multipart==0.0.22
 pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
@@ -9,6 +9,6 @@ pyarrow==18.1.0
 fastavro==1.9.7
 httpx==0.27.2
 pyotp==2.9.0
-cryptography==44.0.0
+cryptography==46.0.5
 slowapi==0.1.9
 limits==3.13.0

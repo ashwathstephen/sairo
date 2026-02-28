@@ -49,7 +49,7 @@ test.describe('File Operations', () => {
       const downloadLink = fileRow.locator(`${SEL.colActions} a`);
       await expect(downloadLink).toBeVisible();
       const href = await downloadLink.getAttribute('href');
-      expect(href).toContain('/api/b/');
+      expect(href).toContain('/api/buckets/');
       expect(href).toContain('/download');
     }
   });

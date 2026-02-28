@@ -51,7 +51,7 @@ test.describe('Deleted Objects & Version Purging', () => {
     await page.waitForTimeout(1000);
 
     // Delete it via API
-    const res = await fetch(`${baseURL}/api/b/${BUCKETS.VERSIONED}/objects`, {
+    const res = await fetch(`${baseURL}/api/buckets/${BUCKETS.VERSIONED}/objects`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', Cookie: '' },
       body: JSON.stringify({ keys: ['sample.json'] }),

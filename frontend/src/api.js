@@ -67,7 +67,7 @@ export async function deleteBucket(name) {
 // ── Object APIs (bucket-scoped) ──────────────────────────
 
 function bucketBase(bucket) {
-  return `${endpointBase()}/b/${encodeURIComponent(bucket)}`;
+  return `${endpointBase()}/buckets/${encodeURIComponent(bucket)}`;
 }
 
 export function streamList(bucket, prefix, onPage, onError) {

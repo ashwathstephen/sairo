@@ -209,7 +209,7 @@ test.describe('Streaming UX', () => {
     await dismissWelcomeIfPresent(page);
 
     // Navigate to bucket — intercept to slow response
-    await page.route('**/api/b/*/ls**', async (route) => {
+    await page.route('**/api/buckets/*/ls**', async (route) => {
       // Add small delay to catch streaming state
       await new Promise(r => setTimeout(r, 500));
       await route.continue();

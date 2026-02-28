@@ -64,7 +64,7 @@ export class ApiClient {
 
   async emptyBucket(bucket: string): Promise<void> {
     // List all objects and delete them
-    const res = await fetch(`${this.baseURL}/api/b/${bucket}/list?prefix=`, {
+    const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/list?prefix=`, {
       headers: this.headers(),
     });
     if (!res.ok) return;
@@ -83,7 +83,7 @@ export class ApiClient {
 
     // Delete files
     if (keys.length > 0) {
-      await fetch(`${this.baseURL}/api/b/${bucket}/objects`, {
+      await fetch(`${this.baseURL}/api/buckets/${bucket}/objects`, {
         method: 'DELETE',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ keys }),
@@ -92,7 +92,7 @@ export class ApiClient {
 
     // Delete folders
     for (const pfx of folderPrefixes) {
-      await fetch(`${this.baseURL}/api/b/${bucket}/folder`, {
+      await fetch(`${this.baseURL}/api/buckets/${bucket}/folder`, {
         method: 'DELETE',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ prefix: pfx }),
@@ -125,7 +125,7 @@ export class ApiClient {
 
     const body = Buffer.concat(parts);
 
-    const res = await fetch(`${this.baseURL}/api/b/${bucket}/upload`, {
+    const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/upload`, {
       method: 'POST',
       headers: this.headers({ 'Content-Type': `multipart/form-data; boundary=${boundary}` }),
       body: body,
@@ -136,7 +136,7 @@ export class ApiClient {
   }
 
   async enableVersioning(bucket: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/b/${bucket}/versioning?enabled=true`, {
+    await fetch(`${this.baseURL}/api/buckets/${bucket}/versioning?enabled=true`, {
       method: 'PUT',
       headers: this.headers(),
     });
@@ -146,7 +146,7 @@ export class ApiClient {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        const res = await fetch(`${this.baseURL}/api/b/${bucket}/crawl-status`, {
+        const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/crawl-status`, {
           headers: this.headers(),
         });
         if (res.ok) {
@@ -195,7 +195,7 @@ export class ApiClient {
   }
 
   async triggerCrawl(bucket: string): Promise<void> {
-    await fetch(`${this.baseURL}/api/b/${bucket}/crawl`, {
+    await fetch(`${this.baseURL}/api/buckets/${bucket}/crawl`, {
       method: 'POST',
       headers: this.headers(),
     });

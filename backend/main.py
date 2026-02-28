@@ -90,9 +90,9 @@ async def endpoint_routing_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def bucket_permission_middleware(request: Request, call_next):
-    """Check per-bucket permissions for all /api/b/{bucket}/... routes."""
+    """Check per-bucket permissions for all /api/buckets/{bucket}/... routes."""
     path = request.scope.get("path", request.url.path)
-    if not path.startswith("/api/b/"):
+    if not path.startswith("/api/buckets/"):
         return await call_next(request)
     parts = path.split("/")
     if len(parts) < 4:
@@ -502,11 +502,11 @@ def get_current_user(request: Request):
         raise HTTPException(401, "Invalid token")
 
 def require_admin(request: Request, user: dict = Depends(get_current_user)):
-    """Require admin role, or bucket write permission for /api/b/ routes."""
+    """Require admin role, or bucket write permission for /api/buckets/ routes."""
     if user["role"] == "admin":
         return user
     bp = getattr(request.state, "bucket_permission", None)
-    if request.url.path.startswith("/api/b/") and bp == "write":
+    if request.url.path.startswith("/api/buckets/") and bp == "write":
         return user
     raise HTTPException(403, "Admin access required")
 
@@ -2740,7 +2740,7 @@ def _list_from_s3_streaming(bucket, prefix, endpoint_id=None):
         token = resp.get("NextContinuationToken")
 
 
-@app.get("/api/b/{bucket}/list")
+@app.get("/api/buckets/{bucket}/list")
 def list_objects(bucket: str, prefix: str = "", fresh: bool = False, user: dict = Depends(get_current_user)):
     """List objects at a prefix. Uses index when available (instant), falls back to S3 streaming.
     Pass fresh=true to force a direct S3 listing bypassing the index."""
@@ -2754,7 +2754,7 @@ def list_objects(bucket: str, prefix: str = "", fresh: bool = False, user: dict 
     return StreamingResponse(_list_from_s3_streaming(bucket, prefix, endpoint_id=eid), media_type="application/x-ndjson")
 
 
-@app.post("/api/b/{bucket}/refresh-prefix")
+@app.post("/api/buckets/{bucket}/refresh-prefix")
 def refresh_prefix(bucket: str, prefix: str = "", user: dict = Depends(require_admin)):
     """Quick S3 check for a single prefix — merges new/changed objects into the index.
     Much faster than a full crawl: only lists one delimiter-level and updates SQLite."""
@@ -2805,7 +2805,7 @@ def refresh_prefix(bucket: str, prefix: str = "", user: dict = Depends(require_a
 
 # ── API: Search ─────────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/search")
+@app.get("/api/buckets/{bucket}/search")
 @limiter.limit("60/minute")
 def search_objects(bucket: str, request: Request, q: str = Query(..., min_length=1), prefix: str = "", limit: int = 200, user: dict = Depends(get_current_user)):
     if not _is_index_ready(bucket):
@@ -2849,7 +2849,7 @@ def _search_fts(db, q, prefix, limit):
 
 # ── API: Folder Size ────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/folder-size")
+@app.get("/api/buckets/{bucket}/folder-size")
 def folder_size(bucket: str, prefix: str = "", user: dict = Depends(get_current_user)):
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
@@ -2865,7 +2865,7 @@ def folder_size(bucket: str, prefix: str = "", user: dict = Depends(get_current_
 
 # ── API: Storage Breakdown ──────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/storage-breakdown")
+@app.get("/api/buckets/{bucket}/storage-breakdown")
 def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_current_user)):
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
@@ -2935,7 +2935,7 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
 
 # ── API: Storage History ──────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/storage-history")
+@app.get("/api/buckets/{bucket}/storage-history")
 def storage_history(bucket: str, prefix: str = "", days: int = 90, user: dict = Depends(get_current_user)):
     """Return storage growth history for a bucket or specific prefix."""
     if not os.path.exists(_db_path(bucket)):
@@ -2953,7 +2953,7 @@ def storage_history(bucket: str, prefix: str = "", days: int = 90, user: dict = 
 
 # ── API: Crawl Status ──────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/crawl-status")
+@app.get("/api/buckets/{bucket}/crawl-status")
 def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
     if not os.path.exists(_db_path(bucket)):
         return {"status": "not_indexed", "total_objects": 0, "total_size": 0}
@@ -2962,7 +2962,7 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
     return dict(row) if row else {"status": "unknown"}
 
 
-@app.post("/api/b/{bucket}/crawl")
+@app.post("/api/buckets/{bucket}/crawl")
 def trigger_crawl(bucket: str, user: dict = Depends(require_admin)):
     eid = _current_endpoint_id()
     _init_db(bucket, eid)
@@ -2973,7 +2973,7 @@ def trigger_crawl(bucket: str, user: dict = Depends(require_admin)):
 
 # ── API: Object Operations ──────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/download")
+@app.get("/api/buckets/{bucket}/download")
 def download_object(bucket: str, key: str, user: dict = Depends(get_current_user)):
     url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
     return RedirectResponse(url)
@@ -2989,7 +2989,7 @@ def _acquire_metadata_slot():
         raise HTTPException(429, "Too many concurrent metadata requests, try again shortly")
 
 
-@app.get("/api/b/{bucket}/preview")
+@app.get("/api/buckets/{bucket}/preview")
 def preview_object(
     bucket: str,
     key: str,
@@ -3034,7 +3034,7 @@ def _preview_object_inner(bucket, key, max_bytes):
     return {"content": text, "truncated": truncated, "content_type": head.get("ContentType", "")}
 
 
-@app.get("/api/b/{bucket}/file-metadata")
+@app.get("/api/buckets/{bucket}/file-metadata")
 def file_metadata(
     bucket: str,
     key: str,
@@ -3238,7 +3238,7 @@ def _read_avro_metadata(bucket: str, key: str, file_size: int):
     }
 
 
-@app.get("/api/b/{bucket}/preview-tail")
+@app.get("/api/buckets/{bucket}/preview-tail")
 def preview_tail(
     bucket: str,
     key: str,
@@ -3289,7 +3289,7 @@ def _preview_tail_inner(bucket, key, max_bytes):
 class DeleteRequest(BaseModel):
     keys: list[str]
 
-@app.delete("/api/b/{bucket}/objects")
+@app.delete("/api/buckets/{bucket}/objects")
 def delete_objects(bucket: str, req: DeleteRequest, user: dict = Depends(require_admin)):
     if not req.keys: raise HTTPException(400, "No keys")
     if len(req.keys) > 1000: raise HTTPException(400, "Max 1000 keys")
@@ -3317,7 +3317,7 @@ class DeleteFolderRequest(BaseModel):
     prefix: str
     purge_versions: bool = False
 
-@app.delete("/api/b/{bucket}/folder")
+@app.delete("/api/buckets/{bucket}/folder")
 def delete_folder(bucket: str, req: DeleteFolderRequest, user: dict = Depends(require_admin)):
     """Recursively delete all objects under a prefix (folder).
     If purge_versions=true, permanently removes ALL versions and delete markers."""
@@ -3423,7 +3423,7 @@ def _upload_multipart(bucket, key, file_obj, endpoint_id=None):
     return total_size
 
 
-@app.post("/api/b/{bucket}/upload")
+@app.post("/api/buckets/{bucket}/upload")
 @limiter.limit(UPLOAD_RATE_LIMIT)
 async def upload_files(bucket: str, request: Request, prefix: str = Form(""), files: list[UploadFile] = File(...)):
     user = get_current_user(request)
@@ -3490,7 +3490,7 @@ async def upload_files(bucket: str, request: Request, prefix: str = Form(""), fi
 class CreateFolderRequest(BaseModel):
     prefix: str
 
-@app.post("/api/b/{bucket}/create-folder")
+@app.post("/api/buckets/{bucket}/create-folder")
 def create_folder(bucket: str, req: CreateFolderRequest, user: dict = Depends(require_admin)):
     folder_key = req.prefix if req.prefix.endswith("/") else req.prefix + "/"
     s3.put_object(Bucket=bucket, Key=folder_key, Body=b"")
@@ -3510,7 +3510,7 @@ def create_folder(bucket: str, req: CreateFolderRequest, user: dict = Depends(re
 
 # ── API: S3 Management ──────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/object-info")
+@app.get("/api/buckets/{bucket}/object-info")
 def object_info(bucket: str, key: str, user: dict = Depends(get_current_user)):
     resp = s3.head_object(Bucket=bucket, Key=key)
     return {"key": key, "size": resp["ContentLength"], "content_type": resp.get("ContentType", ""),
@@ -3519,7 +3519,7 @@ def object_info(bucket: str, key: str, user: dict = Depends(get_current_user)):
             "storage_class": resp.get("StorageClass", "STANDARD")}
 
 
-@app.get("/api/b/{bucket}/object-versions")
+@app.get("/api/buckets/{bucket}/object-versions")
 def object_versions(bucket: str, key: str, user: dict = Depends(get_current_user)):
     resp = s3.list_object_versions(Bucket=bucket, Prefix=key, MaxKeys=200)
     versions = [{"version_id": v.get("VersionId"), "size": v["Size"], "last_modified": v["LastModified"].isoformat(),
@@ -3532,7 +3532,7 @@ def object_versions(bucket: str, key: str, user: dict = Depends(get_current_user
     return {"key": key, "versions": versions, "delete_markers": delete_markers}
 
 
-@app.get("/api/b/{bucket}/list-versions")
+@app.get("/api/buckets/{bucket}/list-versions")
 def list_versions(bucket: str, prefix: str = "", show: str = "all", user: dict = Depends(get_current_user)):
     """List versioned objects under a prefix using cached version scan data.
     Returns folders with version history (delete markers, non-current versions).
@@ -3604,7 +3604,7 @@ def list_versions(bucket: str, prefix: str = "", show: str = "all", user: dict =
     }
 
 
-@app.post("/api/b/{bucket}/scan-versions")
+@app.post("/api/buckets/{bucket}/scan-versions")
 def trigger_version_scan(bucket: str, user: dict = Depends(require_admin)):
     """Trigger a background version scan for the bucket."""
     with _version_scan_lock:
@@ -3621,7 +3621,7 @@ class PurgeVersionsRequest(BaseModel):
     prefix: str = ""
 
 
-@app.post("/api/b/{bucket}/purge-versions")
+@app.post("/api/buckets/{bucket}/purge-versions")
 def purge_versions(bucket: str, req: PurgeVersionsRequest, user: dict = Depends(require_admin)):
     """Permanently delete ALL versions and delete markers for the given keys or prefix."""
     log.info(f"Purge request: bucket={bucket}, keys={req.keys}, prefix={req.prefix!r}")
@@ -3705,7 +3705,7 @@ class RestoreVersionRequest(BaseModel):
     version_id: str
 
 
-@app.post("/api/b/{bucket}/version-restore")
+@app.post("/api/buckets/{bucket}/version-restore")
 def version_restore(bucket: str, req: RestoreVersionRequest, user: dict = Depends(require_admin)):
     """Restore an older version by copying it over itself, making it the latest."""
     copy_source = {"Bucket": bucket, "Key": req.key, "VersionId": req.version_id}
@@ -3720,7 +3720,7 @@ class DeleteVersionRequest(BaseModel):
     version_id: str
 
 
-@app.post("/api/b/{bucket}/version-delete")
+@app.post("/api/buckets/{bucket}/version-delete")
 def version_delete(bucket: str, req: DeleteVersionRequest, user: dict = Depends(require_admin)):
     """Delete a specific version of an object."""
     s3.delete_object(Bucket=bucket, Key=req.key, VersionId=req.version_id)
@@ -3729,7 +3729,7 @@ def version_delete(bucket: str, req: DeleteVersionRequest, user: dict = Depends(
     return {"deleted": True, "key": req.key, "version_id": req.version_id}
 
 
-@app.get("/api/b/{bucket}/version-presigned-url")
+@app.get("/api/buckets/{bucket}/version-presigned-url")
 def version_presigned_url(bucket: str, key: str, version_id: str, expires: int = 3600,
                           user: dict = Depends(get_current_user)):
     """Generate a presigned URL for downloading a specific version."""
@@ -3742,7 +3742,7 @@ def version_presigned_url(bucket: str, key: str, version_id: str, expires: int =
     return {"url": url, "expires_in": expires}
 
 
-@app.get("/api/b/{bucket}/presigned-url")
+@app.get("/api/buckets/{bucket}/presigned-url")
 def get_presigned_url(bucket: str, key: str, expires: int = 3600, user: dict = Depends(get_current_user)):
     expires = min(max(60, expires), 604800)  # clamp 1 min to 7 days
     url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
@@ -3751,20 +3751,20 @@ def get_presigned_url(bucket: str, key: str, expires: int = 3600, user: dict = D
 
 # ── Bucket Configuration ────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/versioning")
+@app.get("/api/buckets/{bucket}/versioning")
 def get_versioning(bucket: str, user: dict = Depends(get_current_user)):
     resp = s3.get_bucket_versioning(Bucket=bucket)
     return {"status": resp.get("Status", "Disabled"), "mfa_delete": resp.get("MFADelete", "Disabled")}
 
 
-@app.put("/api/b/{bucket}/versioning")
+@app.put("/api/buckets/{bucket}/versioning")
 def put_versioning(bucket: str, enabled: bool = True, user: dict = Depends(require_admin)):
     s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled" if enabled else "Suspended"})
     _audit("config_versioning", user["username"], bucket=bucket, details=f"enabled={bool(enabled)}")
     return {"status": "Enabled" if enabled else "Suspended"}
 
 
-@app.get("/api/b/{bucket}/lifecycle")
+@app.get("/api/buckets/{bucket}/lifecycle")
 def get_lifecycle(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
@@ -3782,7 +3782,7 @@ def get_lifecycle(bucket: str, user: dict = Depends(get_current_user)):
         raise
 
 
-@app.get("/api/b/{bucket}/cors")
+@app.get("/api/buckets/{bucket}/cors")
 def get_cors(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_bucket_cors(Bucket=bucket)
@@ -3803,7 +3803,7 @@ class LifecycleRule(BaseModel):
 class LifecycleRequest(BaseModel):
     rules: list[LifecycleRule]
 
-@app.put("/api/b/{bucket}/lifecycle")
+@app.put("/api/buckets/{bucket}/lifecycle")
 def put_lifecycle(bucket: str, req: LifecycleRequest, user: dict = Depends(require_admin)):
     rules = []
     for r in req.rules:
@@ -3827,7 +3827,7 @@ def put_lifecycle(bucket: str, req: LifecycleRequest, user: dict = Depends(requi
     return {"updated": True, "rule_count": len(rules)}
 
 
-@app.delete("/api/b/{bucket}/lifecycle")
+@app.delete("/api/buckets/{bucket}/lifecycle")
 def delete_lifecycle(bucket: str, user: dict = Depends(require_admin)):
     try:
         s3.delete_bucket_lifecycle(Bucket=bucket)
@@ -3841,14 +3841,14 @@ def delete_lifecycle(bucket: str, user: dict = Depends(require_admin)):
 class CorsRequest(BaseModel):
     cors_rules: list[dict]
 
-@app.put("/api/b/{bucket}/cors")
+@app.put("/api/buckets/{bucket}/cors")
 def put_cors(bucket: str, req: CorsRequest, user: dict = Depends(require_admin)):
     s3.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": req.cors_rules})
     _audit("config_cors", user["username"], bucket=bucket, details=f"rules={len(req.cors_rules)}")
     return {"updated": True}
 
 
-@app.delete("/api/b/{bucket}/cors")
+@app.delete("/api/buckets/{bucket}/cors")
 def delete_cors(bucket: str, user: dict = Depends(require_admin)):
     try:
         s3.delete_bucket_cors(Bucket=bucket)
@@ -3859,7 +3859,7 @@ def delete_cors(bucket: str, user: dict = Depends(require_admin)):
     return {"deleted": True}
 
 
-@app.get("/api/b/{bucket}/policy")
+@app.get("/api/buckets/{bucket}/policy")
 def get_bucket_policy(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_bucket_policy(Bucket=bucket)
@@ -3872,14 +3872,14 @@ def get_bucket_policy(bucket: str, user: dict = Depends(get_current_user)):
 class PolicyRequest(BaseModel):
     policy: dict
 
-@app.put("/api/b/{bucket}/policy")
+@app.put("/api/buckets/{bucket}/policy")
 def put_bucket_policy(bucket: str, req: PolicyRequest, user: dict = Depends(require_admin)):
     s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps(req.policy))
     _audit("config_policy", user["username"], bucket=bucket, details="updated")
     return {"updated": True}
 
 
-@app.delete("/api/b/{bucket}/policy")
+@app.delete("/api/buckets/{bucket}/policy")
 def delete_bucket_policy(bucket: str, user: dict = Depends(require_admin)):
     s3.delete_bucket_policy(Bucket=bucket)
     _audit("config_policy", user["username"], bucket=bucket, details="deleted")
@@ -3888,7 +3888,7 @@ def delete_bucket_policy(bucket: str, user: dict = Depends(require_admin)):
 
 # ── ACLs ─────────────────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/acl")
+@app.get("/api/buckets/{bucket}/acl")
 def get_bucket_acl(bucket: str, user: dict = Depends(get_current_user)):
     resp = s3.get_bucket_acl(Bucket=bucket)
     return {"owner": resp.get("Owner", {}), "grants": [
@@ -3897,7 +3897,7 @@ def get_bucket_acl(bucket: str, user: dict = Depends(get_current_user)):
     ]}
 
 
-@app.get("/api/b/{bucket}/object-acl")
+@app.get("/api/buckets/{bucket}/object-acl")
 def get_object_acl(bucket: str, key: str, user: dict = Depends(get_current_user)):
     resp = s3.get_object_acl(Bucket=bucket, Key=key)
     return {"owner": resp.get("Owner", {}), "grants": [
@@ -3911,7 +3911,7 @@ _CANNED_ACLS = {"private", "public-read", "public-read-write", "authenticated-re
 class AclRequest(BaseModel):
     acl: str
 
-@app.put("/api/b/{bucket}/acl")
+@app.put("/api/buckets/{bucket}/acl")
 def put_bucket_acl(bucket: str, req: AclRequest, user: dict = Depends(require_admin)):
     if req.acl not in _CANNED_ACLS:
         raise HTTPException(400, f"Invalid ACL. Allowed: {', '.join(sorted(_CANNED_ACLS))}")
@@ -3925,7 +3925,7 @@ def put_bucket_acl(bucket: str, req: AclRequest, user: dict = Depends(require_ad
         raise
 
 
-@app.put("/api/b/{bucket}/object-acl")
+@app.put("/api/buckets/{bucket}/object-acl")
 def put_object_acl(bucket: str, key: str, req: AclRequest, user: dict = Depends(require_admin)):
     if req.acl not in _CANNED_ACLS:
         raise HTTPException(400, f"Invalid ACL. Allowed: {', '.join(sorted(_CANNED_ACLS))}")
@@ -3941,7 +3941,7 @@ def put_object_acl(bucket: str, key: str, req: AclRequest, user: dict = Depends(
 
 # ── Tagging ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/tagging")
+@app.get("/api/buckets/{bucket}/tagging")
 def get_bucket_tagging(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_bucket_tagging(Bucket=bucket)
@@ -3954,14 +3954,14 @@ def get_bucket_tagging(bucket: str, user: dict = Depends(get_current_user)):
 class TagRequest(BaseModel):
     tags: dict[str, str]
 
-@app.put("/api/b/{bucket}/tagging")
+@app.put("/api/buckets/{bucket}/tagging")
 def put_bucket_tagging(bucket: str, req: TagRequest, user: dict = Depends(require_admin)):
     s3.put_bucket_tagging(Bucket=bucket, Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in req.tags.items()]})
     _audit("config_tagging", user["username"], bucket=bucket, details=f"tags={len(req.tags)}")
     return {"updated": True}
 
 
-@app.get("/api/b/{bucket}/object-tagging")
+@app.get("/api/buckets/{bucket}/object-tagging")
 def get_object_tagging(bucket: str, key: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_object_tagging(Bucket=bucket, Key=key)
@@ -3971,14 +3971,14 @@ def get_object_tagging(bucket: str, key: str, user: dict = Depends(get_current_u
         raise
 
 
-@app.put("/api/b/{bucket}/object-tagging")
+@app.put("/api/buckets/{bucket}/object-tagging")
 def put_object_tagging(bucket: str, key: str, req: TagRequest, user: dict = Depends(require_admin)):
     s3.put_object_tagging(Bucket=bucket, Key=key, Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in req.tags.items()]})
     _audit("config_object_tagging", user["username"], bucket=bucket, details=f"key={key}, tags={len(req.tags)}")
     return {"updated": True}
 
 
-@app.delete("/api/b/{bucket}/object-tagging")
+@app.delete("/api/buckets/{bucket}/object-tagging")
 def delete_object_tagging(bucket: str, key: str, user: dict = Depends(require_admin)):
     s3.delete_object_tagging(Bucket=bucket, Key=key)
     _audit("config_object_tagging", user["username"], bucket=bucket, details=f"key={key}, deleted")
@@ -3987,7 +3987,7 @@ def delete_object_tagging(bucket: str, key: str, user: dict = Depends(require_ad
 
 # ── Object Lock / Retention / Legal Hold ─────────────────────────────────────
 
-@app.get("/api/b/{bucket}/object-lock")
+@app.get("/api/buckets/{bucket}/object-lock")
 def get_object_lock_config(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_object_lock_configuration(Bucket=bucket)
@@ -4002,7 +4002,7 @@ def get_object_lock_config(bucket: str, user: dict = Depends(get_current_user)):
         raise
 
 
-@app.get("/api/b/{bucket}/object-retention")
+@app.get("/api/buckets/{bucket}/object-retention")
 def get_object_retention(bucket: str, key: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_object_retention(Bucket=bucket, Key=key)
@@ -4015,7 +4015,7 @@ def get_object_retention(bucket: str, key: str, user: dict = Depends(get_current
         raise
 
 
-@app.get("/api/b/{bucket}/object-legal-hold")
+@app.get("/api/buckets/{bucket}/object-legal-hold")
 def get_object_legal_hold(bucket: str, key: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_object_legal_hold(Bucket=bucket, Key=key)
@@ -4029,7 +4029,7 @@ def get_object_legal_hold(bucket: str, key: str, user: dict = Depends(get_curren
 
 # ── Multipart Uploads ────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/multipart-uploads")
+@app.get("/api/buckets/{bucket}/multipart-uploads")
 def list_multipart_uploads(bucket: str, user: dict = Depends(get_current_user)):
     resp = s3.list_multipart_uploads(Bucket=bucket)
     uploads = [{"key": u["Key"], "upload_id": u["UploadId"], "initiated": u["Initiated"].isoformat()}
@@ -4041,7 +4041,7 @@ class AbortUploadRequest(BaseModel):
     key: str
     upload_id: str
 
-@app.post("/api/b/{bucket}/abort-multipart")
+@app.post("/api/buckets/{bucket}/abort-multipart")
 def abort_multipart(bucket: str, req: AbortUploadRequest, user: dict = Depends(require_admin)):
     s3.abort_multipart_upload(Bucket=bucket, Key=req.key, UploadId=req.upload_id)
     _audit("abort_multipart", user["username"], bucket=bucket, details=f"key={req.key}")
@@ -4055,7 +4055,7 @@ class CopyRequest(BaseModel):
     dest_key: str
     dest_bucket: Optional[str] = None
 
-@app.post("/api/b/{bucket}/copy")
+@app.post("/api/buckets/{bucket}/copy")
 def copy_object(bucket: str, req: CopyRequest, request: Request, user: dict = Depends(require_admin)):
     dest_bucket = req.dest_bucket or bucket
     # Cross-bucket copy: check write permission on dest bucket
@@ -4089,7 +4089,7 @@ def copy_object(bucket: str, req: CopyRequest, request: Request, user: dict = De
     return {"copied": req.dest_key, "dest_bucket": dest_bucket}
 
 
-@app.post("/api/b/{bucket}/rename")
+@app.post("/api/buckets/{bucket}/rename")
 def rename_object(bucket: str, req: CopyRequest, user: dict = Depends(require_admin)):
     s3.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": req.source_key}, Key=req.dest_key)
     s3.delete_object(Bucket=bucket, Key=req.source_key)
@@ -4122,7 +4122,7 @@ def rename_object(bucket: str, req: CopyRequest, user: dict = Depends(require_ad
 
 # ── Bucket Website ──────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/website")
+@app.get("/api/buckets/{bucket}/website")
 def get_bucket_website(bucket: str, user: dict = Depends(get_current_user)):
     try:
         resp = s3.get_bucket_website(Bucket=bucket)
@@ -4139,14 +4139,14 @@ def get_bucket_website(bucket: str, user: dict = Depends(get_current_user)):
 
 # ── Bucket Location ──────────────────────────────────────────────────────────
 
-@app.get("/api/b/{bucket}/location")
+@app.get("/api/buckets/{bucket}/location")
 def get_bucket_location(bucket: str, user: dict = Depends(get_current_user)):
     resp = s3.get_bucket_location(Bucket=bucket)
     return {"location": resp.get("LocationConstraint", "us-east-1")}
 
 
 # ── Backward-compatible aliases (old single-bucket API) ─────────────────────
-# These redirect old /api/list to the new /api/b/{bucket}/list format
+# These redirect old /api/list to the new /api/buckets/{bucket}/list format
 # using the S3_BUCKET env var as default bucket
 
 _DEFAULT_BUCKET = os.environ.get("S3_BUCKET", "")
