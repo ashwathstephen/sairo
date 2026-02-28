@@ -1,0 +1,56 @@
+---
+title: Share Links
+description: Create password-protected, expiring share links for any object with download limits and tracking.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Share links let you give anyone access to a specific file without requiring a Sairo account or S3 credentials. Each link is a unique token that points to a public download page.
+
+## Creating a share link
+
+Click the info button ("i") on any object to open the detail modal, then switch to the **Share** tab. A form lets you configure the link before creation.
+
+### Options
+
+| Option              | Description                                         | Default   |
+| ------------------- | --------------------------------------------------- | --------- |
+| **Password**        | Optional password that recipients must enter         | None      |
+| **Download limit**  | Maximum number of times the link can be used         | Unlimited |
+| **Expiration**      | How long the link remains valid                      | 7 days    |
+
+The UI offers expiration options of 1 hour, 24 hours, 7 days, and 30 days.
+
+## Public share page
+
+Each share link resolves to a public page at:
+
+```
+https://sairo.example.com/share/{token}
+```
+
+This page does not require authentication. If the link is password-protected, the recipient is prompted to enter the password before the download begins.
+
+<Aside>
+  The share page shows the filename, bucket, and object path alongside a download button.
+</Aside>
+
+## Download tracking
+
+Every download through a share link is recorded. From the share link management view, you can see:
+
+- Total download count
+- Whether the download limit has been reached
+- Whether the link has expired
+
+## Managing share links
+
+Share links can be managed via the API. Admins can list all active links (`GET /api/share-links`) and revoke any link (`DELETE /api/share-links/{link_id}`). Available actions:
+
+- Copy the share URL
+- View download statistics
+- Revoke a link immediately (before its natural expiration)
+
+<Aside type="tip">
+  Revoking a share link is instant. Anyone who has the URL will see an "expired" message on their next attempt.
+</Aside>

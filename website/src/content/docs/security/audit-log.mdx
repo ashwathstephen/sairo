@@ -1,0 +1,90 @@
+---
+title: "Audit Log"
+description: "Tracking and reviewing user actions with Sairo's built-in audit log."
+---
+
+Sairo records a comprehensive audit log of user actions. The audit log is accessible to admins via the UI and API.
+
+## Tracked Actions
+
+**37 action types** are tracked, including:
+
+| Category | Actions |
+|---|---|
+| Authentication | login, change_password, enable_2fa, disable_2fa, reset_2fa |
+| Users | create_user, delete_user, update_user, set_permissions, remove_permission |
+| Buckets | create_bucket, delete_bucket |
+| Objects | upload, delete, copy, rename, create_folder |
+| Versions | purge_versions, restore_version, delete_version |
+| Config | config_versioning, config_lifecycle, config_cors, config_policy, config_acl, config_object_acl, config_tagging, config_object_tagging, abort_multipart |
+| Sharing | create_share_link, delete_share_link |
+| Tokens & Endpoints | create_token, delete_token, create_endpoint, update_endpoint, delete_endpoint |
+| Licensing | activate_license |
+
+Each log entry records:
+
+- **Timestamp** (UTC)
+- **Username** of the acting user
+- **Action** type
+- **Bucket** (if applicable)
+- **Details** (free-text field with action-specific metadata, may include object keys and other context)
+
+## Viewing the Audit Log
+
+Navigate to **Admin Panel > Audit Log** in the sidebar. The log displays entries in reverse chronological order with color-coded action badges for quick scanning.
+
+The UI auto-refreshes every **30 seconds** to show new entries.
+
+## Filtering
+
+Use the filter controls at the top of the audit log to narrow results:
+
+- **Action type** — select one or more action types from the dropdown
+- **Username** — filter to a specific user
+- **Bucket** — filter to actions on a specific bucket
+
+Filters can be combined. For example, filter to `delete` actions by user `jane` on bucket `backups`.
+
+## Pagination
+
+Results are paginated with a default limit of **50 entries**. The API uses `limit` and `offset` parameters. Use the pagination controls at the bottom of the UI to navigate through history.
+
+## API Access
+
+The audit log is available via the API for integration with external logging systems:
+
+```bash
+# Get the latest entries
+curl -H "Authorization: Bearer sairo_xxx" \
+  "https://your-sairo-instance/api/audit-log"
+
+# Filter by action and username
+curl -H "Authorization: Bearer sairo_xxx" \
+  "https://your-sairo-instance/api/audit-log?action=delete&username=jane"
+
+# Filter by bucket with pagination
+curl -H "Authorization: Bearer sairo_xxx" \
+  "https://your-sairo-instance/api/audit-log?bucket=backups&limit=100&offset=100"
+```
+
+The endpoint is admin-only. Viewer tokens receive `403 Forbidden`.
+
+### Response Format
+
+```json
+{
+  "entries": [
+    {
+      "id": 1234,
+      "timestamp": "2026-02-28T14:30:00Z",
+      "username": "jane",
+      "action": "delete",
+      "bucket": "backups",
+      "details": "old-backup.tar.gz"
+    }
+  ],
+  "total": 5678,
+  "limit": 50,
+  "offset": 0
+}
+```

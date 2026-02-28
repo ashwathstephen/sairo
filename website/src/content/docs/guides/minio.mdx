@@ -1,0 +1,90 @@
+---
+title: "MinIO"
+description: "Connecting Sairo to MinIO with path-style addressing and access key configuration."
+---
+
+MinIO is a popular self-hosted S3-compatible object storage server. Sairo connects to MinIO using the same S3 protocol with path-style addressing enabled.
+
+## Configuration
+
+```yaml
+environment:
+  S3_ENDPOINT: "http://minio:9000"
+  S3_ACCESS_KEY: "minioadmin"
+  S3_SECRET_KEY: "minioadmin"
+  S3_REGION: "us-east-1"
+  S3_PATH_STYLE: "true"
+```
+
+### Key Settings
+
+| Variable | Value | Notes |
+|---|---|---|
+| `S3_ENDPOINT` | `http://minio:9000` | The MinIO API port (not the Console port 9001) |
+| `S3_PATH_STYLE` | `true` | MinIO uses path-style addressing. This must be `true`. |
+| `S3_REGION` | `us-east-1` | MinIO defaults to `us-east-1`. Match your MinIO config if different. |
+
+## Docker Compose Example
+
+Run Sairo alongside MinIO in the same Docker Compose stack:
+
+```yaml
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    volumes:
+      - minio-data:/data
+
+  sairo:
+    image: stephenjr002/sairo:latest
+    ports:
+      - "8000:8000"
+    environment:
+      S3_ENDPOINT: "http://minio:9000"
+      S3_ACCESS_KEY: "minioadmin"
+      S3_SECRET_KEY: "minioadmin"
+      S3_REGION: "us-east-1"
+      S3_PATH_STYLE: "true"
+      ADMIN_PASS: "change-me"
+    volumes:
+      - sairo-data:/data
+    depends_on:
+      - minio
+
+volumes:
+  minio-data:
+  sairo-data:
+```
+
+Because both containers are on the same Docker network, Sairo reaches MinIO at `http://minio:9000` using the service name.
+
+## Creating Access Keys
+
+Instead of using the MinIO root credentials, create dedicated access keys for Sairo.
+
+### Via MinIO Console
+
+1. Open the MinIO Console at `http://your-minio-host:9001`
+2. Go to **Access Keys**
+3. Click **Create Access Key**
+4. Copy the Access Key and Secret Key into your Sairo configuration
+
+### Via mc CLI
+
+```bash
+mc alias set myminio http://your-minio-host:9000 minioadmin minioadmin
+mc admin user svcacct add myminio minioadmin --name sairo-service
+```
+
+## Using Sairo Alongside MinIO Console
+
+Sairo and the MinIO Console can run side by side. They access the same buckets and objects through the same MinIO server. Changes made in either UI are immediately visible in the other.
+
+MinIO Console runs on port **9001** by default, while the MinIO API runs on port **9000**. Sairo connects to the API port.

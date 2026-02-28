@@ -1,0 +1,60 @@
+---
+title: "Two-Factor Authentication"
+description: "Setting up and managing TOTP-based two-factor authentication in Sairo."
+---
+
+Sairo supports TOTP-based two-factor authentication (2FA) for an additional layer of security on user accounts.
+
+## How It Works
+
+2FA uses the Time-based One-Time Password (TOTP) standard (RFC 6238). After enabling 2FA, users must enter a 6-digit code from their authenticator app in addition to their password when logging in.
+
+## Compatible Apps
+
+Any TOTP-compatible authenticator works with Sairo, including:
+
+- Google Authenticator
+- Authy
+- 1Password
+- Bitwarden
+- Microsoft Authenticator
+- Raivo OTP
+
+## Setting Up 2FA
+
+1. Click your username in the sidebar and select **Security**
+2. Click **Enable Two-Factor Authentication**
+3. Scan the QR code with your authenticator app
+4. Enter the 6-digit code displayed in the app to confirm setup
+5. Save the **recovery codes** displayed on screen
+
+## Recovery Codes
+
+On setup, Sairo generates **10 one-time recovery codes**. Each code can be used exactly once in place of a TOTP code if you lose access to your authenticator app.
+
+Store recovery codes in a secure location (password manager, printed copy in a safe). Once all recovery codes are used, you must contact an admin to reset your 2FA.
+
+## Logging In with 2FA
+
+1. Enter your username and password as usual
+2. A second screen prompts for a 6-digit code
+3. Enter the code from your authenticator app or a recovery code
+4. You are logged in
+
+## Admin Reset
+
+If a user loses access to their authenticator app and all recovery codes, an admin can reset their 2FA from the Admin Panel:
+
+1. Open the Admin Panel
+2. Find the user and click their username
+3. Click **Reset 2FA**
+
+The user can then log in with just their password and optionally re-enable 2FA.
+
+## API Tokens and 2FA
+
+API tokens bypass 2FA by design. This allows automated workflows (CI/CD pipelines, scripts, integrations) to authenticate without a TOTP code. See [API Tokens](/security/api-tokens) for details.
+
+## 2FA with External Authentication
+
+When using OAuth or LDAP, 2FA still applies. After authenticating with the external provider, users with 2FA enabled are prompted for their TOTP code before gaining access.

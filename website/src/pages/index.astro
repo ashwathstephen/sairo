@@ -1,0 +1,673 @@
+---
+// Sairo — Landing Page (Titanium & Glass)
+import '../styles/custom.css';
+
+const bentoFeatures = [
+  {
+    title: '45+ Format File Preview',
+    desc: 'Inspect Parquet schemas, browse CSV tables, render PDFs, view images, and syntax-highlight 30+ code formats — all inline, without downloading.',
+    span: 'wide',
+    visual: 'preview',
+  },
+  {
+    title: 'Instant Directory Browsing',
+    desc: 'Background crawling means you never wait for a folder to load. The FastAPI backend streams data to the React UI, achieving sub-3ms listing speeds on production buckets.',
+    span: 'square',
+    visual: 'streaming',
+  },
+  {
+    title: '100% Local · Secure Sharing',
+    desc: 'Your keys never leave your infrastructure. Share any object via password-protected, expirable URLs — no third-party services involved.',
+    span: 'square',
+    visual: 'secure',
+  },
+  {
+    title: 'High-Throughput I/O',
+    desc: 'Handle massive assets without the browser freezing. Sairo sustains 114 MB/s upload throughput and handles 500+ concurrent requests per second.',
+    span: 'wide',
+    visual: 'keyboard',
+  },
+];
+
+const features = [
+  'Virtualized object browser',
+  'Single-digit ms search',
+  'Storage analytics dashboard',
+  'Version management',
+  '8-tab bucket settings',
+  'Password-protected share URLs',
+  'Multi-endpoint S3',
+  '37-action audit trail',
+  'RBAC with per-bucket perms',
+  '2FA / TOTP',
+  'OAuth & LDAP',
+  'API tokens',
+];
+---
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sairo — Self-hosted S3 Storage Browser</title>
+  <meta name="description" content="Browse, search, preview, and manage any S3-compatible object storage. Single Docker container. Zero dependencies." />
+  <meta property="og:title" content="Sairo" />
+  <meta property="og:description" content="Self-hosted S3-compatible object storage browser" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://sairo.dev" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script>
+    // Prevent browser scroll restoration and hash-based scrolling
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+    // Strip hash from URL without triggering navigation
+    if (window.location.hash) history.replaceState(null, '', window.location.pathname + window.location.search);
+    window.scrollTo(0, 0);
+  </script>
+</head>
+<body class="landing">
+
+  <!-- Floating Nav -->
+  <div class="nav-container">
+    <nav class="landing-nav">
+      <a href="/" class="landing-nav-brand">
+        <svg width="22" height="22" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/>
+          <path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/>
+          <path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/>
+          <line x1="12" y1="10" x2="12" y2="30"/>
+          <line x1="28" y1="10" x2="28" y2="30"/>
+        </svg>
+        Sairo
+      </a>
+      <button class="landing-hamburger" id="hamburger" aria-label="Toggle menu">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="landing-nav-center" id="nav-links">
+        <a href="#features" data-scroll>Features</a>
+        <a href="#telemetry" data-scroll>Benchmarks</a>
+        <a href="/getting-started/quickstart/">Documentation</a>
+      </div>
+      <div class="landing-nav-right">
+        <a href="https://github.com/AshwathStephen/sairo" class="nav-github" target="_blank" rel="noopener" aria-label="GitHub">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        </a>
+        <a href="/getting-started/quickstart/" class="landing-btn landing-btn-primary">Get Started</a>
+      </div>
+    </nav>
+  </div>
+
+  <!-- Hero -->
+  <section class="landing-hero">
+    <a href="https://github.com/AshwathStephen/sairo" class="hero-badge" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+      Sairo v2.0 &middot; 1,300+ obj/sec indexing
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+    </a>
+    <h1>Object storage,<br/><span class="hero-fade">beautifully engineered.</span></h1>
+    <p class="hero-desc">A lightning-fast, self-hosted web client for your S3-compatible endpoints. Stop wrestling with clunky cloud consoles and execute single-digit millisecond searches across hundreds of thousands of objects, right from your browser.</p>
+    <div class="hero-actions">
+      <a href="/getting-started/quickstart/" class="landing-btn landing-btn-titanium">
+        Deploy via Docker
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+      </a>
+      <a href="/getting-started/quickstart/" class="landing-btn landing-btn-glass">Read the Docs</a>
+    </div>
+
+    <!-- App Mockup with Glow -->
+    <div class="hero-mockup">
+      <div class="mockup-glow"></div>
+      <div class="mockup-window">
+        <div class="mockup-titlebar">
+          <div class="mockup-dots">
+            <span style="background:#ff5f57"></span>
+            <span style="background:#febc2e"></span>
+            <span style="background:#28c840"></span>
+          </div>
+          <span class="mockup-title">Sairo &mdash; localhost:8000</span>
+        </div>
+        <div class="mockup-content">
+          <div class="mockup-sidebar">
+            <div class="mockup-sidebar-item active">production-assets</div>
+            <div class="mockup-sidebar-item">data-warehouse</div>
+            <div class="mockup-sidebar-item">backups-2026</div>
+            <div class="mockup-sidebar-item">ml-training-sets</div>
+          </div>
+          <div class="mockup-main">
+            <div class="mockup-search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+              <span>user_avatar.png</span>
+              <kbd>/</kbd>
+            </div>
+            <div class="mockup-table">
+              <div class="mockup-row header">
+                <span>Name</span><span>Size</span><span>Modified</span>
+              </div>
+              <div class="mockup-row highlight">
+                <span>uploads/user_avatar.png</span><span>2.4 MB</span><span>2 hours ago</span>
+              </div>
+              <div class="mockup-row">
+                <span>assets/hero_avatar.png</span><span>1.1 MB</span><span>3 days ago</span>
+              </div>
+              <div class="mockup-row">
+                <span>cache/user_avatar_thumb.png</span><span>84 KB</span><span>1 week ago</span>
+              </div>
+            </div>
+            <div class="mockup-status">
+              <span class="mockup-status-dot"></span>
+              3 results in 2.4ms &middot; FTS5 index
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Compatibility Banner -->
+  <div class="compat-banner">
+    <span class="compat-label">Works with</span>
+    <div class="compat-logos">
+      <div class="compat-item">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M6.76 10.83L4 12.76V8.5l2.76 1.66zm0 2.34L4 15.5V11.24l2.76 1.66v.27zm3.24-2.34L7.24 12.5V8.24L10 10.07v.76zM10 13.17L7.24 15V10.83L10 12.5v.67zm3.24-2.34L10.48 12.5V8.24l2.76 1.66v.93zm0 2.34L10.48 15V10.83l2.76 1.66v.68zm3.24-2.34L13.72 12.5V8.24l2.76 1.66v.93zm0 2.34L13.72 15V10.83l2.76 1.66v.68zM20 10.83L17.24 12.5V8.24L20 9.9v.93zm0 2.34L17.24 15V10.83L20 12.5v.67z" fill="currentColor"/></svg>
+        <span>AWS S3</span>
+      </div>
+      <div class="compat-item">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M16.5 6l-4.5 2.25L7.5 6 12 3.75 16.5 6zM6 7.5v6l4.5 2.25V9.75L6 7.5zm12 0l-4.5 2.25v6L18 13.5v-6zM6 15l4.5 2.25L15 15l-4.5 2.25L6 15z" fill="currentColor"/></svg>
+        <span>Cloudflare R2</span>
+      </div>
+      <div class="compat-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/><path d="M12 6v12M6 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>MinIO</span>
+      </div>
+      <div class="compat-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Wasabi</span>
+      </div>
+      <div class="compat-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 12h8M12 8v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>Backblaze B2</span>
+      </div>
+      <div class="compat-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2m15.07-7.07l-2.83 2.83M9.76 14.24l-2.83 2.83m11.14 0l-2.83-2.83M9.76 9.76L6.93 6.93" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>Ceph</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bento Features -->
+  <section class="landing-section" id="features">
+    <h2>Machined for performance.</h2>
+    <p class="section-desc">Every feature built into a single, self-contained Docker image. No plugins. No extensions.</p>
+
+    <div class="bento-grid">
+      <!-- Card 1: File Preview (wide) -->
+      <div class="bento-card bento-wide">
+        <div class="bento-text">
+          <h3>45+ Format File Preview</h3>
+          <p>Inspect Parquet schemas, browse CSV tables, render PDFs, view images, and syntax-highlight 30+ code formats — all inline, without downloading.</p>
+          <a href="/features/file-preview/" class="bento-link">See all formats &rarr;</a>
+        </div>
+        <div class="bento-visual bento-visual-search">
+          <div class="preview-demo">
+            <div class="preview-header">
+              <span class="preview-badge">PARQUET</span>
+              <span class="preview-stats">1.2M rows &middot; 12 columns &middot; 142 MB &middot; SNAPPY</span>
+            </div>
+            <table class="preview-schema">
+              <thead>
+                <tr><th>#</th><th>Column</th><th>Type</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="preview-idx">1</td><td class="preview-col">event_timestamp</td><td class="preview-type">TIMESTAMP</td></tr>
+                <tr><td class="preview-idx">2</td><td class="preview-col">user_id</td><td class="preview-type">STRING</td></tr>
+                <tr><td class="preview-idx">3</td><td class="preview-col">action</td><td class="preview-type">STRING</td></tr>
+                <tr><td class="preview-idx">4</td><td class="preview-col">revenue</td><td class="preview-type">DOUBLE</td></tr>
+                <tr><td class="preview-idx">5</td><td class="preview-col">geo_country</td><td class="preview-type">STRING</td></tr>
+              </tbody>
+            </table>
+            <div class="preview-formats">
+              <span>.parquet</span><span>.csv</span><span>.json</span><span>.pdf</span><span>.py</span><span>.sql</span><span>+40</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: Streaming (square) -->
+      <div class="bento-card bento-square">
+        <h3>Instant Directory Browsing</h3>
+        <p>Background crawling means you never wait for a folder to load. The FastAPI backend streams data to the React UI, achieving sub-3ms listing speeds on production buckets.</p>
+        <a href="/features/object-browser/" class="bento-link">How it works &rarr;</a>
+        <div class="bento-visual bento-visual-streaming">
+          <div class="stream-metrics">
+            <div class="stream-metric">
+              <span class="stream-metric-value">134,707</span>
+              <span class="stream-metric-label">Objects Indexed</span>
+            </div>
+            <div class="stream-metric">
+              <span class="stream-metric-value">1,300+/s</span>
+              <span class="stream-metric-label">Index Speed</span>
+            </div>
+          </div>
+          <div class="stream-bar">
+            <div class="stream-fill"></div>
+          </div>
+          <span class="stream-label">4 threads &middot; WAL-mode SQLite</span>
+        </div>
+      </div>
+
+      <!-- Card 3: Security + Sharing (square) -->
+      <div class="bento-card bento-square">
+        <h3>100% Local &middot; Secure Sharing</h3>
+        <p>Your keys never leave your infrastructure. Share any object via password-protected, expirable URLs — no third-party services involved.</p>
+        <a href="/security/authentication/" class="bento-link">Security docs &rarr;</a>
+        <div class="bento-visual bento-visual-secure">
+          <div class="share-link-demo">
+            <div class="share-link-url">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              <span>sairo.local:8000/s/a8f3c2</span>
+            </div>
+            <div class="share-link-meta">
+              <span class="share-link-lock">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                Password protected
+              </span>
+              <span class="share-link-expiry">Expires in 24h</span>
+            </div>
+          </div>
+          <div class="secure-features">
+            <span class="secure-tag">RBAC</span>
+            <span class="secure-tag">2FA/TOTP</span>
+            <span class="secure-tag">OAuth</span>
+            <span class="secure-tag">LDAP</span>
+            <span class="secure-tag">Encrypted at Rest</span>
+            <span class="secure-tag">Audit Log</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 4: Throughput (wide) -->
+      <div class="bento-card bento-wide">
+        <div class="bento-text">
+          <h3>High-Throughput I/O</h3>
+          <p>Handle massive assets without the browser freezing. Sairo sustains <strong>114 MB/s</strong> upload throughput and handles <strong>528 requests/second</strong> under concurrent load.</p>
+          <a href="/features/upload-download/" class="bento-link">Upload docs &rarr;</a>
+        </div>
+        <div class="bento-visual bento-visual-keyboard">
+          <div class="upload-manager">
+            <div class="upload-header">
+              <span class="upload-header-title">Uploads</span>
+              <span class="upload-header-count">3 of 5 complete</span>
+            </div>
+            <div class="upload-list">
+              <div class="upload-item upload-active">
+                <div class="upload-item-top">
+                  <span class="upload-item-name">production-export-2026.csv</span>
+                  <span class="upload-item-size">50 MB</span>
+                </div>
+                <div class="upload-item-bottom">
+                  <div class="upload-bar-track">
+                    <div class="upload-bar-fill" style="width: 68%"></div>
+                  </div>
+                  <span class="upload-item-meta">68% &middot; <strong>114 MB/s</strong></span>
+                </div>
+              </div>
+              <div class="upload-item upload-active">
+                <div class="upload-item-top">
+                  <span class="upload-item-name">ml-dataset-v3.parquet</span>
+                  <span class="upload-item-size">10 MB</span>
+                </div>
+                <div class="upload-item-bottom">
+                  <div class="upload-bar-track">
+                    <div class="upload-bar-fill" style="width: 34%"></div>
+                  </div>
+                  <span class="upload-item-meta">34% &middot; <strong>76 MB/s</strong></span>
+                </div>
+              </div>
+              <div class="upload-item upload-done">
+                <div class="upload-item-top">
+                  <span class="upload-item-name">db-backup-jan.sql.gz</span>
+                  <span class="upload-item-done-badge">&#10003; 436ms</span>
+                </div>
+              </div>
+              <div class="upload-item upload-done">
+                <div class="upload-item-top">
+                  <span class="upload-item-name">config.yaml</span>
+                  <span class="upload-item-done-badge">&#10003; 45ms</span>
+                </div>
+              </div>
+              <div class="upload-item upload-done">
+                <div class="upload-item-top">
+                  <span class="upload-item-name">model-weights.bin</span>
+                  <span class="upload-item-done-badge">&#10003; 131ms</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Additional features list -->
+    <div class="feature-pills">
+      {features.map(f => (
+        <span class="feature-pill">{f}</span>
+      ))}
+    </div>
+  </section>
+
+  <!-- Performance -->
+  <section class="landing-section" id="performance">
+    <h2>Built for speed.</h2>
+    <p class="section-desc">Sairo indexes every object key with SQLite FTS5. No pagination. No loading spinners. Results in milliseconds.</p>
+    <div class="benchmark">
+      <div class="benchmark-header">
+        <span class="benchmark-label">Search across 134,707 objects (38 TB production bucket)</span>
+      </div>
+      <div class="benchmark-bars">
+        <div class="benchmark-row">
+          <span class="benchmark-name">AWS Console</span>
+          <div class="benchmark-track">
+            <div class="benchmark-fill benchmark-slow" style="width: 100%"></div>
+          </div>
+          <span class="benchmark-time benchmark-time-slow">~14s</span>
+        </div>
+        <div class="benchmark-row">
+          <span class="benchmark-name">Sairo</span>
+          <div class="benchmark-track">
+            <div class="benchmark-fill benchmark-fast" style="width: 0.5%"></div>
+          </div>
+          <span class="benchmark-time benchmark-time-fast">2.4ms</span>
+        </div>
+      </div>
+      <p class="benchmark-note">Paginated prefix listing vs. pre-built FTS5 full-text index &middot; <a href="https://github.com/AshwathStephen/sairo/blob/main/benchmark/results/LATEST-RESULTS.md" style="color: var(--text-muted); text-decoration: underline;">Full benchmark results</a></p>
+    </div>
+    <div class="perf-stats">
+      <div class="perf-stat">
+        <span class="perf-stat-value">2.4ms</span>
+        <span class="perf-stat-label">Search p50</span>
+      </div>
+      <div class="perf-stat">
+        <span class="perf-stat-value">528</span>
+        <span class="perf-stat-label">Req/s</span>
+      </div>
+      <div class="perf-stat">
+        <span class="perf-stat-value">114 MB/s</span>
+        <span class="perf-stat-label">Upload</span>
+      </div>
+      <div class="perf-stat">
+        <span class="perf-stat-value">sub-5ms</span>
+        <span class="perf-stat-label">API p50</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Telemetry Dashboard -->
+  <section class="landing-section" id="telemetry">
+    <h2>Validated performance.</h2>
+    <p class="section-desc">Benchmarked via Docker on Apple Silicon. Production deployments on NVMe Linux hardware yield even higher throughput.</p>
+    <div class="telemetry-grid">
+      <div class="telemetry-card">
+        <h4>Search Latency</h4>
+        <p class="telemetry-subtitle">FTS5 Trigram &middot; 134,707 objects &middot; 38 TB</p>
+        <table class="telemetry-table">
+          <thead>
+            <tr><th>Query</th><th>p50</th><th>p95</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>parquet</code></td><td class="telemetry-accent">2.3ms</td><td>4.1ms</td></tr>
+            <tr><td><code>adrequest</code></td><td class="telemetry-accent">2.4ms</td><td>16.2ms</td></tr>
+            <tr><td><code>flatevents</code></td><td class="telemetry-accent">2.5ms</td><td>3.4ms</td></tr>
+            <tr><td><code>metadata</code></td><td class="telemetry-accent">2.4ms</td><td>4.3ms</td></tr>
+            <tr><td><code>2026</code></td><td class="telemetry-accent">2.2ms</td><td>22.0ms</td></tr>
+          </tbody>
+        </table>
+        <p class="telemetry-card-note">Fastest observed: <strong>1.7ms</strong></p>
+      </div>
+      <div class="telemetry-card">
+        <h4>API Response Times</h4>
+        <p class="telemetry-subtitle">Single Uvicorn worker &middot; Docker container</p>
+        <table class="telemetry-table">
+          <thead>
+            <tr><th>Endpoint</th><th>p50</th><th>p95</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>/healthz</td><td class="telemetry-accent">2.1ms</td><td>3.6ms</td></tr>
+            <tr><td>/api/buckets</td><td class="telemetry-accent">4.3ms</td><td>5.8ms</td></tr>
+            <tr><td>/api/auth/me</td><td class="telemetry-accent">2.6ms</td><td>5.3ms</td></tr>
+            <tr><td>Object listing</td><td class="telemetry-accent">2.2ms</td><td>5.1ms</td></tr>
+            <tr><td>Presigned URL</td><td class="telemetry-accent">3.1ms</td><td>5.6ms</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="telemetry-card">
+        <h4>Throughput</h4>
+        <p class="telemetry-subtitle">Upload + concurrent load benchmarks</p>
+        <table class="telemetry-table">
+          <thead>
+            <tr><th>Metric</th><th>Result</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr><td>50 MB upload</td><td class="telemetry-accent">436ms</td><td>114 MB/s</td></tr>
+            <tr><td>10 MB upload</td><td class="telemetry-accent">131ms</td><td>76 MB/s</td></tr>
+            <tr><td>5 concurrent</td><td class="telemetry-accent">236</td><td>req/s</td></tr>
+            <tr><td>10 concurrent</td><td class="telemetry-accent">333</td><td>req/s</td></tr>
+            <tr><td>25 concurrent</td><td class="telemetry-accent">528</td><td>req/s</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="telemetry-footnote">
+      Full methodology and raw data: <a href="https://github.com/AshwathStephen/sairo/blob/main/benchmark/results/LATEST-RESULTS.md" target="_blank" rel="noopener">benchmark/results/LATEST-RESULTS.md</a>
+    </p>
+  </section>
+
+  <!-- Architecture -->
+  <section class="landing-section" id="architecture">
+    <h2>Engineered for scale and security.</h2>
+    <p class="section-desc">No microservices. No message queues. No external databases.</p>
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-num">01</div>
+        <h3>Single Container</h3>
+        <p>FastAPI backend serves the React SPA as static files. No reverse proxy needed. Just <code>docker run</code> and go.</p>
+        <a href="/installation/docker/" class="arch-link">Docker guide &rarr;</a>
+      </div>
+      <div class="arch-card">
+        <div class="arch-num">02</div>
+        <h3>SQLite FTS5 Index</h3>
+        <p>Every bucket gets a WAL-mode SQLite database. Object listings are instant, even at 134K+ objects per bucket.</p>
+        <a href="/features/search/" class="arch-link">Search docs &rarr;</a>
+      </div>
+      <div class="arch-card">
+        <div class="arch-num">03</div>
+        <h3>Prefix-Parallel Crawling</h3>
+        <p>Background crawler indexes your storage using 4 threads per bucket. Configurable <code>RECRAWL_INTERVAL</code> keeps your index synced.</p>
+        <a href="/installation/configuration/" class="arch-link">All config vars &rarr;</a>
+      </div>
+      <div class="arch-card">
+        <div class="arch-num">04</div>
+        <h3>Enterprise Auth</h3>
+        <p>Secure JWT sessions with configurable durations, LDAP integration, OAuth providers, and TOTP two-factor authentication.</p>
+        <a href="/security/oauth-ldap/" class="arch-link">OAuth & LDAP &rarr;</a>
+      </div>
+      <div class="arch-card">
+        <div class="arch-num">05</div>
+        <h3>Rate Limiting</h3>
+        <p>Built-in configurable API rate limiting protects your endpoints. Global throttle with per-route overrides.</p>
+        <a href="/installation/configuration/" class="arch-link">Configure limits &rarr;</a>
+      </div>
+      <div class="arch-card">
+        <div class="arch-num">06</div>
+        <h3>Rigorous Testing</h3>
+        <p>Validated via <code>pytest</code> and <code>npm test</code> before every release. 25 E2E spec files covering every feature.</p>
+        <a href="https://github.com/AshwathStephen/sairo" class="arch-link" target="_blank" rel="noopener">View source &rarr;</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section class="landing-section" id="install">
+    <h2>Up and running in 30 seconds.</h2>
+    <p class="section-desc">One command. One container. Every S3 provider.</p>
+    <div class="install-block">
+      <div class="install-tabs" role="tablist">
+        <button class="install-tab" data-active="true" data-tab="aws" role="tab">AWS S3</button>
+        <button class="install-tab" data-tab="minio" role="tab">MinIO</button>
+        <button class="install-tab" data-tab="r2" role="tab">Cloudflare R2</button>
+        <button class="install-tab" data-tab="wasabi" role="tab">Wasabi</button>
+      </div>
+      <div class="install-panel" data-active="true" data-panel="aws">
+        <button class="install-copy" data-copy="aws">Copy</button>
+        <pre><code set:html={`docker run -d --name sairo -p 8000:8000 \\
+  -e S3_ENDPOINT=<span class="t-string">https://s3.us-east-1.amazonaws.com</span> \\
+  -e S3_ACCESS_KEY=<span class="t-string">AKIA...</span> \\
+  -e S3_SECRET_KEY=<span class="t-string">wJal...</span> \\
+  -e ADMIN_PASS=<span class="t-string">choose-a-strong-password</span> \\
+  -v sairo-data:/data \\
+  stephenjr002/sairo:latest`} /></pre>
+      </div>
+      <div class="install-panel" data-panel="minio">
+        <button class="install-copy" data-copy="minio">Copy</button>
+        <pre><code set:html={`docker run -d --name sairo -p 8000:8000 \\
+  -e S3_ENDPOINT=<span class="t-string">http://minio:9000</span> \\
+  -e S3_ACCESS_KEY=<span class="t-string">minioadmin</span> \\
+  -e S3_SECRET_KEY=<span class="t-string">minioadmin</span> \\
+  -e S3_PATH_STYLE=<span class="t-string">true</span> \\
+  -e ADMIN_PASS=<span class="t-string">choose-a-strong-password</span> \\
+  -v sairo-data:/data \\
+  stephenjr002/sairo:latest`} /></pre>
+      </div>
+      <div class="install-panel" data-panel="r2">
+        <button class="install-copy" data-copy="r2">Copy</button>
+        <pre><code set:html={`docker run -d --name sairo -p 8000:8000 \\
+  -e S3_ENDPOINT=<span class="t-string">https://&lt;account-id&gt;.r2.cloudflarestorage.com</span> \\
+  -e S3_ACCESS_KEY=<span class="t-string">your-r2-access-key</span> \\
+  -e S3_SECRET_KEY=<span class="t-string">your-r2-secret-key</span> \\
+  -e S3_PATH_STYLE=<span class="t-string">true</span> \\
+  -e ADMIN_PASS=<span class="t-string">choose-a-strong-password</span> \\
+  -v sairo-data:/data \\
+  stephenjr002/sairo:latest`} /></pre>
+      </div>
+      <div class="install-panel" data-panel="wasabi">
+        <button class="install-copy" data-copy="wasabi">Copy</button>
+        <pre><code set:html={`docker run -d --name sairo -p 8000:8000 \\
+  -e S3_ENDPOINT=<span class="t-string">https://s3.us-east-1.wasabisys.com</span> \\
+  -e S3_ACCESS_KEY=<span class="t-string">your-wasabi-key</span> \\
+  -e S3_SECRET_KEY=<span class="t-string">your-wasabi-secret</span> \\
+  -e ADMIN_PASS=<span class="t-string">choose-a-strong-password</span> \\
+  -v sairo-data:/data \\
+  stephenjr002/sairo:latest`} /></pre>
+      </div>
+    </div>
+    <p class="install-note">
+      Then open <code>http://localhost:8000</code> and log in. That's it.
+    </p>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="landing-cta">
+    <h2>Ready to upgrade your workflow?</h2>
+    <p>Deploy the container and connect your first bucket today.</p>
+    <div class="cta-actions">
+      <a href="https://github.com/AshwathStephen/sairo" class="landing-btn landing-btn-titanium landing-btn-large" target="_blank" rel="noopener">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        View on GitHub
+      </a>
+      <a href="/getting-started/quickstart/" class="landing-btn landing-btn-glass landing-btn-large">
+        Read the Docs
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+      </a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="landing-footer">
+    <div class="footer-links">
+      <a href="/getting-started/quickstart/">Quickstart</a>
+      <a href="/security/authentication/">Security</a>
+      <a href="/installation/configuration/">Configuration</a>
+      <a href="https://github.com/AshwathStephen/sairo" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/AshwathStephen/sairo/releases" target="_blank" rel="noopener">Releases</a>
+    </div>
+    <p>&copy; 2026 Sairo. Engineered by Ashwath Stephen.</p>
+  </footer>
+
+  <script is:inline>
+    // Force scroll to top after DOM paint (catches Vite HMR scroll restore)
+    requestAnimationFrame(function() { window.scrollTo(0, 0); });
+
+    // Smooth-scroll nav links without persisting hash in URL
+    document.querySelectorAll('a[data-scroll]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const id = link.getAttribute('href').slice(1);
+        const target = document.getElementById(id);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          // Close mobile menu if open
+          document.getElementById('nav-links')?.classList.remove('nav-open');
+          document.getElementById('hamburger')?.classList.remove('hamburger-open');
+        }
+      });
+    });
+
+    // Mobile hamburger
+    document.getElementById('hamburger')?.addEventListener('click', () => {
+      document.getElementById('nav-links')?.classList.toggle('nav-open');
+      document.getElementById('hamburger')?.classList.toggle('hamburger-open');
+    });
+
+    // Provider tabs
+    document.querySelectorAll('.install-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.tab;
+        document.querySelectorAll('.install-tab').forEach(t => t.dataset.active = 'false');
+        document.querySelectorAll('.install-panel').forEach(p => p.dataset.active = 'false');
+        tab.dataset.active = 'true';
+        document.querySelector(`[data-panel="${target}"]`).dataset.active = 'true';
+      });
+    });
+
+    // Copy buttons
+    document.querySelectorAll('.install-copy').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.closest('.install-panel');
+        const code = panel.querySelector('code').textContent;
+        navigator.clipboard.writeText(code).then(() => {
+          btn.textContent = 'Copied!';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+        });
+      });
+    });
+
+    // Animate benchmark bars on scroll
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('animate');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.3 });
+
+    document.querySelectorAll('.benchmark').forEach(el => observer.observe(el));
+
+    // Animate streaming bar
+    const streamObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('animate');
+          streamObserver.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.5 });
+
+    document.querySelectorAll('.bento-visual-streaming').forEach(el => streamObserver.observe(el));
+  </script>
+
+</body>
+</html>

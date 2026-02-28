@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+frontend/dist/
+website/dist/
+website/.astro/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# SQLite databases (runtime data)
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.local
+.env.production
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+docker-compose.override.yml
+
+# Test artifacts
+/tmp/s3test_*
+/tmp/s3idx_*
+cookies.txt

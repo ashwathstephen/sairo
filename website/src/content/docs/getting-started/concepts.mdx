@@ -1,0 +1,154 @@
+---
+title: Concepts
+description: Understand Sairo's architecture, indexing model, crawl lifecycle, and authentication system.
+---
+
+import { Aside, Card, CardGrid, FileTree, Steps, Tabs, TabItem } from "@astrojs/starlight/components";
+
+This page explains the core ideas behind Sairo so you can operate it effectively and troubleshoot when needed.
+
+## Architecture overview
+
+Sairo is a single container that sits between your browser and any S3-compatible storage backend. There are no external databases, no message queues, and no additional services to manage.
+
+<img src="/assets/architecture.svg" alt="Sairo architecture diagram showing Client Layer, Sairo Container, Persistence Layer, and External Storage Layer" style="width:100%;max-width:900px;margin:1.5rem auto;display:block;border-radius:8px;" />
+
+<CardGrid>
+  <Card title="Frontend" icon="laptop">
+    A React 18 single-page application served as static files by the same container. All UI assets are bundled at build time.
+  </Card>
+  <Card title="Backend" icon="setting">
+    A FastAPI application that handles authentication, serves the API, manages the SQLite index, and proxies S3 operations.
+  </Card>
+  <Card title="Storage" icon="globe">
+    Any S3-compatible endpoint (AWS S3, MinIO, Ceph, R2, B2, etc.) accessed via boto3 with Signature Version 4 authentication.
+  </Card>
+  <Card title="Index" icon="magnifying-glass">
+    Per-bucket SQLite databases with FTS5 full-text search. WAL mode enables concurrent reads during indexing.
+  </Card>
+</CardGrid>
+
+## SQLite index
+
+Sairo maintains a lightweight local index of every object in your S3 buckets so that browsing and searching are instant, even across millions of objects.
+
+### Per-bucket databases
+
+Each bucket gets its own SQLite database file in the `/data` directory inside the container (configurable via `DB_DIR`):
+
+<FileTree>
+- /data/
+  - media.db — Index for the "media" bucket
+  - media.db-wal — Write-ahead log
+  - backups.db — Index for the "backups" bucket
+  - backups.db-wal
+  - logs.db — Index for the "logs" bucket
+  - logs.db-wal
+</FileTree>
+
+This isolation means a large or slow bucket does not affect the responsiveness of others.
+
+### WAL mode
+
+All databases use SQLite's **Write-Ahead Logging (WAL)** mode. WAL allows concurrent reads while the crawler writes new entries, so the UI stays responsive during indexing. This is critical — without WAL, browsing would block during recrawl cycles.
+
+### Full-text search (FTS5)
+
+Each database includes an **FTS5 virtual table** that indexes object keys. This is what powers the <kbd>/</kbd> search feature in the UI:
+
+| What's indexed | Example match |
+|---|---|
+| Object key segments | `invoices/2024/march/report.pdf` matches `march report` |
+| File extensions | `.parquet` matches all Parquet files |
+| Prefix paths | `backups/daily/` matches all daily backups |
+
+Results return in **milliseconds**, even across buckets with 100K+ objects.
+
+## Crawl lifecycle
+
+Sairo's background crawler keeps the local index in sync with your S3 storage.
+
+<Steps>
+
+1. **Startup crawl**
+
+   When the container starts, Sairo immediately begins a full crawl of every accessible bucket. It uses `ListObjectsV2` to enumerate all objects and inserts their metadata into the corresponding SQLite databases.
+
+2. **Parallel indexing**
+
+   The crawler processes **4 prefix threads per bucket** simultaneously. For buckets with deep prefix hierarchies, this dramatically reduces indexing time compared to a single-threaded approach.
+
+3. **Metadata stored**
+
+   For each object, the index stores:
+   - Object key (full path)
+   - Size in bytes
+   - Last modified timestamp
+   - ETag
+
+4. **Auto-recrawl loop**
+
+   After the initial crawl completes, Sairo waits `RECRAWL_INTERVAL` seconds (default: **120**) and then starts another crawl. This loop repeats indefinitely, keeping the index reasonably fresh.
+
+</Steps>
+
+<Aside type="tip" title="Tuning the recrawl interval">
+  The recrawl interval is a tradeoff between index freshness and S3 API costs. For buckets with millions of objects, consider increasing `RECRAWL_INTERVAL` to reduce `ListObjectsV2` calls. For rapidly changing buckets, decrease it. See [Configuration](/installation/configuration/).
+</Aside>
+
+## Authentication model
+
+Sairo uses a simple but secure authentication system based on JSON Web Tokens.
+
+### How it works
+
+<Steps>
+
+1. **Login** — User submits credentials (local, LDAP, or OAuth). The server validates them and issues a signed JWT.
+
+2. **Cookie storage** — The JWT is stored in an **httpOnly, Secure cookie**. httpOnly prevents XSS token theft. The Secure flag ensures transmission only over HTTPS.
+
+3. **Request auth** — Every subsequent API request includes the cookie automatically. The server verifies the JWT signature and checks expiration.
+
+4. **Session expiry** — Tokens expire after `SESSION_HOURS` hours (default: **24**). The user must re-authenticate.
+
+</Steps>
+
+<Aside type="caution" title="Plain HTTP deployments">
+  If you run Sairo over plain HTTP (local dev, or behind a TLS-terminating proxy), set `SECURE_COOKIE=false`. Otherwise the browser refuses to send the cookie and every request appears unauthenticated.
+</Aside>
+
+### Roles & permissions
+
+Sairo supports two roles with granular bucket-level permissions:
+
+<Tabs>
+  <TabItem label="Admin">
+    - Full access to **all** buckets
+    - User management (create, edit, delete accounts)
+    - System settings and configuration
+    - Audit log access
+    - Can grant/revoke bucket permissions for viewers
+  </TabItem>
+  <TabItem label="Viewer">
+    - Access **only** to admin-assigned buckets
+    - Read-only by default (browse, search, download, preview)
+    - Write access can be granted per bucket by an admin
+    - Cannot upload, delete, or modify objects unless granted write
+    - Cannot manage users, system settings, or view audit logs
+  </TabItem>
+</Tabs>
+
+### Authentication providers
+
+Sairo supports multiple authentication backends. They can be used independently or combined:
+
+| Provider | Use case | Config |
+|---|---|---|
+| **Local** | Default admin account, standalone users | `ADMIN_USER`, `ADMIN_PASS` |
+| **LDAP** | Corporate directory integration | `LDAP_*` env vars |
+| **Google OAuth** | Google Workspace SSO | `OAUTH_GOOGLE_*` env vars |
+| **GitHub OAuth** | GitHub organization SSO | `OAUTH_GITHUB_*` env vars |
+| **API Tokens** | CI/CD pipelines, automation | Generated in the UI |
+
+See [Authentication](/security/authentication/) and [OAuth & LDAP](/security/oauth-ldap/) for setup guides.

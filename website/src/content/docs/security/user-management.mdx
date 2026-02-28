@@ -1,0 +1,66 @@
+---
+title: "User Management"
+description: "Managing users, roles, and per-bucket permissions in Sairo."
+---
+
+Sairo has a built-in user system with two roles and granular per-bucket permissions for viewers.
+
+## Roles
+
+| Role | Capabilities |
+|---|---|
+| **Admin** | Full access to all buckets, user management, audit log, settings, endpoints |
+| **Viewer** | Access controlled per-bucket by admin-assigned permissions |
+
+There is no concept of custom roles. All users are either admin or viewer.
+
+## Default Admin Account
+
+On first startup, Sairo creates an admin account using the `ADMIN_USER` and `ADMIN_PASS` environment variables:
+
+```yaml
+environment:
+  ADMIN_USER: "admin"
+  ADMIN_PASS: "change-me-immediately"
+```
+
+Change the default password after first login.
+
+## Creating Users
+
+Admins create and delete users from the **Admin Panel**, accessible via the sidebar.
+
+To create a user:
+
+1. Open the Admin Panel
+2. Click **Add User**
+3. Set a username, password (minimum **8 characters**), and role (admin or viewer)
+4. Click **Create**
+
+## Per-Bucket Permissions
+
+Viewers have no access to any bucket by default. An admin must explicitly grant access per bucket. Each bucket can be assigned one of three permission levels for each viewer:
+
+| Permission | What the viewer can do |
+|---|---|
+| **No Access** | Bucket is hidden from the viewer entirely |
+| **Read** | Browse, search, download, and view objects |
+| **Write** | Everything in Read plus upload, delete, move, copy, and rename objects |
+
+## Managing Permissions
+
+From the Admin Panel, click on a viewer's username to open their permission editor. You will see a list of all buckets with a dropdown for each.
+
+For bulk changes, select multiple buckets and apply a permission level in one action.
+
+## Password Changes
+
+All users (admin and viewer) can change their own password from the user menu. The password change requires entering the current password for verification.
+
+## Deleting Users
+
+Admins can delete any user except themselves from the Admin Panel. Deleting a user:
+
+- Immediately invalidates their active sessions
+- Removes all their per-bucket permissions
+- Does **not** delete any objects they uploaded

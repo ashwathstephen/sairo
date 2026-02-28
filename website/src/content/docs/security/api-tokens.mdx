@@ -1,0 +1,69 @@
+---
+title: "API Tokens"
+description: "Creating and using long-lived API tokens for programmatic access to Sairo."
+---
+
+API tokens provide long-lived authentication for scripts, CI/CD pipelines, and other automated workflows that interact with the Sairo API.
+
+## Token Format
+
+Tokens follow the format:
+
+```
+sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+A `sairo_` prefix followed by 43 URL-safe base64 characters (generated from 32 random bytes). The prefix makes it easy to identify Sairo tokens in secrets managers and log scanning tools.
+
+## Creating a Token
+
+1. Click your username in the sidebar and select **API Tokens**
+2. Click **Create Token**
+3. Give the token a descriptive name (e.g., "CI pipeline", "backup script")
+4. Copy the token immediately — it is shown only once
+
+## Using a Token
+
+Include the token in the `Authorization` header of your HTTP requests:
+
+```bash
+curl -H "Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  https://your-sairo-instance/api/buckets
+```
+
+```python
+import requests
+
+headers = {"Authorization": "Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+response = requests.get("https://your-sairo-instance/api/buckets", headers=headers)
+```
+
+## Token Roles
+
+Only **admins** can create API tokens. When creating a token, you choose the role:
+
+- **Admin** tokens have full access to all endpoints
+- **Viewer** tokens are limited to per-bucket permissions assigned to the token's associated user
+
+Token management (create, list, delete) is restricted to admin accounts.
+
+## 2FA Bypass
+
+API tokens bypass two-factor authentication by design. This is intentional — automated systems cannot provide TOTP codes. The token itself serves as the authentication factor.
+
+## Last-Used Tracking
+
+Sairo tracks the **last-used timestamp** for each token. This is visible in the API Tokens page and helps identify stale tokens that can be safely revoked.
+
+## Revoking Tokens
+
+- Admins can revoke any token from the API Tokens page
+
+Revocation is immediate. Any in-flight request using the revoked token will fail with `401 Unauthorized`.
+
+## Best Practices
+
+- Create separate tokens for each integration so you can revoke individually
+- Use viewer-role tokens with minimal bucket permissions where possible
+- Periodically review the last-used timestamps and revoke unused tokens
+- Never commit tokens to version control — use environment variables or secrets managers

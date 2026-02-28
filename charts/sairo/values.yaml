@@ -1,0 +1,97 @@
+# Sairo Helm Chart - Default Values
+
+replicaCount: 1
+
+image:
+  repository: stephenjr002/sairo
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: sairo.example.com
+  tls: []
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 5Gi
+
+# S3 Configuration (required)
+s3:
+  endpoint: ""         # e.g., https://s3.us-east-1.amazonaws.com
+  region: "us-east-1"
+  accessKey: ""
+  secretKey: ""
+
+# Auth Configuration
+auth:
+  adminUser: "admin"
+  adminPass: ""        # Auto-generated if empty
+  jwtSecret: ""        # Auto-generated if empty
+  sessionHours: 24
+  secureCookie: true
+
+# Crawler Configuration
+crawler:
+  recrawlInterval: 120
+
+# Rate Limiting (optional)
+rateLimit:
+  default: "120/minute"   # General API rate limit per IP
+  upload: "30/minute"     # Upload endpoint rate limit per IP
+
+# LDAP Configuration (optional)
+ldap:
+  enabled: false
+  server: ""
+  baseDn: ""
+  userFilter: "(sAMAccountName={username})"
+  bindDn: ""
+  bindPassword: ""
+  adminGroup: ""
+  defaultRole: "viewer"
+
+# OAuth / OIDC (optional)
+oauth:
+  google:
+    clientId: ""
+    clientSecret: ""
+  github:
+    clientId: ""
+    clientSecret: ""
+  defaultRole: "viewer"
+  allowedDomains: ""       # Comma-separated: "example.com,corp.com"
+
+# White-labeling (optional)
+branding:
+  appName: "Sairo"
+  appLogo: ""
+  primaryColor: "#3b82f6"
+  loginMessage: ""
+
+# Network Policy (optional — restricts pod traffic to S3 and DNS only)
+networkPolicy:
+  enabled: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

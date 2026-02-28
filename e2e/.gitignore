@@ -1,0 +1,5 @@
+node_modules/
+auth-state.json
+playwright-report/
+test-results/
+blob-report/

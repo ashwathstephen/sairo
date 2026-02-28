@@ -1,0 +1,45 @@
+---
+title: Search
+description: Full-text search across all indexed object keys using SQLite FTS5, with prefix scoping and instant navigation.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo indexes every object key in your S3 buckets into a SQLite FTS5 full-text search index. This lets you find any object by name in sub-second time, regardless of how many buckets or objects you have.
+
+## Opening search
+
+Press **`/`** anywhere in the UI to open the search bar. You can also click the search icon in the toolbar. Start typing to see results immediately.
+
+## How it works
+
+The search query runs against the FTS5 virtual table in each bucket's SQLite database. The index uses a **trigram tokenizer**, which supports substring matching anywhere in the key. Typing `invoice` will match `invoices.csv`, `invoice-2026-01.pdf`, and `archive/invoices/q4.xlsx`.
+
+## Prefix-scoped search
+
+When you are inside a bucket or folder, search results are automatically scoped to that location. This is useful when you know the object is somewhere within a specific prefix but do not remember the exact path.
+
+To search across all buckets, open search from the top-level bucket list.
+
+## Result details
+
+Each search result displays:
+
+| Field            | Description                                |
+| ---------------- | ------------------------------------------ |
+| **Filename**     | The object's base name                     |
+| **Path**         | Full key path within the bucket            |
+| **Size**         | Human-readable file size                   |
+| **Last Modified**| Timestamp of the most recent modification  |
+
+## Navigation
+
+Click any search result to navigate directly to that object's location in the browser. The browser will open the containing folder and highlight the matched object.
+
+## Background indexing
+
+Sairo's crawler runs on a continuous loop (default: every 2 minutes, configurable via `RECRAWL_INTERVAL`). Each crawl updates the SQLite database and its FTS5 index, so newly uploaded or deleted objects appear in search results shortly after the next crawl completes.
+
+<Aside>
+  Search results reflect the state of the local index, not a live listing from S3. If you need to search for an object that was just uploaded, trigger a manual re-index from the bucket's **Settings > Index** tab.
+</Aside>

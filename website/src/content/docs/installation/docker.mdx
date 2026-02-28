@@ -1,0 +1,138 @@
+---
+title: Docker
+description: Run Sairo as a Docker container with docker run or Docker Compose.
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Sairo ships as a single Docker image. You can run it directly with `docker run` or use Docker Compose for a more reproducible setup.
+
+## Docker run
+
+The quickest way to start Sairo:
+
+```bash
+docker run -d --name sairo -p 8000:8000 \
+  -e S3_ENDPOINT=https://your-s3-endpoint.com \
+  -e S3_ACCESS_KEY=your-access-key \
+  -e S3_SECRET_KEY=your-secret-key \
+  -e ADMIN_PASS=choose-a-strong-password \
+  -e JWT_SECRET=$(openssl rand -hex 32) \
+  -v sairo-data:/data \
+  stephenjr002/sairo:latest
+```
+
+## Docker Compose
+
+For production or team environments, Docker Compose keeps your configuration in version control.
+
+### 1. Create your environment file
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and fill in your S3 credentials and admin password. See the [Configuration reference](/installation/configuration) for all available variables.
+
+### 2. Start the service
+
+```bash
+docker compose up -d
+```
+
+### Compose file reference
+
+```yaml
+services:
+  sairo:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - sairo-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  sairo-data:
+```
+
+## Volume mount
+
+The `/data` directory inside the container stores all SQLite database files (one per bucket). Mounting a named volume or host path to `/data` ensures your index survives container restarts.
+
+| Container path | Purpose                                  |
+| -------------- | ---------------------------------------- |
+| `/data`        | SQLite databases (per-bucket `.db` files, WAL journals) |
+
+If you lose the `/data` volume, Sairo will simply rebuild the index from S3 on the next startup. No data is lost, but the initial crawl will take time depending on how many objects you have.
+
+## Health check
+
+Sairo exposes a health check endpoint:
+
+```
+GET /healthz
+```
+
+Returns `200 OK` when the service is ready. Use this in Docker health checks, load balancer probes, or monitoring systems.
+
+```bash
+curl -f http://localhost:8000/healthz
+```
+
+## HTTP vs HTTPS
+
+Sairo's authentication relies on cookies with the `Secure` flag enabled by default. This means cookies are only transmitted over HTTPS connections.
+
+<Aside type="caution">
+  If you access Sairo over plain HTTP (for example, during local development or behind a reverse proxy that terminates TLS), you **must** set:
+
+  ```bash
+  SECURE_COOKIE=false
+  ```
+
+  Without this, authentication cookies will silently fail -- you will be able to log in but every subsequent request will appear unauthenticated.
+</Aside>
+
+<Tabs>
+  <TabItem label="Behind TLS proxy (default)">
+    ```bash
+    # SECURE_COOKIE defaults to true -- no change needed
+    -e S3_ENDPOINT=https://s3.example.com
+    ```
+  </TabItem>
+  <TabItem label="Plain HTTP (local/dev)">
+    ```bash
+    -e SECURE_COOKIE=false
+    ```
+  </TabItem>
+</Tabs>
+
+## Upgrading
+
+To upgrade Sairo to a new version:
+
+<Tabs>
+  <TabItem label="docker run">
+    ```bash
+    docker pull stephenjr002/sairo:latest
+    docker stop sairo
+    docker rm sairo
+    # Re-run the original docker run command
+    ```
+  </TabItem>
+  <TabItem label="Docker Compose">
+    ```bash
+    docker compose pull
+    docker compose up -d
+    ```
+  </TabItem>
+</Tabs>
+
+Your SQLite index in the `sairo-data` volume is preserved across upgrades. Sairo handles any necessary schema migrations automatically on startup.

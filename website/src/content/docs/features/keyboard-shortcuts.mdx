@@ -1,0 +1,62 @@
+---
+title: Keyboard Shortcuts
+description: Navigate Sairo faster with keyboard shortcuts for search, navigation, and modals.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo supports keyboard shortcuts for common actions so you can navigate without reaching for the mouse.
+
+## Global shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| **`/`** or **`⌘K`** / **`Ctrl+K`** | Open search |
+| **`Backspace`** | Navigate to the parent folder |
+| **`Escape`** | Close the dashboard, or navigate to parent folder |
+| **`?`** | Show keyboard shortcuts help overlay |
+
+### Search (`/` or `⌘K`)
+
+Press `/` or `⌘K` (`Ctrl+K` on Windows/Linux) from anywhere in the UI to open the search bar. The cursor is placed in the search input so you can start typing immediately. Press `Escape` to dismiss search without navigating.
+
+### Parent navigation (`Backspace`)
+
+When browsing a folder, press `Backspace` to move up one level in the directory hierarchy. If you are at the root of a bucket, this returns you to the bucket list.
+
+### Close (`Escape`)
+
+Pressing `Escape` closes the storage dashboard if it is open. Otherwise, it navigates to the parent folder (same behavior as `Backspace`). Search and the help overlay have their own Escape handling.
+
+### Help (`?`)
+
+Press `?` to open the keyboard shortcuts help overlay, which displays the full shortcut reference. Press `Escape` or `?` again to dismiss it.
+
+## Search navigation
+
+When the search bar is open with results:
+
+| Shortcut | Action |
+| --- | --- |
+| **`↓`** / **`↑`** | Navigate through search results |
+| **`Enter`** | Navigate to the selected result's folder |
+| **`Escape`** | Close search |
+
+<Aside type="tip">
+  Matched text in search results is highlighted so you can see exactly which part of the filename matched your query.
+</Aside>
+
+## Density toggle
+
+The toolbar includes a density toggle button that switches between **comfortable** (default 36px rows) and **compact** (28px rows) mode. The setting persists across page reloads via localStorage.
+
+## Welcome overlay
+
+On your first visit to Sairo, a welcome overlay appears with a brief feature tour highlighting key capabilities:
+
+- **Search** -- Press `/` to search
+- **Shortcuts** -- `Backspace` to go up, `Escape` to go back, `?` for help
+- **Drag & Drop** -- Drag files to upload
+- **Preview** -- Click the eye icon to preview files
+
+The overlay is shown once and does not reappear on subsequent visits.

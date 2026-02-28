@@ -1,0 +1,76 @@
+---
+title: "Changelog"
+description: "Release history and notable changes for each version of Sairo."
+---
+
+## v2.0.0
+
+Current release. A complete rewrite of Sairo with a modern frontend and significantly expanded feature set.
+
+### Frontend
+
+- Complete rewrite with **React 18** and **Vite** build system
+- **Dark mode** with system preference detection and manual toggle
+- Virtualized file lists for smooth browsing of large buckets
+- NDJSON streaming for instant rendering of object listings
+
+### Multi-Endpoint Support
+
+- Connect to **multiple S3-compatible backends** simultaneously
+- Switch between endpoints from the sidebar
+- Fernet-encrypted credential storage for added endpoints
+
+### Search and Indexing
+
+- **Full-text search** powered by SQLite FTS5
+- Per-bucket SQLite databases with WAL mode
+- Prefix-parallel crawling for fast initial indexing
+- Background reindexing on a configurable interval
+
+### Storage Analytics
+
+- **Storage analytics dashboard** with per-prefix breakdown
+- Storage growth history charts
+- Visual treemap of bucket contents
+
+### Version Management
+
+- Browse, compare, and restore object versions
+- Version scanner for discovering all versions in a bucket
+- Bulk version deletion
+
+### Sharing
+
+- **Share links** for individual files with optional password protection
+- Configurable expiration
+- Public access without authentication
+
+### Security
+
+- **Audit logging** with 37 tracked action types
+- **Two-factor authentication** (TOTP) with QR code setup and recovery codes
+- **OAuth integration** with Google and GitHub
+- **LDAP authentication** with group-based role mapping
+- **API tokens** for programmatic access (format: `sairo_` prefix + 32 chars)
+- Per-bucket viewer permissions (No Access, Read, Write)
+- Rate limiting (global, login, upload, search)
+
+### Bucket Settings
+
+- **8 settings tabs**: Overview, Lifecycle, Policy, ACL, Tags, CORS, Multipart, Index
+- Visual editors for lifecycle rules, CORS policies, and bucket tags
+
+### Deployment
+
+- **Helm chart** for Kubernetes deployments
+- Non-root container (UID 1000, no privilege escalation)
+- Custom branding support (app name, logo, colors, login message)
+
+### Testing
+
+- **261 tests** across the full stack:
+  - 164 end-to-end tests
+  - 39 API integration tests
+  - 20 indexing tests
+  - 16 pytest unit tests
+  - 22 Vitest frontend tests

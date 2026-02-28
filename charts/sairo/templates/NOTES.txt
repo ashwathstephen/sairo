@@ -1,0 +1,25 @@
+Sairo has been deployed successfully!
+
+{{- if .Values.ingress.enabled }}
+
+Access the UI at: https://{{ .Values.ingress.host }}
+
+{{- else }}
+
+To access the UI, run:
+
+  kubectl port-forward svc/{{ .Release.Name }} 8000:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+Then open: http://localhost:8000
+
+{{- end }}
+
+Login with:
+  Username: {{ .Values.auth.adminUser }}
+  Password: (from secret {{ .Release.Name }}-secrets, key admin-password)
+
+To retrieve the admin password:
+  kubectl get secret {{ .Release.Name }}-secrets -n {{ .Release.Namespace }} -o jsonpath='{.data.admin-password}' | base64 -d
+
+Health check:
+  curl http://localhost:8000/healthz

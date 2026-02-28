@@ -1,0 +1,40 @@
+# Dependencies
+frontend/node_modules
+backend/__pycache__
+backend/*.pyc
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docker
+docker-compose*.yml
+
+# Build artifacts
+frontend/dist
+
+# Dev/test files
+*.md
+!README.md
+test-*.sh
+
+# Not needed in container
+website/
+e2e/
+benchmark/
+charts/
+.circleci/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data volumes
+/data
+*.db

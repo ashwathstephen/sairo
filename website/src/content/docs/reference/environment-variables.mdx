@@ -1,0 +1,115 @@
+---
+title: "Environment Variables"
+description: "Complete reference of all environment variables for configuring Sairo."
+---
+
+All Sairo configuration is done through environment variables. This page lists every supported variable grouped by category.
+
+## S3 Connection
+
+| Variable | Default | Description |
+|---|---|---|
+| `S3_ENDPOINT` | _(required)_ | S3-compatible endpoint URL |
+| `S3_ACCESS_KEY` | _(required)_ | S3 access key ID |
+| `S3_SECRET_KEY` | _(required)_ | S3 secret access key |
+| `S3_REGION` | _(empty)_ | S3 region |
+
+## Authentication
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_USER` | `admin` | Username for the default admin account |
+| `ADMIN_PASS` | _(auto-generated)_ | Password for the default admin account. If not set, a random password is printed to logs on first startup. |
+| `JWT_SECRET` | _(auto-generated)_ | Secret key for signing JWT tokens. Set explicitly for multi-instance deployments. |
+| `SESSION_HOURS` | `24` | Session duration in hours |
+| `SECURE_COOKIE` | `true` | Set to `false` for HTTP (non-HTTPS) deployments or cookies will silently fail |
+
+## Crawler / Indexing
+
+| Variable | Default | Description |
+|---|---|---|
+| `RECRAWL_INTERVAL` | `120` | Seconds between automatic reindex cycles for each bucket |
+| `DB_DIR` | `/data` | Directory where SQLite index databases are stored |
+
+## LDAP
+
+| Variable | Default | Description |
+|---|---|---|
+| `LDAP_ENABLED` | `false` | Enable LDAP authentication |
+| `LDAP_SERVER` | _(none)_ | LDAP server URI (e.g., `ldap://ldap.example.com:389` or `ldaps://ldap.example.com:636`) |
+| `LDAP_BASE_DN` | _(none)_ | Base DN for user searches (e.g., `ou=people,dc=example,dc=com`) |
+| `LDAP_USER_FILTER` | `(sAMAccountName={username})` | LDAP search filter. `{username}` is replaced with the login username. |
+| `LDAP_BIND_DN` | _(none)_ | DN of the service account used to search for users |
+| `LDAP_BIND_PASSWORD` | _(none)_ | Password for the bind DN |
+| `LDAP_ADMIN_GROUP` | _(none)_ | LDAP group DN whose members are assigned the admin role |
+| `LDAP_DEFAULT_ROLE` | `viewer` | Default role for LDAP-provisioned users |
+
+## OAuth
+
+| Variable | Default | Description |
+|---|---|---|
+| `OAUTH_GOOGLE_CLIENT_ID` | _(none)_ | Google OAuth 2.0 Client ID |
+| `OAUTH_GOOGLE_CLIENT_SECRET` | _(none)_ | Google OAuth 2.0 Client Secret |
+| `OAUTH_GITHUB_CLIENT_ID` | _(none)_ | GitHub OAuth App Client ID |
+| `OAUTH_GITHUB_CLIENT_SECRET` | _(none)_ | GitHub OAuth App Client Secret |
+| `OAUTH_DEFAULT_ROLE` | `viewer` | Default role for OAuth-provisioned users |
+| `OAUTH_ALLOWED_DOMAINS` | _(none)_ | Comma-separated list of allowed email domains for Google OAuth |
+
+## Branding
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_NAME` | `Sairo` | Application name displayed in the UI and browser tab |
+| `PRIMARY_COLOR` | `#3b82f6` | Primary theme color (hex code, e.g., `#2563eb`) |
+| `APP_LOGO` | _(none)_ | URL to a custom logo image displayed on the login page and sidebar |
+| `LOGIN_MESSAGE` | _(none)_ | Custom message displayed on the login page (supports plain text) |
+
+## Rate Limiting
+
+| Variable | Default | Description |
+|---|---|---|
+| `RATE_LIMIT` | `120/minute` | General API rate limit per IP |
+| `UPLOAD_RATE_LIMIT` | `30/minute` | Rate limit for upload requests per IP |
+
+Login attempts are rate-limited with two layers: **10 per minute** via slowapi and **10 per 5 minutes per IP** via a hardcoded window. Neither is independently configurable.
+
+## Example: Full Configuration
+
+```yaml
+services:
+  sairo:
+    image: stephenjr002/sairo:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # S3
+      S3_ENDPOINT: "https://s3.us-east-1.amazonaws.com"
+      S3_ACCESS_KEY: "AKIAIOSFODNN7EXAMPLE"
+      S3_SECRET_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      S3_REGION: "us-east-1"
+      # S3_PATH_STYLE is configured per-endpoint via the UI, not globally
+
+      # Auth
+      ADMIN_USER: "admin"
+      ADMIN_PASS: "super-secret-password"
+      JWT_SECRET: "a-long-random-string-for-signing"
+      SESSION_HOURS: "24"
+      SECURE_COOKIE: "true"
+
+      # Crawler
+      RECRAWL_INTERVAL: "120"
+
+      # Branding
+      APP_NAME: "My Storage"
+      PRIMARY_COLOR: "#2563eb"
+      LOGIN_MESSAGE: "Welcome to the storage portal"
+
+      # Rate Limiting
+      RATE_LIMIT: "120/minute"
+      UPLOAD_RATE_LIMIT: "30/minute"
+    volumes:
+      - sairo-data:/data
+
+volumes:
+  sairo-data:
+```

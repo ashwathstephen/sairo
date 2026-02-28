@@ -1,0 +1,18 @@
+{
+  "name": "sairo-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "test:ui": "npx playwright test --ui",
+    "docker:up": "docker compose -f docker-compose.test.yml up -d --build --wait",
+    "docker:down": "docker compose -f docker-compose.test.yml down -v",
+    "report": "npx playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.42.0",
+    "otpauth": "^9.2.0"
+  }
+}

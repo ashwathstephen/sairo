@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if gt (int .Values.replicaCount) 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  {{- else }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: sairo
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+              name: http
+          env:
+            # ── S3 Configuration ──
+            - name: S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            - name: S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: s3-secret-key
+            # ── Auth ──
+            - name: ADMIN_USER
+              value: {{ .Values.auth.adminUser | quote }}
+            - name: ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: admin-password
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: jwt-secret
+            - name: SESSION_HOURS
+              value: {{ .Values.auth.sessionHours | quote }}
+            - name: SECURE_COOKIE
+              value: {{ .Values.auth.secureCookie | quote }}
+            # ── Crawler ──
+            - name: RECRAWL_INTERVAL
+              value: {{ .Values.crawler.recrawlInterval | quote }}
+            # ── Rate Limiting ──
+            {{- if .Values.rateLimit }}
+            {{- if .Values.rateLimit.default }}
+            - name: RATE_LIMIT
+              value: {{ .Values.rateLimit.default | quote }}
+            {{- end }}
+            {{- if .Values.rateLimit.upload }}
+            - name: UPLOAD_RATE_LIMIT
+              value: {{ .Values.rateLimit.upload | quote }}
+            {{- end }}
+            {{- end }}
+            # ── LDAP (optional) ──
+            {{- if .Values.ldap.enabled }}
+            - name: LDAP_ENABLED
+              value: "true"
+            - name: LDAP_SERVER
+              value: {{ .Values.ldap.server | quote }}
+            - name: LDAP_BASE_DN
+              value: {{ .Values.ldap.baseDn | quote }}
+            - name: LDAP_USER_FILTER
+              value: {{ .Values.ldap.userFilter | quote }}
+            - name: LDAP_BIND_DN
+              value: {{ .Values.ldap.bindDn | quote }}
+            - name: LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: ldap-bind-password
+            - name: LDAP_ADMIN_GROUP
+              value: {{ .Values.ldap.adminGroup | quote }}
+            - name: LDAP_DEFAULT_ROLE
+              value: {{ .Values.ldap.defaultRole | quote }}
+            {{- end }}
+            # ── OAuth (optional) ──
+            {{- if .Values.oauth.google.clientId }}
+            - name: OAUTH_GOOGLE_CLIENT_ID
+              value: {{ .Values.oauth.google.clientId | quote }}
+            - name: OAUTH_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: oauth-google-secret
+            {{- end }}
+            {{- if .Values.oauth.github.clientId }}
+            - name: OAUTH_GITHUB_CLIENT_ID
+              value: {{ .Values.oauth.github.clientId | quote }}
+            - name: OAUTH_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: oauth-github-secret
+            {{- end }}
+            {{- if .Values.oauth.defaultRole }}
+            - name: OAUTH_DEFAULT_ROLE
+              value: {{ .Values.oauth.defaultRole | quote }}
+            {{- end }}
+            {{- if .Values.oauth.allowedDomains }}
+            - name: OAUTH_ALLOWED_DOMAINS
+              value: {{ .Values.oauth.allowedDomains | quote }}
+            {{- end }}
+            # ── Branding (optional) ──
+            {{- if .Values.branding.appName }}
+            - name: APP_NAME
+              value: {{ .Values.branding.appName | quote }}
+            {{- end }}
+            {{- if .Values.branding.appLogo }}
+            - name: APP_LOGO
+              value: {{ .Values.branding.appLogo | quote }}
+            {{- end }}
+            {{- if .Values.branding.primaryColor }}
+            - name: PRIMARY_COLOR
+              value: {{ .Values.branding.primaryColor | quote }}
+            {{- end }}
+            {{- if .Values.branding.loginMessage }}
+            - name: LOGIN_MESSAGE
+              value: {{ .Values.branding.loginMessage | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

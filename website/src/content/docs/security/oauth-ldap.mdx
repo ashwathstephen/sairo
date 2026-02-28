@@ -1,0 +1,115 @@
+---
+title: "OAuth & LDAP"
+description: "Configuring Google OAuth, GitHub OAuth, and LDAP authentication for Sairo."
+---
+
+Sairo supports external authentication via Google OAuth, GitHub OAuth, and LDAP. Users authenticated through external providers are auto-provisioned on first login.
+
+## Google OAuth
+
+Google OAuth uses the OpenID Connect authorization code flow.
+
+### Setup
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Create an OAuth 2.0 Client ID (Web application type)
+3. Add the authorized redirect URI: `https://your-domain/api/auth/oauth/google/callback`
+4. Copy the Client ID and Client Secret
+
+### Configuration
+
+```yaml
+environment:
+  OAUTH_GOOGLE_CLIENT_ID: "your-client-id.apps.googleusercontent.com"
+  OAUTH_GOOGLE_CLIENT_SECRET: "your-client-secret"
+  OAUTH_ALLOWED_DOMAINS: "yourcompany.com,subsidiary.com"
+```
+
+`OAUTH_ALLOWED_DOMAINS` restricts which email domains can authenticate. Comma-separated, no spaces. If not set, any Google account can log in.
+
+### Flow
+
+1. User clicks **Sign in with Google** on the login page
+2. User authenticates with Google and grants consent
+3. Google redirects to `/api/auth/oauth/google/callback` with an authorization code
+4. Sairo exchanges the code for an ID token, extracts the email and name
+5. If the user does not exist, a new account is created with the configured default role
+6. A JWT session cookie is issued
+
+## GitHub OAuth
+
+### Setup
+
+1. Go to [GitHub Developer Settings](https://github.com/settings/developers)
+2. Create a new OAuth App
+3. Set the Authorization callback URL to: `https://your-domain/api/auth/oauth/github/callback`
+4. Copy the Client ID and Client Secret
+
+### Configuration
+
+```yaml
+environment:
+  OAUTH_GITHUB_CLIENT_ID: "your-client-id"
+  OAUTH_GITHUB_CLIENT_SECRET: "your-client-secret"
+```
+
+### Flow
+
+1. User clicks **Sign in with GitHub** on the login page
+2. User authenticates with GitHub
+3. GitHub redirects to `/api/auth/oauth/github/callback` with an authorization code
+4. Sairo exchanges the code for an access token, fetches the user's profile
+5. If the user does not exist, a new account is created with the configured default role
+6. A JWT session cookie is issued
+
+## LDAP
+
+LDAP authentication binds against your directory server to verify credentials.
+
+### Configuration
+
+```yaml
+environment:
+  LDAP_ENABLED: "true"
+  LDAP_SERVER: "ldap://ldap.yourcompany.com:389"
+  LDAP_BASE_DN: "ou=people,dc=yourcompany,dc=com"
+  LDAP_USER_FILTER: "(sAMAccountName={username})"  # default; use "(uid={username})" for OpenLDAP
+  LDAP_BIND_DN: "cn=readonly,dc=yourcompany,dc=com"
+  LDAP_BIND_PASSWORD: "bind-password"
+  LDAP_ADMIN_GROUP: "cn=sairo-admins,ou=groups,dc=yourcompany,dc=com"
+```
+
+| Variable | Description |
+|---|---|
+| `LDAP_ENABLED` | Set to `true` to enable LDAP login |
+| `LDAP_SERVER` | LDAP server URI (supports `ldap://` and `ldaps://`) |
+| `LDAP_BASE_DN` | Base DN for user searches |
+| `LDAP_USER_FILTER` | Search filter; `{username}` is replaced with the login username |
+| `LDAP_BIND_DN` | DN of the service account used to search for users |
+| `LDAP_BIND_PASSWORD` | Password for the bind DN |
+| `LDAP_ADMIN_GROUP` | LDAP group DN whose members are assigned the admin role |
+
+### Flow
+
+1. User enters their LDAP username and password on the login page
+2. Sairo binds with the service account to search for the user DN
+3. Sairo attempts to bind with the found user DN and the provided password
+4. If the bind succeeds and the user is a member of `LDAP_ADMIN_GROUP`, they get the admin role; otherwise they get the default role
+5. If the user does not exist in Sairo, a new account is created
+6. A JWT session cookie is issued
+
+## Default Role for New Users
+
+OAuth and LDAP have separate default role variables:
+
+```yaml
+environment:
+  OAUTH_DEFAULT_ROLE: "viewer"   # for Google/GitHub OAuth users
+  LDAP_DEFAULT_ROLE: "viewer"    # for LDAP users
+```
+
+Both default to `viewer`. New users get no bucket permissions until an admin assigns them.
+
+## 2FA After External Auth
+
+Two-factor authentication still applies after external authentication. If a user who authenticated via Google, GitHub, or LDAP has 2FA enabled on their Sairo account, they are prompted for a TOTP code after the external auth completes.

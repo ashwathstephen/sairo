@@ -1,0 +1,63 @@
+---
+title: File Preview
+description: Preview images, documents, code, CSV, JSON, Parquet, ORC, Avro, and binary files directly in the browser without downloading.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Click any object in the browser to open an inline preview. Sairo detects the file type by extension and renders an appropriate viewer. A download button is always available in the preview modal header.
+
+## Supported formats
+
+| Category     | Extensions                                      | Rendering                                |
+| ------------ | ----------------------------------------------- | ---------------------------------------- |
+| **Images**   | jpg, jpeg, png, gif, svg, webp, ico, bmp        | Native `<img>` element                   |
+| **Documents**| pdf                                             | Rendered in browser via embedded viewer   |
+| **Code**     | js, jsx, ts, tsx, py, sql, sh, bash             | Monospace source view with line numbers  |
+| **Text**     | txt, md, xml, yaml, yml, html, css              | Monospace source view with line numbers  |
+| **Config**   | conf, cfg, ini, toml                            | Monospace source view with line numbers  |
+| **Data**     | csv                                             | Parsed table with column headers         |
+| **Data**     | json                                            | Pretty-printed with line numbers         |
+| **Logs**     | log, out, err                                   | Head/tail toggle for large files         |
+| **Analytics**| parquet, orc, avro                              | Schema + metadata inspection panel       |
+| **Other**    | All other types                                 | Download prompt                          |
+
+## Format details
+
+### Images
+
+Standard web image formats are displayed directly. The preview scales the image to fit the modal while preserving the aspect ratio.
+
+### PDF
+
+PDF files are rendered inline using the browser's native PDF viewer. Scrolling, zooming, and page navigation work as expected.
+
+### Code
+
+Source files are displayed in a monospace font with line numbers. The viewer scrolls independently within the preview modal.
+
+### CSV
+
+CSV files are parsed and rendered as a table with column headers. The table scrolls independently within the preview modal.
+
+### JSON
+
+JSON files are pretty-printed with line numbers for easy reading.
+
+### Logs
+
+Log and text files support a **head/tail toggle**. By default the preview shows the end of the file (tail). Click "Head" to jump to the beginning -- useful for checking file headers or older entries.
+
+### Parquet, ORC, and Avro
+
+For columnar and row-oriented data formats, Sairo displays the file's **schema** (column names and types) and **metadata** (row count, row groups, compression codec, creation library). This lets you inspect data files without downloading them or running a query engine.
+
+### Unsupported types
+
+Files that do not match any recognized extension show a "Preview not available" message with a download button.
+
+## Display limit
+
+<Aside>
+  The preview UI loads up to **500 KB** of content for display purposes. Larger files are truncated in the preview but can always be downloaded in full using the download button.
+</Aside>

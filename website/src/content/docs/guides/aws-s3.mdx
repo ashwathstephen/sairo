@@ -1,0 +1,135 @@
+---
+title: "AWS S3"
+description: "Connecting Sairo to Amazon S3 with IAM credentials and the correct endpoint configuration."
+---
+
+Sairo works with Amazon S3 using standard IAM credentials. This guide covers the configuration and recommended IAM policy.
+
+## Configuration
+
+```yaml
+environment:
+  S3_ENDPOINT: "https://s3.us-east-1.amazonaws.com"
+  S3_ACCESS_KEY: "AKIAIOSFODNN7EXAMPLE"
+  S3_SECRET_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  S3_REGION: "us-east-1"
+  S3_PATH_STYLE: "false"
+```
+
+### Key Settings
+
+| Variable | Value | Notes |
+|---|---|---|
+| `S3_ENDPOINT` | `https://s3.<region>.amazonaws.com` | Use the regional endpoint for your buckets |
+| `S3_REGION` | Your bucket's region | e.g., `us-east-1`, `eu-west-1`, `ap-southeast-1` |
+| `S3_PATH_STYLE` | `false` | AWS uses virtual-hosted style addressing. Do not set to `true`. |
+
+## Creating an IAM User
+
+1. Go to the [IAM Console](https://console.aws.amazon.com/iam/)
+2. Click **Users > Create user**
+3. Enter a username (e.g., `sairo-service`)
+4. Select **Attach policies directly**
+5. Create and attach the custom policy below
+6. Complete user creation
+7. Go to the user's **Security credentials** tab and create an access key
+8. Copy the Access Key ID and Secret Access Key into your Sairo configuration
+
+## Recommended IAM Policy
+
+This policy grants the minimum permissions Sairo needs to browse, upload, and manage objects:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SairoBucketAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketCORS",
+        "s3:PutBucketCORS",
+        "s3:GetBucketTagging",
+        "s3:PutBucketTagging",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetBucketAcl",
+        "s3:PutBucketAcl",
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListAllMyBuckets"
+      ],
+      "Resource": [
+        "arn:aws:s3:::*"
+      ]
+    },
+    {
+      "Sid": "SairoObjectAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObjectVersion",
+        "s3:DeleteObjectVersion",
+        "s3:ListBucketVersions"
+      ],
+      "Resource": [
+        "arn:aws:s3:::*/*"
+      ]
+    }
+  ]
+}
+```
+
+To restrict Sairo to specific buckets, replace `arn:aws:s3:::*` with explicit bucket ARNs:
+
+```json
+"Resource": [
+  "arn:aws:s3:::my-bucket",
+  "arn:aws:s3:::my-bucket/*"
+]
+```
+
+## Read-Only Access
+
+If you only need browsing and download capabilities, use a narrower policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::*",
+        "arn:aws:s3:::*/*"
+      ]
+    }
+  ]
+}
+```
+
+## Multi-Region
+
+If your buckets span multiple AWS regions, use the global endpoint and let Sairo resolve the region automatically:
+
+```yaml
+environment:
+  S3_ENDPOINT: "https://s3.amazonaws.com"
+  S3_REGION: "us-east-1"
+```
+
+Alternatively, add multiple AWS regions as separate endpoints in Sairo's multi-endpoint configuration.

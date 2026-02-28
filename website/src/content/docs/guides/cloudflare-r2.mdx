@@ -1,0 +1,86 @@
+---
+title: "Cloudflare R2"
+description: "Connecting Sairo to Cloudflare R2 with the correct endpoint, region, and API token setup."
+---
+
+Cloudflare R2 is an S3-compatible object storage service with no egress fees. Sairo connects to R2 using its S3 API endpoint.
+
+## Configuration
+
+```yaml
+environment:
+  S3_ENDPOINT: "https://<account-id>.r2.cloudflarestorage.com"
+  S3_ACCESS_KEY: "your-r2-access-key-id"
+  S3_SECRET_KEY: "your-r2-secret-access-key"
+  S3_REGION: "auto"
+  S3_PATH_STYLE: "true"
+```
+
+### Key Settings
+
+| Variable | Value | Notes |
+|---|---|---|
+| `S3_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` | Replace `<account-id>` with your Cloudflare account ID |
+| `S3_REGION` | `auto` | R2 uses `auto` as the region |
+| `S3_PATH_STYLE` | `true` | R2 requires path-style addressing |
+
+## Finding Your Account ID
+
+Your Cloudflare account ID is in the URL when you visit the R2 dashboard:
+
+```
+https://dash.cloudflare.com/<account-id>/r2
+```
+
+It is also shown on the R2 overview page under **Account ID**.
+
+## Creating an R2 API Token
+
+1. Go to the [Cloudflare dashboard](https://dash.cloudflare.com/)
+2. Navigate to **R2 > Overview**
+3. Click **Manage R2 API Tokens** in the right sidebar
+4. Click **Create API token**
+5. Set permissions to **Object Read & Write**
+6. Optionally restrict to specific buckets
+7. Click **Create API Token**
+8. Copy the **Access Key ID** and **Secret Access Key**
+
+Use the Access Key ID as `S3_ACCESS_KEY` and the Secret Access Key as `S3_SECRET_KEY`.
+
+## Docker Compose Example
+
+```yaml
+services:
+  sairo:
+    image: stephenjr002/sairo:latest
+    ports:
+      - "8000:8000"
+    environment:
+      S3_ENDPOINT: "https://abc123def456.r2.cloudflarestorage.com"
+      S3_ACCESS_KEY: "your-r2-access-key-id"
+      S3_SECRET_KEY: "your-r2-secret-access-key"
+      S3_REGION: "auto"
+      S3_PATH_STYLE: "true"
+      ADMIN_PASS: "change-me"
+    volumes:
+      - sairo-data:/data
+
+volumes:
+  sairo-data:
+```
+
+## R2 Limitations
+
+Cloudflare R2 does not support all S3 features. The following Sairo features are affected:
+
+| Feature | Status |
+|---|---|
+| Browse, upload, download, delete | Fully supported |
+| Search and indexing | Fully supported |
+| Share links | Fully supported |
+| Bucket versioning | Not supported by R2 |
+| Lifecycle rules | Limited support |
+| Bucket policy | Not supported by R2 |
+| CORS configuration | Supported via Cloudflare dashboard |
+
+Sairo gracefully handles unsupported features. The corresponding settings tabs will show a message indicating the feature is not available for this storage provider.

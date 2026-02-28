@@ -1,0 +1,68 @@
+{
+    "timestamp": "20260228-205458",
+    "benchmarks": {
+        "upload": {
+            "1kb": {
+                "p50_ms": 44.9,
+                "min_ms": 44.6,
+                "max_ms": 46.9,
+                "throughput_mbps": 0.0,
+                "file_size_bytes": 1024
+            },
+            "100kb": {
+                "p50_ms": 51.1,
+                "min_ms": 45.1,
+                "max_ms": 52.1,
+                "throughput_mbps": 1.9,
+                "file_size_bytes": 102400
+            },
+            "1mb": {
+                "p50_ms": 51.9,
+                "min_ms": 50.3,
+                "max_ms": 85.9,
+                "throughput_mbps": 19.3,
+                "file_size_bytes": 1048576
+            },
+            "10mb": {
+                "p50_ms": 130.7,
+                "min_ms": 120.3,
+                "max_ms": 146.3,
+                "throughput_mbps": 76.5,
+                "file_size_bytes": 10485760
+            },
+            "50mb": {
+                "p50_ms": 436.2,
+                "min_ms": 405.0,
+                "max_ms": 443.6,
+                "throughput_mbps": 114.6,
+                "file_size_bytes": 52428800
+            }
+        },
+        "concurrent": {
+            "5_users": {
+                "requests_per_sec": 248.9,
+                "wall_time_sec": 0.2,
+                "p50_ms": 8.0,
+                "p95_ms": 15.8,
+                "p99_ms": 17.5,
+                "total_requests": 50
+            },
+            "10_users": {
+                "requests_per_sec": 291.4,
+                "wall_time_sec": 0.34,
+                "p50_ms": 22.3,
+                "p95_ms": 31.5,
+                "p99_ms": 32.7,
+                "total_requests": 100
+            },
+            "25_users": {
+                "requests_per_sec": 301.5,
+                "wall_time_sec": 0.83,
+                "p50_ms": 67.7,
+                "p95_ms": 94.2,
+                "p99_ms": 124.0,
+                "total_requests": 250
+            }
+        }
+    }
+}

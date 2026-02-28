@@ -1,0 +1,16 @@
+apiVersion: v2
+name: sairo
+description: S3-compatible object storage browser with search, versioning, and analytics
+type: application
+version: 0.1.0
+appVersion: "2.0.0"
+keywords:
+  - s3
+  - object-storage
+  - browser
+  - minio
+home: https://github.com/AshwathStephen/sairo
+sources:
+  - https://github.com/AshwathStephen/sairo
+maintainers:
+  - name: Sairo Contributors

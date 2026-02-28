@@ -1,0 +1,166 @@
+---
+title: Quickstart
+description: Get Sairo running in under a minute with Docker and start browsing your S3 buckets.
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Badge, FileTree } from "@astrojs/starlight/components";
+
+Get from zero to browsing your S3 storage in under a minute. Sairo runs as a **single Docker container** with no external dependencies.
+
+## Prerequisites
+
+<CardGrid>
+  <Card title="Docker" icon="setting">
+    Docker Engine 20.10+ installed and running. [Get Docker](https://docs.docker.com/get-docker/) if you don't have it.
+  </Card>
+  <Card title="S3 Credentials" icon="document">
+    An S3-compatible endpoint URL, access key, and secret key. Works with AWS S3, MinIO, Cloudflare R2, Wasabi, Backblaze B2, Ceph, and more.
+  </Card>
+</CardGrid>
+
+## Install & Run
+
+Choose your preferred method:
+
+<Tabs>
+  <TabItem label="Docker Run" icon="rocket">
+
+  The fastest way to get started. One command, one container:
+
+  ```bash title="Start Sairo"
+  docker run -d --name sairo -p 8000:8000 \
+    -e S3_ENDPOINT=https://your-s3-endpoint.com \
+    -e S3_ACCESS_KEY=your-access-key \
+    -e S3_SECRET_KEY=your-secret-key \
+    -e ADMIN_PASS=choose-a-strong-password \
+    -e JWT_SECRET=$(openssl rand -hex 32) \
+    -v sairo-data:/data \
+    stephenjr002/sairo:latest
+  ```
+
+  Replace the placeholder values with your actual S3 credentials.
+
+  </TabItem>
+  <TabItem label="Docker Compose" icon="document">
+
+  Better for production — keeps configuration in version control:
+
+  ```yaml title="docker-compose.yml"
+  services:
+    sairo:
+      image: stephenjr002/sairo:latest
+      ports:
+        - "8000:8000"
+      environment:
+        S3_ENDPOINT: "https://your-s3-endpoint.com"
+        S3_ACCESS_KEY: "your-access-key"
+        S3_SECRET_KEY: "your-secret-key"
+        ADMIN_PASS: "choose-a-strong-password"
+        JWT_SECRET: "run-openssl-rand-hex-32"
+      volumes:
+        - sairo-data:/data
+      restart: unless-stopped
+
+  volumes:
+    sairo-data:
+  ```
+
+  ```bash title="Start the service"
+  docker compose up -d
+  ```
+
+  </TabItem>
+</Tabs>
+
+<Aside>
+  Sairo starts indexing your buckets immediately on startup. Depending on how many objects you have, the initial crawl may take a few seconds to a few minutes. The UI is usable right away — search results improve as indexing progresses.
+</Aside>
+
+## Open the UI
+
+Navigate to **[http://localhost:8000](http://localhost:8000)** in your browser.
+
+Sign in with the default admin credentials:
+
+| Field | Value |
+|---|---|
+| **Username** | `admin` |
+| **Password** | The `ADMIN_PASS` value you set above |
+
+<Aside type="caution" title="Running without HTTPS?">
+  If you are running over plain HTTP (no TLS), add `-e SECURE_COOKIE=false` to your Docker command. Without this, authentication cookies will silently fail. See the [Configuration reference](/installation/configuration/) for details.
+</Aside>
+
+## First things to try
+
+Once logged in, explore these features:
+
+<Steps>
+
+1. **Browse a bucket**
+
+   Click any bucket in the sidebar. Navigate through prefixes like a file system — virtualized tables handle even 100K+ objects smoothly.
+
+2. **Search everything with `/`**
+
+   Press <kbd>/</kbd> anywhere in the UI to open instant search. Sairo indexes all object keys using SQLite FTS5, so results come back in milliseconds.
+
+3. **Preview files inline**
+
+   Click on any supported file to see a rich preview without downloading:
+
+   | File Type | Preview |
+   |---|---|
+   | Images (PNG, JPG, SVG, GIF) | Full visual preview |
+   | PDF | Embedded PDF viewer |
+   | CSV / TSV | Sortable data table |
+   | JSON | Syntax-highlighted tree view |
+   | Parquet / ORC / Avro | Schema inspector |
+   | Code files | Syntax-highlighted source |
+
+4. **Generate a share link**
+
+   Right-click any object and select **Share**. Create password-protected download links with expiration and download limits — no S3 knowledge required for recipients.
+
+</Steps>
+
+## What's inside the container
+
+Sairo is a self-contained stack with no external dependencies:
+
+<FileTree>
+- / (container root)
+  - app/
+    - main.py — FastAPI backend
+    - static/ — React 18 SPA (built at image time)
+  - data/ — SQLite databases (one per bucket, WAL mode)
+</FileTree>
+
+<Aside type="tip" title="Volume mount">
+  The `-v sairo-data:/data` flag persists your index across container restarts. If you lose this volume, Sairo simply rebuilds the index from S3 on the next startup — no data is lost, just indexing time.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard
+    title="Docker Installation"
+    description="Health checks, compose files, TLS setup, and upgrading."
+    href="/installation/docker/"
+  />
+  <LinkCard
+    title="Configuration Reference"
+    description="All environment variables — S3, auth, LDAP, OAuth, branding, and rate limits."
+    href="/installation/configuration/"
+  />
+  <LinkCard
+    title="Features Overview"
+    description="Explore all 24 features: dashboard, versioning, bucket settings, and more."
+    href="/features/object-browser/"
+  />
+  <LinkCard
+    title="Architecture & Concepts"
+    description="How indexing, crawling, and authentication work under the hood."
+    href="/getting-started/concepts/"
+  />
+</CardGrid>

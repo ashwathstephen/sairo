@@ -1,0 +1,44 @@
+---
+title: Storage Dashboard
+description: Visualize storage usage with summary cards, growth trend charts, and per-folder breakdowns across all your buckets.
+---
+
+The storage dashboard gives you an at-a-glance view of how your S3 storage is being used and how it is growing over time. Open the dashboard from the sidebar or by clicking the chart icon next to any bucket.
+
+## Summary cards
+
+Four cards at the top of the dashboard provide a high-level overview:
+
+| Card                | Description                                        |
+| ------------------- | -------------------------------------------------- |
+| **Total Objects**   | Number of objects across the selected scope         |
+| **Total Size**      | Aggregate storage usage in human-readable units     |
+| **Top-Level Folders** | Count of distinct top-level prefixes              |
+| **Largest Folder**  | The prefix consuming the most storage              |
+
+## Growth trend chart
+
+A 90-day growth trend chart shows how total storage usage has changed over time. The chart is SVG-based and supports hover tooltips that display the exact size and date for each data point.
+
+Data points are captured from crawl snapshots, so the chart reflects the state of the index at each recrawl cycle.
+
+## Storage breakdown
+
+Below the trend chart, a horizontal bar chart shows storage distribution across top-level folders. Each bar is proportional to the folder's share of total usage, making it easy to identify which prefixes are consuming the most space.
+
+### Per-folder expansion
+
+Click any folder in the breakdown to expand an inline growth trend chart for that specific prefix. This lets you investigate whether a particular folder is growing, shrinking, or stable over the 90-day window.
+
+## Data table
+
+A table at the bottom of the dashboard lists every top-level folder sorted by size (largest first):
+
+| Column              | Description                              |
+| ------------------- | ---------------------------------------- |
+| **Folder**          | Top-level prefix name                    |
+| **Objects**         | Number of objects in the prefix          |
+| **Size**            | Total storage used by the prefix         |
+| **% of Total**      | Proportion of total bucket storage       |
+
+The percentage column makes it straightforward to see which folders dominate storage usage and which are negligible.

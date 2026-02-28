@@ -1,0 +1,202 @@
+---
+title: Helm Chart
+description: Install Sairo on Kubernetes using the official Helm chart with customizable values.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo provides an official Helm chart for Kubernetes deployments. The chart bundles all necessary resources and exposes a comprehensive set of values for customization.
+
+## Chart info
+
+| Field       | Value                    |
+| ----------- | ------------------------ |
+| Chart version | `0.1.0`                |
+| App version   | `2.0.0`                |
+| Source        | `charts/sairo`          |
+
+## Install
+
+```bash
+helm install sairo charts/sairo \
+  --namespace sairo \
+  --create-namespace \
+  --set s3.endpoint=https://your-s3-endpoint.com \
+  --set s3.accessKey=your-access-key \
+  --set s3.secretKey=your-secret-key \
+  --set auth.adminPass=choose-a-strong-password \
+  --set auth.jwtSecret=$(openssl rand -hex 32)
+```
+
+## Key values
+
+The table below lists the most important values. For the full schema, see `charts/sairo/values.yaml`.
+
+| Value                     | Default                     | Description                              |
+| ------------------------- | --------------------------- | ---------------------------------------- |
+| `replicaCount`            | `1`                         | Number of pod replicas                   |
+| `image.repository`        | `stephenjr002/sairo`       | Container image registry and path        |
+| `image.tag`               | `latest`                    | Image tag                                |
+| `image.pullPolicy`        | `IfNotPresent`              | Image pull policy                        |
+| `service.type`            | `ClusterIP`                 | Kubernetes service type                  |
+| `service.port`            | `80`                        | Service port                             |
+| `resources.requests.cpu`  | `200m`                      | CPU request                              |
+| `resources.requests.memory` | `512Mi`                   | Memory request                           |
+| `resources.limits.cpu`    | `1`                         | CPU limit                                |
+| `resources.limits.memory` | `1Gi`                       | Memory limit                             |
+| `persistence.enabled`     | `true`                      | Enable persistent storage for /data      |
+| `persistence.size`        | `5Gi`                       | PVC size for SQLite databases            |
+| `persistence.storageClass`| `""`                        | Storage class (empty uses cluster default)|
+| `ingress.enabled`         | `false`                     | Enable ingress resource                  |
+| `ingress.className`       | `""`                        | Ingress class name                       |
+| `ingress.hosts`           | `[]`                        | Ingress host rules                       |
+| `ingress.tls`             | `[]`                        | Ingress TLS configuration                |
+
+## LDAP configuration
+
+Enable LDAP authentication by setting values under the `ldap` key:
+
+```yaml
+ldap:
+  enabled: true
+  server: "ldap://ldap.example.com"
+  baseDn: "dc=example,dc=com"
+  userFilter: "(sAMAccountName={username})"  # use "(uid={username})" for OpenLDAP
+  bindDn: "cn=readonly,dc=example,dc=com"
+  bindPassword: "readonly-password"
+  adminGroup: "cn=admins,ou=groups,dc=example,dc=com"
+  defaultRole: "viewer"
+```
+
+## OAuth configuration
+
+Enable OAuth authentication with Google or GitHub:
+
+```yaml
+oauth:
+  google:
+    clientId: "your-google-client-id"
+    clientSecret: "your-google-client-secret"
+  github:
+    clientId: "your-github-client-id"
+    clientSecret: "your-github-client-secret"
+  defaultRole: "viewer"
+  allowedDomains: "example.com,company.com"
+```
+
+## Branding
+
+Customize the UI appearance:
+
+```yaml
+branding:
+  appName: "My Storage Browser"
+  primaryColor: "#1a73e8"
+  appLogo: "https://example.com/logo.svg"
+  loginMessage: "Sign in with your corporate account"
+```
+
+## Network policy
+
+The chart can deploy a NetworkPolicy to restrict traffic to the Sairo pods:
+
+```yaml
+networkPolicy:
+  enabled: true
+```
+
+When enabled, only traffic from pods within the same namespace and ingress controller traffic are allowed.
+
+## Values override example
+
+Create a `values-production.yaml` file with your overrides:
+
+```yaml
+replicaCount: 1
+
+image:
+  repository: stephenjr002/sairo
+  tag: "2.0.0"
+
+s3:
+  endpoint: "https://s3.us-east-1.amazonaws.com"
+  accessKey: "AKIA..."
+  secretKey: "your-secret-key"
+  region: "us-east-1"
+  pathStyle: false
+
+auth:
+  adminPass: "strong-random-password"
+  jwtSecret: "long-random-hex-string"
+  sessionHours: 12
+  secureCookie: true
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: "gp3"
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: sairo.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: sairo-tls
+      hosts:
+        - sairo.example.com
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2
+    memory: 2Gi
+
+branding:
+  appName: "Acme Storage"
+  primaryColor: "#0f62fe"
+
+networkPolicy:
+  enabled: true
+```
+
+Install with the override file:
+
+```bash
+helm install sairo charts/sairo \
+  --namespace sairo \
+  --create-namespace \
+  -f values-production.yaml
+```
+
+## Upgrading
+
+```bash
+helm upgrade sairo charts/sairo \
+  --namespace sairo \
+  -f values-production.yaml
+```
+
+## Uninstalling
+
+```bash
+helm uninstall sairo --namespace sairo
+```
+
+<Aside>
+  Uninstalling the Helm release does not delete the PersistentVolumeClaim by default. To remove the stored index data, delete the PVC manually: `kubectl -n sairo delete pvc sairo-data`.
+</Aside>
+
+## Raw manifests
+
+If you prefer plain Kubernetes YAML without Helm, use `helm template` to render the manifests:
+
+```bash
+helm template sairo charts/sairo -f values-production.yaml > sairo-manifests.yaml
+kubectl apply -f sairo-manifests.yaml
+```

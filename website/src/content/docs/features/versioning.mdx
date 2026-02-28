@@ -1,0 +1,62 @@
+---
+title: Version Management
+description: Browse, restore, and purge object versions with delete marker visibility and a background version scanner.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo provides full control over S3 object versioning directly from the browser. You can enable versioning, browse historical versions, restore old copies, and clean up accumulated versions and delete markers.
+
+## Enable or suspend versioning
+
+Navigate to **Bucket Settings > Overview** to toggle versioning for a bucket. The two states are:
+
+| State         | Behavior                                                     |
+| ------------- | ------------------------------------------------------------ |
+| **Enabled**   | Every PUT or DELETE creates a new version. Deleted objects receive a delete marker and can be restored. |
+| **Suspended** | New writes overwrite the `null` version. Existing versions are preserved but no new versions are created. |
+
+<Aside type="caution">
+  Versioning cannot be permanently disabled once enabled. You can only suspend it, which stops new versions from being created but does not remove existing ones.
+</Aside>
+
+## Browsing versions
+
+When versioning is enabled, click the info button ("i") on any object to open the detail modal, then switch to the **Versions** tab. Each version shows:
+
+- **Version ID**
+- **Last modified** timestamp
+- **Size**
+- **Whether it is the current (latest) version**
+
+## Restoring a version
+
+Click "Restore" on any previous version to make it the current version. Sairo performs the restore by copying the selected version over the latest, which creates a new version entry rather than deleting intermediate versions.
+
+## Deleting specific versions
+
+You can permanently delete individual versions by selecting them and clicking "Delete version". This removes the version from S3 entirely -- it is not recoverable.
+
+## Purging versions
+
+For bulk cleanup, Sairo supports two purge operations:
+
+- **Purge versions for selected objects** -- Select one or more objects with checkboxes, then choose "Purge versions" to delete all non-current versions of those objects.
+- **Purge versions for a prefix** -- Enable "Show Deleted" to reveal versioned items, then use the per-item purge buttons to clean up non-current versions under the current prefix.
+
+## Delete marker visibility
+
+A toggle at the top of the object browser controls whether delete markers are visible. When enabled, deleted objects appear in the list with a "delete marker" badge. This makes it easy to find and restore accidentally deleted files.
+
+## Version Scanner
+
+Sairo includes a background **Version Scanner** that crawls versioned buckets to discover:
+
+- **Hidden delete markers** -- Delete markers that are not visible in a standard ListObjectsV2 call.
+- **Ghost objects** -- Non-current versions that remain after the current version has been deleted.
+
+The scanner runs on demand and reports its findings in the bucket settings panel, helping you identify storage that can be reclaimed.
+
+## Per-version presigned URLs
+
+You can generate a presigned download URL for any specific version of an object, not just the latest. This is useful for sharing or downloading a historical copy without restoring it first.

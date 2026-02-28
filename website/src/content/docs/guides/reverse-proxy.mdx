@@ -1,0 +1,166 @@
+---
+title: "Reverse Proxy"
+description: "Configuring Nginx, Traefik, and Caddy as a reverse proxy in front of Sairo."
+---
+
+Running Sairo behind a reverse proxy is recommended for production deployments. It enables HTTPS termination, custom domains, and integration with your existing infrastructure.
+
+When behind an HTTPS proxy, set `SECURE_COOKIE=true` in your Sairo configuration so session cookies are marked Secure and only sent over HTTPS.
+
+```yaml
+environment:
+  SECURE_COOKIE: "true"
+```
+
+## Nginx
+
+```nginx
+server {
+    listen 80;
+    server_name sairo.example.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name sairo.example.com;
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+
+    # Max upload size — adjust to match your largest expected upload
+    client_max_body_size 10G;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (for live updates)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # Disable buffering for streaming responses
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+}
+```
+
+### Key Directives
+
+- **`client_max_body_size`** — Controls the maximum upload size. Nginx defaults to 1MB, which is too small for most use cases. Set this to accommodate your largest uploads.
+- **`proxy_buffering off`** — Ensures NDJSON streaming responses reach the browser immediately.
+- **`proxy_request_buffering off`** — Allows large uploads to stream directly to Sairo without Nginx buffering the entire body first.
+- **WebSocket headers** — Required for live UI updates.
+
+## Traefik
+
+### Docker Compose Labels
+
+```yaml
+services:
+  sairo:
+    image: stephenjr002/sairo:latest
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sairo.rule=Host(`sairo.example.com`)"
+      - "traefik.http.routers.sairo.entrypoints=websecure"
+      - "traefik.http.routers.sairo.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sairo.loadbalancer.server.port=8000"
+    environment:
+      SECURE_COOKIE: "true"
+      # ... other Sairo env vars
+    volumes:
+      - sairo-data:/data
+
+  traefik:
+    image: traefik:v3
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@example.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+
+volumes:
+  sairo-data:
+  letsencrypt:
+```
+
+Traefik automatically handles HTTPS with Let's Encrypt and routes traffic to Sairo.
+
+## Caddy
+
+Caddy is the simplest option. It automatically provisions and renews HTTPS certificates.
+
+### Caddyfile
+
+```
+sairo.example.com {
+    reverse_proxy localhost:8000
+}
+```
+
+That is the entire configuration. Caddy handles:
+
+- HTTPS certificate provisioning via Let's Encrypt
+- HTTP to HTTPS redirect
+- WebSocket proxying
+- Header forwarding
+
+### Docker Compose with Caddy
+
+```yaml
+services:
+  sairo:
+    image: stephenjr002/sairo:latest
+    environment:
+      SECURE_COOKIE: "true"
+      # ... other Sairo env vars
+    volumes:
+      - sairo-data:/data
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  sairo-data:
+  caddy-data:
+  caddy-config:
+```
+
+With the Caddyfile:
+
+```
+sairo.example.com {
+    reverse_proxy sairo:8000
+}
+```
+
+## Verifying the Setup
+
+After configuring your reverse proxy:
+
+1. Access Sairo via your domain (e.g., `https://sairo.example.com`)
+2. Log in and verify the session cookie is set correctly
+3. Test file uploads to confirm `client_max_body_size` (Nginx) or equivalent is sufficient
+4. Check browser developer tools to confirm cookies have the `Secure` flag set

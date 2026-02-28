@@ -1,0 +1,113 @@
+---
+title: Configuration
+description: Complete environment variable reference for Sairo, grouped by function.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo is configured entirely through environment variables. Pass them via `-e` flags in `docker run`, an `.env` file with Docker Compose, or Kubernetes secrets.
+
+## S3 connection (required)
+
+These variables connect Sairo to your S3-compatible storage backend.
+
+| Variable         | Required | Default       | Description                                                                 |
+| ---------------- | -------- | ------------- | --------------------------------------------------------------------------- |
+| `S3_ENDPOINT`    | Yes      | --            | Full URL of your S3-compatible endpoint (e.g., `https://s3.amazonaws.com`). |
+| `S3_ACCESS_KEY`  | Yes      | --            | S3 access key ID.                                                           |
+| `S3_SECRET_KEY`  | Yes      | --            | S3 secret access key.                                                       |
+| `S3_REGION`      | No       | _(empty)_     | S3 region. Required by some providers; can be left empty for MinIO.         |
+
+## Authentication
+
+These variables control login credentials and session behavior.
+
+| Variable         | Required | Default          | Description                                                                 |
+| ---------------- | -------- | ---------------- | --------------------------------------------------------------------------- |
+| `ADMIN_USER`     | No       | `admin`          | Username for the built-in admin account.                                    |
+| `ADMIN_PASS`     | No       | Auto-generated   | Password for the admin account. If not set, a random password is generated and printed to stdout on first startup. |
+| `JWT_SECRET`     | No       | Auto-generated   | Secret key used to sign JWT tokens. If not set, a random value is generated on startup. **Set this explicitly in production** so tokens survive container restarts. |
+| `SESSION_HOURS`  | No       | `24`             | Number of hours before a JWT token expires and the user must log in again.  |
+| `SECURE_COOKIE`  | No       | `true`           | Set the `Secure` flag on authentication cookies. Must be `true` for HTTPS, `false` for HTTP. |
+
+<Aside type="danger">
+  `SECURE_COOKIE` defaults to `true`. If you access Sairo over plain HTTP (including `localhost` without TLS), you **must** set `SECURE_COOKIE=false`. Otherwise, the browser will refuse to send cookies and authentication will silently fail -- you will see a successful login but every subsequent request will be unauthenticated.
+</Aside>
+
+<Aside type="tip">
+  Always set `JWT_SECRET` explicitly in production. If you let it auto-generate, every container restart will invalidate all active sessions and force users to log in again.
+</Aside>
+
+## Crawler
+
+These variables control how Sairo indexes your S3 objects.
+
+| Variable           | Required | Default  | Description                                                                 |
+| ------------------ | -------- | -------- | --------------------------------------------------------------------------- |
+| `RECRAWL_INTERVAL` | No       | `120`    | Seconds between the end of one crawl and the start of the next. Increase this for large buckets to reduce S3 API calls. |
+| `DB_DIR`           | No       | `/data`  | Directory where per-bucket SQLite databases are stored. Mount a persistent volume here. |
+
+## LDAP (optional)
+
+Enable LDAP authentication to let users log in with their directory credentials.
+
+| Variable             | Required       | Default    | Description                                                                 |
+| -------------------- | -------------- | ---------- | --------------------------------------------------------------------------- |
+| `LDAP_ENABLED`       | No             | `false`    | Set to `true` to enable LDAP authentication.                               |
+| `LDAP_SERVER`        | If LDAP enabled | --        | LDAP server URL (e.g., `ldap://ldap.example.com` or `ldaps://ldap.example.com`). |
+| `LDAP_BASE_DN`       | If LDAP enabled | --        | Base DN for user searches (e.g., `dc=example,dc=com`).                     |
+| `LDAP_USER_FILTER`   | If LDAP enabled | `(sAMAccountName={username})` | LDAP filter to find users. Use `{username}` as a placeholder. |
+| `LDAP_BIND_DN`       | No             | --         | DN to bind with for searching (e.g., `cn=readonly,dc=example,dc=com`). If not set, anonymous bind is attempted. |
+| `LDAP_BIND_PASSWORD` | No             | --         | Password for the bind DN.                                                  |
+| `LDAP_ADMIN_GROUP`   | No             | --         | DN of the LDAP group whose members are granted the `admin` role (e.g., `cn=admins,ou=groups,dc=example,dc=com`). |
+| `LDAP_DEFAULT_ROLE`  | No             | `viewer`   | Role assigned to LDAP users who are not in the admin group. One of `admin` or `viewer`. |
+
+## OAuth (optional)
+
+Enable OAuth authentication with Google and/or GitHub.
+
+| Variable                     | Required         | Default    | Description                                                                 |
+| ---------------------------- | ---------------- | ---------- | --------------------------------------------------------------------------- |
+| `OAUTH_GOOGLE_CLIENT_ID`     | For Google OAuth | --         | Google OAuth 2.0 client ID.                                                |
+| `OAUTH_GOOGLE_CLIENT_SECRET` | For Google OAuth | --         | Google OAuth 2.0 client secret.                                            |
+| `OAUTH_GITHUB_CLIENT_ID`     | For GitHub OAuth | --         | GitHub OAuth app client ID.                                                |
+| `OAUTH_GITHUB_CLIENT_SECRET` | For GitHub OAuth | --         | GitHub OAuth app client secret.                                            |
+| `OAUTH_DEFAULT_ROLE`         | No               | `viewer`   | Role assigned to new users who authenticate via OAuth. One of `admin` or `viewer`. |
+| `OAUTH_ALLOWED_DOMAINS`      | No               | --         | Comma-separated list of allowed email domains (e.g., `example.com,company.com`). If set, only users with matching email domains can log in. |
+
+## Branding (optional)
+
+Customize the Sairo UI appearance.
+
+| Variable        | Required | Default   | Description                                                                 |
+| --------------- | -------- | --------- | --------------------------------------------------------------------------- |
+| `APP_NAME`      | No       | `Sairo`   | Application name displayed in the UI header and login page.                |
+| `PRIMARY_COLOR` | No       | `#3b82f6` | Primary accent color for the UI (any valid CSS color, e.g., `#1a73e8`).   |
+| `APP_LOGO`      | No       | --        | URL to a logo image displayed on the login page and sidebar.               |
+| `LOGIN_MESSAGE` | No       | --        | Custom message shown on the login page (e.g., `"Sign in with your corporate account"`). |
+
+## Example .env file
+
+```bash
+# S3 connection
+S3_ENDPOINT=https://s3.us-east-1.amazonaws.com
+S3_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+S3_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+S3_REGION=us-east-1
+
+# Authentication
+ADMIN_USER=admin
+ADMIN_PASS=your-strong-password
+JWT_SECRET=your-random-64-char-hex-string
+SESSION_HOURS=24
+SECURE_COOKIE=true
+
+# Crawler
+RECRAWL_INTERVAL=300
+DB_DIR=/data
+
+# Branding
+APP_NAME=Acme Storage Browser
+PRIMARY_COLOR=#0f62fe
+LOGIN_MESSAGE=Internal use only. Sign in to continue.
+```

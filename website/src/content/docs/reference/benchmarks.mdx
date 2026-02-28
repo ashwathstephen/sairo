@@ -1,0 +1,138 @@
+---
+title: "Benchmarks"
+description: "Performance benchmarks for search, indexing, uploads, and API response times — with reproduction scripts."
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo ships with a benchmark suite you can run against your own deployment. All numbers on the landing page are derived from these reproducible tests.
+
+## Test Environment
+
+| Parameter | Value |
+|---|---|
+| **Runtime** | Docker container, single Uvicorn process |
+| **Host** | macOS, Apple Silicon (Docker Desktop) |
+| **Local S3** | MinIO (localhost:9000) |
+| **Production S3** | Leaseweb Object Storage (us.object-storage.io) |
+| **Production dataset** | 134,707 objects, 38.25 TB |
+| **Methodology** | 30 iterations per measurement, percentile reporting |
+
+<Aside type="tip">
+  Production deployments on dedicated Linux hardware with NVMe storage will yield better numbers than these Docker Desktop results.
+</Aside>
+
+## Search Latency
+
+FTS5 trigram search against the production bucket (134,707 objects, 38.25 TB):
+
+| Query | Results | p50 | p95 |
+|---|---|---|---|
+| `parquet` (limit=100) | 100 | **3.1ms** | 4.8ms |
+| `adrequest` | 200 | **2.4ms** | 16.2ms |
+| `pixel` | 200 | **2.3ms** | 3.0ms |
+| `flatevents` | 200 | **2.5ms** | 3.4ms |
+| `sampling` | 200 | **2.4ms** | 5.5ms |
+| `metadata` | 200 | **2.4ms** | 4.3ms |
+| `2026` | 200 | **2.2ms** | 22.0ms |
+
+Fastest observed: **1.7ms**. Typical queries return in **2-3ms p50** against 134K objects.
+
+## Indexing Throughput
+
+| Bucket | Objects | Duration | Throughput |
+|---|---|---|---|
+| bench-small | 1,000 | 1.08s | **926 obj/s** |
+| bench-mixed | 2,416 | 1.08s | **1,348 obj/s** |
+| ssp-production-reports | 134,707 | completed | Production-scale crawl |
+
+Indexing rate: **1,000–1,350 objects/second** on local MinIO.
+
+## Upload Throughput
+
+| File Size | p50 | Throughput |
+|---|---|---|
+| 1 KB | 44.9ms | — |
+| 1 MB | 51.9ms | 19.3 MB/s |
+| 10 MB | 130.7ms | 76.5 MB/s |
+| 50 MB | 436.2ms | **114.6 MB/s** |
+
+## API Response Times
+
+| Endpoint | p50 | p95 |
+|---|---|---|
+| `/healthz` | **2.1ms** | 3.6ms |
+| `/api/buckets` | **4.3ms** | 5.8ms |
+| Object listing (production) | **2.4ms** | 4.6ms |
+| Presigned URL generation | **3.1ms** | 5.6ms |
+
+## Concurrent Load
+
+Production S3, concurrent search queries:
+
+| Concurrent Users | Requests/sec |
+|---|---|
+| 5 | **236** |
+| 10 | **333** |
+| 25 | **528** |
+
+## Running the Benchmarks
+
+The benchmark suite lives in the `benchmark/` directory of the repository.
+
+### 1. Seed test data
+
+```bash
+# Requires MinIO CLI (mc) configured with alias "local"
+cd benchmark
+./seed-data.sh              # Seeds bench-small (1K) + bench-mixed (2.4K)
+./seed-data.sh medium       # Seeds bench-medium (10K objects)
+./seed-data.sh large        # Seeds bench-large (50K objects)
+```
+
+The seeder creates four buckets with realistic file structures:
+
+| Bucket | Objects | Pattern |
+|---|---|---|
+| `bench-small` | 1,000 | 5 dirs × 10 months × 20 files |
+| `bench-mixed` | ~2,400 | Parquet data lake, logs, configs, CSV reports |
+| `bench-medium` | 10,000 | 10 dirs × 10 months × 10 sub-dirs × 10 files |
+| `bench-large` | 50,000 | 10 dirs × 50 partitions × 100 records |
+
+### 2. Run benchmarks
+
+```bash
+# Run all benchmarks
+./run-benchmarks.sh
+
+# Run specific benchmark categories
+./run-benchmarks.sh search          # Search latency only
+./run-benchmarks.sh crawl           # Crawl/indexing only
+./run-benchmarks.sh crawl listing   # Crawl + listing
+```
+
+### Prerequisites
+
+- Sairo running on `localhost:8000` (or set `SAIRO_URL`)
+- MinIO running on `localhost:9000`
+- Test buckets seeded via `seed-data.sh`
+- Default admin credentials (`admin`/`password`) or set `ADMIN_USER`/`ADMIN_PASS`
+
+### 3. Results
+
+Results are saved to `benchmark/results/`:
+
+- **JSON** — machine-readable per-run results (`benchmark-YYYYMMDD-HHMMSS.json`)
+- **Markdown** — human-readable summary (`LATEST-RESULTS.md`)
+
+## Landing Page Claims
+
+Every number on the landing page maps to a specific benchmark result:
+
+| Landing Page Claim | Benchmark Evidence |
+|---|---|
+| "Single-digit millisecond search" | Production p50 = 2.2–3.1ms on 134K objects |
+| "1,300+ obj/sec indexing" | 1,348 obj/s measured on bench-mixed |
+| "Sub-5ms API responses" | healthz p50 = 2.1ms, most endpoints < 5ms |
+| "500+ requests/second" | 528 req/s at 25 concurrent users (production) |
+| "114 MB/s upload" | 50 MB file upload sustained throughput |

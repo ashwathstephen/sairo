@@ -1,0 +1,166 @@
+---
+title: "API Reference"
+description: "Complete reference of all Sairo API endpoints grouped by function."
+---
+
+import { Aside, Badge } from "@astrojs/starlight/components";
+
+Sairo exposes a REST API that powers the web UI. All endpoints are available for programmatic use with the same authentication.
+
+## Authentication
+
+All endpoints require authentication except:
+
+- `POST /api/auth/login` — login
+- `GET /healthz` — health check
+- `GET /api/share/{token}` — public share link access
+
+Authenticate with either:
+
+- **Session cookie** — automatically set after login via the web UI
+- **Bearer token** — pass an API token in the `Authorization` header:
+
+```
+Authorization: Bearer sairo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+<Aside type="tip">
+  Create API tokens from the web UI under **API Tokens** in the admin toolbar. Tokens have the same permissions as the user who created them.
+</Aside>
+
+## Endpoint Reference
+
+### Auth
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="POST" variant="note" /> | `/api/auth/login` | Log in with username and password |
+| <Badge text="POST" variant="note" /> | `/api/auth/logout` | Log out and clear session cookie |
+| <Badge text="GET" variant="success" /> | `/api/auth/me` | Get current user info |
+| <Badge text="POST" variant="note" /> | `/api/auth/change-password` | Change own password |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/setup` | Begin 2FA setup, returns QR code |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/verify` | Verify TOTP code to complete 2FA setup |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/disable` | Disable 2FA on own account |
+| <Badge text="GET" variant="success" /> | `/api/auth/users` | List all users (admin only) |
+| <Badge text="POST" variant="note" /> | `/api/auth/users` | Create a new user (admin only) |
+| <Badge text="DELETE" variant="danger" /> | `/api/auth/users/{username}` | Delete a user (admin only) |
+| <Badge text="PUT" variant="caution" /> | `/api/auth/users/{username}` | Update user (role, etc.) (admin only) |
+| <Badge text="PUT" variant="caution" /> | `/api/auth/users/{username}/permissions` | Set per-bucket permissions (admin only) |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/reset/{username}` | Reset a user's 2FA (admin only) |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/enable` | Enable 2FA after setup verification |
+| <Badge text="POST" variant="note" /> | `/api/auth/2fa/recover` | Log in with a recovery code |
+| <Badge text="POST" variant="note" /> | `/api/auth/refresh` | Refresh session token |
+| <Badge text="GET" variant="success" /> | `/api/auth/tokens` | List own API tokens |
+| <Badge text="POST" variant="note" /> | `/api/auth/tokens` | Create a new API token |
+| <Badge text="DELETE" variant="danger" /> | `/api/auth/tokens/{token_id}` | Revoke an API token |
+
+### OAuth & LDAP
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/auth/oauth/providers` | List available OAuth providers |
+| <Badge text="GET" variant="success" /> | `/api/auth/oauth/{provider}/login` | Initiate OAuth flow (google or github) |
+| <Badge text="GET" variant="success" /> | `/api/auth/oauth/{provider}/callback` | OAuth callback |
+| <Badge text="POST" variant="note" /> | `/api/auth/ldap` | LDAP authentication |
+
+### Buckets
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/buckets` | List all accessible buckets |
+| <Badge text="POST" variant="note" /> | `/api/buckets` | Create a new bucket (admin only) |
+| <Badge text="DELETE" variant="danger" /> | `/api/buckets/{bucket}` | Delete an empty bucket (admin only) |
+
+### Objects
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/list` | List objects at a prefix |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/download` | Download an object via presigned URL redirect |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/upload` | Upload a file |
+| <Badge text="DELETE" variant="danger" /> | `/api/b/{bucket}/objects` | Delete an object |
+| <Badge text="DELETE" variant="danger" /> | `/api/b/{bucket}/folder` | Delete a folder (prefix) |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/copy` | Copy an object |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/rename` | Rename an object |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/create-folder` | Create a folder (empty prefix) |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/preview` | Preview file content (first 500 KB) |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/presigned-url` | Generate a presigned download URL |
+
+### Versions
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/object-versions` | Get versions for a specific object |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/list-versions` | List all object versions in a bucket |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/version-restore` | Restore a specific version |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/version-delete` | Delete a specific version |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/purge-versions` | Purge non-current versions |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/scan-versions` | Scan for all versions in a bucket |
+
+### Bucket Settings
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/versioning` | Get versioning status |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/versioning` | Enable or suspend versioning |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/lifecycle` | Get lifecycle rules |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/lifecycle` | Set lifecycle rules |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/cors` | Get CORS configuration |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/cors` | Set CORS configuration |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/acl` | Get bucket ACL |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/acl` | Set bucket ACL |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/policy` | Get bucket policy |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/policy` | Set bucket policy |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/tagging` | Get bucket tags |
+| <Badge text="PUT" variant="caution" /> | `/api/b/{bucket}/tagging` | Set bucket tags |
+
+### Analytics
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/storage-breakdown` | Get storage breakdown by prefix |
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/storage-history` | Get storage growth over time |
+
+### Search
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/search?q={term}` | Full-text search within a bucket |
+
+### Index
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/b/{bucket}/crawl-status` | Get indexing status for a bucket |
+| <Badge text="POST" variant="note" /> | `/api/b/{bucket}/crawl` | Trigger a reindex of a bucket |
+
+### Share Links
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/share-links` | List all share links (admin only) |
+| <Badge text="POST" variant="note" /> | `/api/share-links` | Create a new share link |
+| <Badge text="DELETE" variant="danger" /> | `/api/share-links/{link_id}` | Delete a share link |
+| <Badge text="GET" variant="success" /> | `/api/share/{token}` | Access a shared file (public, no auth) |
+
+### Audit Log
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/audit-log` | Get audit log entries (admin only) |
+
+### Endpoints (Multi-S3)
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/api/endpoints` | List configured S3 endpoints |
+| <Badge text="POST" variant="note" /> | `/api/endpoints` | Add a new S3 endpoint (admin only) |
+| <Badge text="PUT" variant="caution" /> | `/api/endpoints/{id}` | Update an S3 endpoint (admin only) |
+| <Badge text="DELETE" variant="danger" /> | `/api/endpoints/{id}` | Remove an S3 endpoint (admin only) |
+
+### Health & Branding
+
+| Method | Path | Description |
+|---|---|---|
+| <Badge text="GET" variant="success" /> | `/healthz` | Health check (no auth required) |
+| <Badge text="GET" variant="success" /> | `/api/branding` | Get branding configuration |

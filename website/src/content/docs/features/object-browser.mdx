@@ -1,0 +1,56 @@
+---
+title: Object Browser
+description: Navigate millions of objects with a virtualized, streaming browser that renders progressively and stays responsive at any scale.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo's object browser is the primary interface for exploring your S3 buckets. It is designed to stay responsive even when a single prefix contains hundreds of thousands of objects.
+
+## Virtualized table
+
+The object list is rendered with **@tanstack/react-virtual**, which only mounts the DOM nodes currently visible in the viewport. This means a folder with 100,000+ objects uses the same amount of memory and renders just as smoothly as a folder with 10.
+
+## Hash-based routing
+
+Every location in the browser is represented by a URL fragment in the form `#bucket:prefix/path/`. You can bookmark any folder, share the URL with a teammate, or use the browser's back and forward buttons to navigate your history.
+
+```
+https://sairo.example.com/#my-bucket:data/2026/02/
+```
+
+## Breadcrumb navigation
+
+A breadcrumb bar at the top of the browser shows the current path. Click any segment to jump directly to that level of the hierarchy without reloading the page.
+
+## Sorting and filtering
+
+### Sort
+
+Click any column header to sort the current folder's contents:
+
+| Column        | Sort behavior        |
+| ------------- | -------------------- |
+| **Name**      | Alphabetical (A-Z)   |
+| **Size**      | Smallest to largest  |
+| **Modified**  | Oldest to newest     |
+
+Click the same column again to reverse the direction.
+
+### Filter
+
+A filter input above the table narrows the visible objects to those whose name matches the typed substring. Filtering operates on the current folder only and does not recurse into subfolders.
+
+## Folder operations
+
+- **Create folder** -- Click the "New folder" button to create a zero-byte object with a trailing `/` that acts as a folder marker.
+- **Bulk select** -- Use the checkboxes to select multiple objects, or click the header checkbox to select all visible items.
+- **Bulk delete** -- With one or more objects selected, click "Delete" to remove them in a single batch request.
+
+<Aside type="caution">
+  Bulk delete is permanent. If versioning is enabled on the bucket, the objects receive delete markers but can still be restored. If versioning is not enabled, deleted objects cannot be recovered.
+</Aside>
+
+## NDJSON streaming
+
+When you open a folder, Sairo's backend streams object metadata to the browser as newline-delimited JSON (NDJSON). The frontend appends rows to the table as each chunk arrives rather than waiting for the full response. This gives you progressive rendering -- you see the first results immediately, even if the folder contains millions of objects.

@@ -1,0 +1,72 @@
+---
+title: "Authentication"
+description: "How Sairo handles authentication with JWT tokens, secure cookies, session management, and rate limiting."
+---
+
+Sairo uses JWT-based authentication with secure cookie storage. Tokens are issued on login and validated on every API request.
+
+## How It Works
+
+When a user logs in, the backend issues a signed JWT and sets it as an **httpOnly** cookie with `SameSite=Strict`. This prevents JavaScript from reading the token and blocks the cookie on all cross-site navigations.
+
+Every subsequent request includes the cookie automatically. The backend validates the token signature, checks expiration, and extracts the user identity.
+
+## Session Duration
+
+Sessions last **24 hours** by default. You can change this with the `SESSION_HOURS` environment variable:
+
+```yaml
+environment:
+  SESSION_HOURS: "48"  # 48-hour sessions
+```
+
+## Expiration Warning
+
+Five minutes before a session expires, a toast notification appears in the UI with an **Extend** button. Clicking it issues a fresh token without requiring re-login.
+
+If the session expires without extension, the user is redirected to the login page.
+
+## Secure Cookie Flag
+
+The `SECURE_COOKIE` environment variable controls whether the cookie is sent only over HTTPS:
+
+| Deployment | `SECURE_COOKIE` |
+|---|---|
+| Behind HTTPS reverse proxy | `true` (recommended) |
+| Plain HTTP (local/dev) | `false` |
+
+```yaml
+environment:
+  SECURE_COOKIE: "true"
+```
+
+If `SECURE_COOKIE=true` but you access Sairo over plain HTTP, the browser will not send the cookie and login will appear broken. Set it to `false` for HTTP deployments.
+
+## Rate Limiting
+
+Login attempts are rate-limited with two layers:
+
+- **10 requests per minute** via the global rate limiter (applied to the login endpoint)
+- **10 requests per 5 minutes per IP address** via a hardcoded per-IP window
+
+Both limits apply simultaneously. After exceeding either limit, the API returns `429 Too Many Requests` until the window resets. These limits are not independently configurable.
+
+## Password Hashing
+
+All passwords are hashed with **bcrypt** before storage. Plaintext passwords are never written to disk or logs. Passwords must be at least **8 characters** long.
+
+## First Run
+
+On first startup, Sairo auto-generates:
+
+- A **JWT_SECRET** used to sign tokens (generated in-memory if not set via env var)
+- An **admin account** with the username and password from `ADMIN_USER` and `ADMIN_PASS` environment variables
+
+If `JWT_SECRET` is not explicitly set, a random secret is generated in memory on each startup. This means **all active sessions are invalidated on restart**. For production and multi-instance deployments, always set `JWT_SECRET` explicitly.
+
+```yaml
+environment:
+  ADMIN_USER: "admin"
+  ADMIN_PASS: "your-secure-password"
+  JWT_SECRET: "a-long-random-string"
+```

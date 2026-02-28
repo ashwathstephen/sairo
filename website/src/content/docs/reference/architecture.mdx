@@ -1,0 +1,91 @@
+---
+title: "Architecture"
+description: "Technical overview of Sairo's architecture, including the single-container design, SQLite indexing, and crawling system."
+---
+
+Sairo is designed as a single-container application that combines a FastAPI backend and a React frontend into one deployable unit.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Python 3.12, FastAPI, Uvicorn |
+| S3 Client | boto3 |
+| Database | SQLite with WAL mode and FTS5 |
+| Frontend | React 18, Vite, @tanstack/react-virtual |
+| Auth | JWT (PyJWT), passlib (bcrypt), pyotp (TOTP), slowapi (rate limiting) |
+| Encryption | Fernet (cryptography library) |
+
+## Architecture Overview
+
+<img src="/assets/architecture.svg" alt="Sairo architecture diagram showing Client Layer, Sairo Container, Persistence Layer, and External Storage Layer" style="width:100%;max-width:900px;margin:1.5rem auto;display:block;border-radius:8px;" />
+
+## Single Container Design
+
+The FastAPI backend serves the React SPA as static files. There is no separate web server or reverse proxy required inside the container. A single `docker run` or Kubernetes pod gives you a fully functional instance.
+
+The container runs as a non-root user (UID 1000) with no privilege escalation capabilities.
+
+## SQLite Indexing
+
+Each bucket gets its own SQLite database file stored in the `/data` directory (configurable via `DB_DIR`). This design provides:
+
+- **Isolation** — a corrupted or slow index for one bucket does not affect others
+- **WAL mode** — concurrent reads during writes without blocking
+- **FTS5 full-text search** — fast prefix and substring search across object keys and metadata
+
+The database schema stores object keys, sizes, last-modified timestamps, ETags, and content types. The FTS5 index covers object keys for search.
+
+## Prefix-Parallel Crawling
+
+When indexing a bucket, Sairo first discovers top-level prefixes (folders) via a shallow `ListObjectsV2` call. It then crawls each prefix in parallel using a thread pool.
+
+```
+Bucket: my-data
+├── logs/          ─── Thread 1
+├── backups/       ─── Thread 2
+├── uploads/       ─── Thread 3
+├── archives/      ─── Thread 4
+└── (root objects) ─── Main thread
+```
+
+Configuration:
+
+- **4 threads per bucket** — each top-level prefix is crawled by one of 4 concurrent threads
+- **6 buckets max concurrent** — the background `ThreadPoolExecutor(6)` limits total crawling parallelism
+- **Recrawl interval** — controlled by `RECRAWL_INTERVAL` (default 120 seconds)
+
+This approach scales well for buckets with many top-level prefixes and millions of objects.
+
+## NDJSON Streaming
+
+Object listings are streamed to the frontend as Newline-Delimited JSON (NDJSON). Instead of waiting for the entire listing to complete, the backend writes one JSON object per line as objects are discovered:
+
+```
+{"key":"file1.txt","size":1024,"last_modified":"2026-01-15T10:30:00Z"}
+{"key":"file2.txt","size":2048,"last_modified":"2026-01-15T11:00:00Z"}
+...
+```
+
+The React frontend renders rows incrementally as they arrive, so the UI feels responsive even for buckets with tens of thousands of objects. The `@tanstack/react-virtual` library virtualizes the list so only visible rows are rendered in the DOM.
+
+## Multi-Endpoint S3 Support
+
+Sairo can connect to multiple S3-compatible storage backends simultaneously. The `S3ClientManager` uses Python's `contextvars` to route each HTTP request to the correct boto3 S3 client based on the selected endpoint.
+
+Endpoint credentials are encrypted at rest using **Fernet symmetric encryption** (from the `cryptography` library). The encryption key is derived from the `JWT_SECRET`.
+
+```
+Request → Endpoint Selection → contextvars → S3ClientManager → boto3 client → S3 Backend
+```
+
+Admins add, edit, and remove endpoints from the **Endpoints** page in the UI. Each endpoint has its own set of buckets and indexes.
+
+## Security Properties
+
+- **Non-root container** — runs as UID 1000 with no capability additions
+- **No privilege escalation** — container security context prevents escalation
+- **Encrypted credentials** — stored endpoint credentials use Fernet encryption
+- **httpOnly cookies** — JWT tokens cannot be read by client-side JavaScript
+- **bcrypt passwords** — all passwords are hashed, never stored in plaintext
+- **Rate limiting** — configurable per-endpoint rate limits prevent abuse

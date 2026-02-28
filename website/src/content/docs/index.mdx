@@ -1,0 +1,59 @@
+---
+title: Sairo Documentation
+description: Self-hosted S3-compatible object storage browser — browse, search, preview, and manage any S3 storage.
+template: splash
+hero:
+  tagline: Everything you need to deploy, configure, and use Sairo.
+  actions:
+    - text: Quickstart
+      link: /getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Configuration Reference
+      link: /installation/configuration/
+      icon: external
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Getting Started
+
+<CardGrid>
+  <LinkCard title="Quickstart" description="Deploy Sairo in 30 seconds with Docker." href="/getting-started/quickstart/" />
+  <LinkCard title="Docker Guide" description="Compose, health checks, TLS, upgrading." href="/installation/docker/" />
+  <LinkCard title="Helm Chart" description="Official Helm chart for Kubernetes with comprehensive values." href="/installation/helm/" />
+</CardGrid>
+
+## Features
+
+<CardGrid>
+  <LinkCard title="Object Browser" description="Navigate buckets and prefixes with virtualized tables that handle 100K+ objects." href="/features/object-browser/" />
+  <LinkCard title="Instant Search" description="Full-text search across all indexed object keys with sub-second results." href="/features/search/" />
+  <LinkCard title="File Preview" description="Preview images, PDFs, CSV tables, JSON trees, and inspect Parquet/ORC/Avro schemas — 46 formats." href="/features/file-preview/" />
+  <LinkCard title="Upload & Download" description="Multipart upload with drag-and-drop, progress tracking, and presigned URLs." href="/features/upload-download/" />
+  <LinkCard title="Storage Dashboard" description="Visual analytics with 90-day trends, per-folder breakdown, and sortable tables." href="/features/storage-dashboard/" />
+  <LinkCard title="Version Management" description="Browse, restore, delete, and purge object versions. Find hidden delete markers." href="/features/versioning/" />
+  <LinkCard title="Bucket Settings" description="8 tabs: Overview, Lifecycle, Policy, ACL, Tags, CORS, Multipart, Index." href="/features/bucket-settings/" />
+  <LinkCard title="Share Links" description="Password-protected share links with configurable expiration." href="/features/share-links/" />
+  <LinkCard title="Multi-Endpoint S3" description="Connect multiple S3 backends and manage all from one dashboard." href="/features/multi-endpoint/" />
+  <LinkCard title="Keyboard Shortcuts" description="30+ shortcuts for power users: navigate, search, upload, switch views." href="/features/keyboard-shortcuts/" />
+</CardGrid>
+
+## Security
+
+<CardGrid>
+  <LinkCard title="Authentication" description="JWT sessions, configurable durations, secure cookie handling." href="/security/authentication/" />
+  <LinkCard title="User Management" description="Role-based access control with per-bucket read/write permissions." href="/security/user-management/" />
+  <LinkCard title="Two-Factor Auth" description="TOTP-based 2FA with QR code setup and recovery codes." href="/security/two-factor/" />
+  <LinkCard title="OAuth & LDAP" description="Google, GitHub OAuth and LDAP authentication with group-based role mapping." href="/security/oauth-ldap/" />
+  <LinkCard title="API Tokens" description="Programmatic access tokens with role-based permissions." href="/security/api-tokens/" />
+  <LinkCard title="Audit Log" description="37 tracked action types with filtering by action, user, and bucket." href="/security/audit-log/" />
+</CardGrid>
+
+## Reference
+
+<CardGrid>
+  <LinkCard title="All Configuration" description="Every environment variable and what it does." href="/installation/configuration/" />
+  <LinkCard title="Benchmarks" description="Reproducible performance benchmarks with scripts." href="/reference/benchmarks/" />
+  <LinkCard title="Changelog" description="Release history and notable changes." href="/reference/changelog/" />
+</CardGrid>

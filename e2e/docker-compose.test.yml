@@ -1,0 +1,44 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_PORT:-9100}:9000"
+      - "${MINIO_CONSOLE_PORT:-9101}:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sairo:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "${SAIRO_PORT:-8888}:8000"
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REGION: us-east-1
+      ADMIN_USER: admin
+      ADMIN_PASS: password
+      JWT_SECRET: e2e-test-secret-key-32chars-long!
+      SECURE_COOKIE: "false"
+      SESSION_HOURS: "24"
+      RECRAWL_INTERVAL: "30"
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  minio-data:

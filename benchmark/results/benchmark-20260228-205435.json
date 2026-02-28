@@ -1,0 +1,208 @@
+{
+    "timestamp": "20260228-205435",
+    "benchmarks": {
+        "crawl": {
+            "bench-small": {
+                "objects": 1000,
+                "duration_sec": 1.08,
+                "objects_per_sec": 926,
+                "status": "complete"
+            },
+            "bench-mixed": {
+                "objects": 1456,
+                "duration_sec": 1.08,
+                "objects_per_sec": 1348,
+                "status": "complete"
+            }
+        },
+        "search": {
+            "parquet": {
+                "p50_ms": 4.7,
+                "p95_ms": 6.8,
+                "min_ms": 4.1,
+                "max_ms": 11.5,
+                "results": 200,
+                "iterations": 30
+            },
+            "config": {
+                "p50_ms": 3.8,
+                "p95_ms": 7.7,
+                "min_ms": 2.5,
+                "max_ms": 10.1,
+                "results": 0,
+                "iterations": 30
+            },
+            "log": {
+                "p50_ms": 3.4,
+                "p95_ms": 5.1,
+                "min_ms": 1.9,
+                "max_ms": 6.2,
+                "results": 0,
+                "iterations": 30
+            },
+            "revenue": {
+                "p50_ms": 3.8,
+                "p95_ms": 5.3,
+                "min_ms": 2.1,
+                "max_ms": 6.4,
+                "results": 0,
+                "iterations": 30
+            },
+            "backup": {
+                "p50_ms": 4.2,
+                "p95_ms": 5.5,
+                "min_ms": 2.1,
+                "max_ms": 6.4,
+                "results": 0,
+                "iterations": 30
+            },
+            "2024": {
+                "p50_ms": 3.1,
+                "p95_ms": 4.4,
+                "min_ms": 2.1,
+                "max_ms": 5.1,
+                "results": 0,
+                "iterations": 30
+            },
+            "api": {
+                "p50_ms": 3.3,
+                "p95_ms": 4.9,
+                "min_ms": 2.3,
+                "max_ms": 5.0,
+                "results": 0,
+                "iterations": 30
+            },
+            "dat": {
+                "p50_ms": 4.0,
+                "p95_ms": 5.6,
+                "min_ms": 2.4,
+                "max_ms": 5.9,
+                "results": 0,
+                "iterations": 30
+            },
+            "csv": {
+                "p50_ms": 3.8,
+                "p95_ms": 5.4,
+                "min_ms": 1.8,
+                "max_ms": 6.2,
+                "results": 0,
+                "iterations": 30
+            },
+            "report": {
+                "p50_ms": 2.0,
+                "p95_ms": 2.7,
+                "min_ms": 1.7,
+                "max_ms": 2.8,
+                "results": 0,
+                "iterations": 30
+            }
+        },
+        "api": {
+            "healthz": {
+                "p50_ms": 2.1,
+                "p95_ms": 3.6,
+                "p99_ms": 10.6,
+                "min_ms": 1.4,
+                "max_ms": 10.6,
+                "avg_ms": 2.5
+            },
+            "auth_me": {
+                "p50_ms": 2.6,
+                "p95_ms": 5.3,
+                "p99_ms": 6.4,
+                "min_ms": 1.8,
+                "max_ms": 6.4,
+                "avg_ms": 3.0
+            },
+            "buckets": {
+                "p50_ms": 4.3,
+                "p95_ms": 5.8,
+                "p99_ms": 12.0,
+                "min_ms": 3.8,
+                "max_ms": 12.0,
+                "avg_ms": 4.6
+            },
+            "system_info": {
+                "p50_ms": 2.9,
+                "p95_ms": 4.2,
+                "p99_ms": 5.4,
+                "min_ms": 1.7,
+                "max_ms": 5.4,
+                "avg_ms": 2.8
+            },
+            "health_detail": {
+                "p50_ms": 6.1,
+                "p95_ms": 8.7,
+                "p99_ms": 14.0,
+                "min_ms": 5.4,
+                "max_ms": 14.0,
+                "avg_ms": 6.5
+            },
+            "branding": {
+                "p50_ms": 2.5,
+                "p95_ms": 3.7,
+                "p99_ms": 3.9,
+                "min_ms": 1.5,
+                "max_ms": 3.9,
+                "avg_ms": 2.5
+            }
+        },
+        "listing": {
+            "bench-small_root": {
+                "p50_ms": 3.5,
+                "p95_ms": 6.8,
+                "avg_ms": 3.9
+            },
+            "bench-small_prefix": {
+                "p50_ms": 3.8,
+                "p95_ms": 6.2,
+                "avg_ms": 3.9,
+                "prefix": "archives/"
+            },
+            "bench-mixed_root": {
+                "p50_ms": 3.8,
+                "p95_ms": 5.5,
+                "avg_ms": 3.8
+            },
+            "bench-mixed_prefix": {
+                "p50_ms": 4.4,
+                "p95_ms": 5.8,
+                "avg_ms": 4.3,
+                "prefix": "backups/"
+            }
+        },
+        "download": {
+            "presigned_url": {
+                "p50_ms": 3.0,
+                "p95_ms": 6.0,
+                "avg_ms": 3.5
+            },
+            "object_info": {
+                "p50_ms": 3.6,
+                "p95_ms": 4.9
+            }
+        },
+        "dashboard": {
+            "folder_size": {
+                "p50_ms": 3.2,
+                "p95_ms": 4.9,
+                "avg_ms": 3.5
+            },
+            "storage_breakdown": {
+                "p50_ms": 3.9,
+                "p95_ms": 6.0,
+                "avg_ms": 4.1
+            },
+            "storage_history": {
+                "p50_ms": 3.4,
+                "p95_ms": 9.0,
+                "avg_ms": 3.7
+            },
+            "crawl_status": {
+                "p50_ms": 2.8,
+                "p95_ms": 4.4,
+                "avg_ms": 3.0
+            }
+        }
+    }
+}

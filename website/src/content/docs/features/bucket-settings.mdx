@@ -1,0 +1,76 @@
+---
+title: Bucket Settings
+description: Configure versioning, lifecycle rules, policies, ACLs, tags, CORS, multipart uploads, and indexing from a unified settings panel.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Each bucket in Sairo has a settings panel with eight tabs. Open it by clicking the gear icon next to any bucket name in the sidebar.
+
+## 1. Overview
+
+The Overview tab shows the bucket's current state at a glance:
+
+- **Versioning** -- Toggle versioning between Enabled and Suspended. See [Version Management](/features/versioning) for details.
+- **Object Lock** -- Displays whether Object Lock is enabled on the bucket. Object Lock is configured at bucket creation time on the S3 backend and cannot be changed through Sairo.
+
+## 2. Lifecycle
+
+The Lifecycle tab provides a rule builder for managing automatic object expiration and cleanup. You can create rules for:
+
+- **Current version expiration** -- Delete objects after a specified number of days.
+- **Noncurrent version cleanup** -- Remove old versions after a retention period, useful for controlling storage costs on versioned buckets.
+- **Incomplete multipart upload cleanup** -- Abort multipart uploads that have been in progress for longer than a specified duration.
+
+Each rule can be scoped to a prefix filter and has an enable/disable toggle so you can pause rules without deleting them.
+
+<Aside type="tip">
+  Lifecycle rules are applied by the S3 backend, not by Sairo. After saving a rule, it may take up to 24 hours for the backend to begin applying it, depending on your storage provider.
+</Aside>
+
+## 3. Policy
+
+The Policy tab provides a JSON editor for the bucket's access policy. Paste or edit the policy document directly, and Sairo validates the JSON structure before saving. Syntax errors are highlighted inline.
+
+This is the standard S3 bucket policy format. Refer to your storage provider's documentation for supported policy actions and conditions.
+
+## 4. ACL
+
+The ACL tab manages the bucket's Access Control List:
+
+- **Canned ACL selector** -- Choose from standard canned ACLs (private, public-read, public-read-write, authenticated-read).
+- **Owner info** -- Displays the bucket owner's canonical user ID and display name.
+- **Grants table** -- Lists all current grants with grantee, permission type, and source.
+
+## 5. Tags
+
+The Tags tab provides a key-value editor for bucket tags. Add, edit, or remove tags as needed. Tags are commonly used for cost allocation, organization, and automation triggers.
+
+## 6. CORS
+
+The CORS tab includes a JSON editor for the bucket's Cross-Origin Resource Sharing rules. Each rule specifies allowed origins, methods, headers, and max age. Sairo validates the JSON structure before applying changes.
+
+## 7. Multipart
+
+The Multipart tab shows all in-progress multipart uploads for the bucket:
+
+| Column          | Description                           |
+| --------------- | ------------------------------------- |
+| **Key**         | The object key being uploaded         |
+| **Started**     | When the upload was initiated         |
+| **Action**      | Abort button to cancel the upload     |
+
+Each upload has an individual "Abort" button to cancel it and free the consumed storage. This is useful for cleaning up uploads that were interrupted or abandoned.
+
+## 8. Index
+
+The Index tab shows the state of Sairo's local index for this bucket:
+
+| Field              | Description                                   |
+| ------------------ | --------------------------------------------- |
+| **Crawl status**   | Whether a crawl is currently running or idle   |
+| **Last indexed**   | Timestamp of the most recent completed crawl   |
+| **Object count**   | Number of objects in the local index           |
+| **Total size**     | Aggregate size of all indexed objects          |
+
+Click **Re-index Bucket** to trigger an immediate crawl, which is useful after bulk uploads or deletes when you do not want to wait for the next automatic recrawl cycle.

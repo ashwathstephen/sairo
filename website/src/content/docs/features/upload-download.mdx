@@ -1,0 +1,52 @@
+---
+title: Upload & Download
+description: Drag-and-drop upload with multipart support for large files, and presigned URL downloads with configurable expiration.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo supports uploading and downloading objects directly through the browser UI.
+
+## Upload
+
+### Drag and drop
+
+Drag files from your desktop or file manager and drop them anywhere on the object browser. Sairo will upload them to the current folder.
+
+### Multi-file batch upload
+
+You can drop multiple files at once or use the upload button to select several files from the file picker. All selected files are uploaded in parallel.
+
+### Multipart upload
+
+Files larger than **5 MB** are automatically uploaded using S3 multipart upload on the backend. The browser uploads the full file to Sairo, and the backend splits it into parts for parallel upload to S3. A progress bar shows upload completion from browser to server.
+
+Multipart upload provides a key benefit:
+
+- **Throughput** -- The backend uploads multiple parts to S3 in parallel, which is significantly faster than a single-stream upload for large files.
+
+<Aside>
+  Incomplete multipart uploads consume storage on the S3 backend. You can track and abort incomplete uploads from the bucket's **Settings > Multipart** tab, or configure a lifecycle rule to clean them up automatically.
+</Aside>
+
+## Download
+
+### Presigned URLs
+
+When you download an object, Sairo generates a presigned URL and redirects your browser to it. The file downloads directly from S3 without proxying through the Sairo backend, which keeps downloads fast and avoids putting load on the application server.
+
+### Configurable expiration
+
+Presigned download URLs support configurable expiration times:
+
+| Option   | Expiration |
+| -------- | ---------- |
+| Default  | 1 hour     |
+| Extended | 24 hours   |
+| Long     | 7 days     |
+
+Choose the expiration that fits your use case. Shorter expirations are more secure; longer expirations are convenient when sharing a link that someone may not access immediately.
+
+<Aside type="tip">
+  For sharing files with people who do not have Sairo accounts, consider using [Share Links](/features/share-links) instead. Share links provide password protection, download limits, and do not require S3 credentials.
+</Aside>
