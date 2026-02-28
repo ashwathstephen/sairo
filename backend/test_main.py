@@ -38,7 +38,10 @@ def app():
         mock_boto.return_value = mock_s3
         mock_s3.list_buckets.return_value = {"Buckets": []}
         # Now import
-        from backend.main import app as fastapi_app
+        try:
+            from backend.main import app as fastapi_app
+        except ModuleNotFoundError:
+            from main import app as fastapi_app
         yield fastapi_app
 
 
@@ -183,13 +186,14 @@ class TestShareLinks:
         data = resp.json()
         assert "links" in data
 
-    def test_share_link_requires_auth(self, client):
+    def test_share_link_requires_auth(self, app):
         """Creating share links requires authentication."""
-        resp = client.post(
-            "/api/share-links",
-            json={"bucket": "test-bucket", "key": "test.txt", "expires_hours": 24},
-        )
-        assert resp.status_code == 401
+        with TestClient(app) as fresh:
+            resp = fresh.post(
+                "/api/share-links",
+                json={"bucket": "test-bucket", "key": "test.txt", "expires_hours": 24},
+            )
+            assert resp.status_code == 401
 
 
 # ── License ──────────────────────────────────────────────
@@ -200,7 +204,7 @@ class TestLicense:
         resp = client.get("/api/license", cookies=admin_cookies)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["license_type"] == "community"
+        assert data["type"] == "community"
 
     def test_activate_invalid_license(self, client, admin_cookies):
         """Invalid license key should be rejected."""
@@ -209,9 +213,7 @@ class TestLicense:
             json={"key": "not-a-valid-key"},
             cookies=admin_cookies,
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data.get("ok") is False or "error" in data
+        assert resp.status_code == 400
 
 
 # ── OAuth Providers ──────────────────────────────────────
@@ -238,7 +240,8 @@ class TestHealth:
         resp = client.get("/healthz")
         assert resp.status_code == 200
 
-    def test_auth_me_without_login(self, client):
+    def test_auth_me_without_login(self, app):
         """Unauthenticated /me should return 401."""
-        resp = client.get("/api/auth/me")
-        assert resp.status_code == 401
+        with TestClient(app) as fresh:
+            resp = fresh.get("/api/auth/me")
+            assert resp.status_code == 401

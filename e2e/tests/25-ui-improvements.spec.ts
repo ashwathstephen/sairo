@@ -92,6 +92,8 @@ test.describe('Compact Mode', () => {
     await page.reload();
     await dismissWelcomeIfPresent(page);
 
+    // Wait for DensityToggle React component to mount and apply from localStorage
+    await page.waitForFunction(() => document.documentElement.dataset.density === 'compact', { timeout: 5000 });
     const density = await page.evaluate(() => document.documentElement.dataset.density);
     expect(density).toBe('compact');
 

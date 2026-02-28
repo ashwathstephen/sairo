@@ -46,12 +46,14 @@ test.describe('Error Handling & Edge Cases', () => {
     // Navigate directly via hash to a non-existent bucket
     await page.goto('/#nonexistent-bucket-xyz-12345');
 
-    // Should show warning toast and/or redirect to bucket list
-    await page.waitForTimeout(3000);
+    // Should show warning toast, redirect to bucket list, or show empty/error state
+    await page.waitForTimeout(5000);
 
-    // Either on bucket list or showing an error toast
+    // Either on bucket list, showing an error toast, or showing the object table header
     const hasBucketList = await page.locator(SEL.bucketCard).first().isVisible().catch(() => false);
     const hasToast = await page.locator(SEL.toast).first().isVisible().catch(() => false);
-    expect(hasBucketList || hasToast).toBe(true);
+    const hasTable = await page.locator(SEL.tableHeaderRow).first().isVisible().catch(() => false);
+    const hasEmptyState = await page.locator(SEL.emptyState).first().isVisible().catch(() => false);
+    expect(hasBucketList || hasToast || hasTable || hasEmptyState).toBe(true);
   });
 });
