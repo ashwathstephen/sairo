@@ -13,12 +13,13 @@ Sairo provides an official Helm chart for Kubernetes deployments. The chart bund
 | ----------- | ------------------------ |
 | Chart version | `0.1.0`                |
 | App version   | `2.0.0`                |
-| Source        | `charts/sairo`          |
+| Registry      | `oci://registry-1.docker.io/stephenjr002/sairo` |
 
 ## Install
 
 ```bash
-helm install sairo charts/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+  --version 0.1.0 \
   --namespace sairo \
   --create-namespace \
   --set s3.endpoint=https://your-s3-endpoint.com \
@@ -49,7 +50,7 @@ The table below lists the most important values. For the full schema, see `chart
 | `persistence.storageClass`| `""`                        | Storage class (empty uses cluster default)|
 | `ingress.enabled`         | `false`                     | Enable ingress resource                  |
 | `ingress.className`       | `""`                        | Ingress class name                       |
-| `ingress.hosts`           | `[]`                        | Ingress host rules                       |
+| `ingress.host`            | `sairo.example.com`         | Ingress hostname                         |
 | `ingress.tls`             | `[]`                        | Ingress TLS configuration                |
 
 ## LDAP configuration
@@ -105,7 +106,7 @@ networkPolicy:
   enabled: true
 ```
 
-When enabled, only traffic from pods within the same namespace and ingress controller traffic are allowed.
+When enabled, inbound traffic is limited to the service port (8000) and outbound traffic is restricted to DNS (53), HTTPS (443), HTTP (80), and MinIO (9000).
 
 ## Values override example
 
@@ -123,7 +124,6 @@ s3:
   accessKey: "AKIA..."
   secretKey: "your-secret-key"
   region: "us-east-1"
-  pathStyle: false
 
 auth:
   adminPass: "strong-random-password"
@@ -139,11 +139,7 @@ persistence:
 ingress:
   enabled: true
   className: "nginx"
-  hosts:
-    - host: sairo.example.com
-      paths:
-        - path: /
-          pathType: Prefix
+  host: sairo.example.com
   tls:
     - secretName: sairo-tls
       hosts:
@@ -168,7 +164,8 @@ networkPolicy:
 Install with the override file:
 
 ```bash
-helm install sairo charts/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+  --version 0.1.0 \
   --namespace sairo \
   --create-namespace \
   -f values-production.yaml
@@ -177,7 +174,8 @@ helm install sairo charts/sairo \
 ## Upgrading
 
 ```bash
-helm upgrade sairo charts/sairo \
+helm upgrade sairo oci://registry-1.docker.io/stephenjr002/sairo \
+  --version 0.1.0 \
   --namespace sairo \
   -f values-production.yaml
 ```
@@ -194,9 +192,11 @@ helm uninstall sairo --namespace sairo
 
 ## Raw manifests
 
-If you prefer plain Kubernetes YAML without Helm, use `helm template` to render the manifests:
+If you prefer plain Kubernetes YAML without Helm, pull the chart and use `helm template` to render the manifests:
 
 ```bash
-helm template sairo charts/sairo -f values-production.yaml > sairo-manifests.yaml
+helm template sairo oci://registry-1.docker.io/stephenjr002/sairo \
+  --version 0.1.0 \
+  -f values-production.yaml > sairo-manifests.yaml
 kubectl apply -f sairo-manifests.yaml
 ```
