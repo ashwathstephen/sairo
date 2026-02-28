@@ -37,7 +37,7 @@ The table below lists the most important values. For the full schema, see `chart
 | ------------------------- | --------------------------- | ---------------------------------------- |
 | `replicaCount`            | `1`                         | Number of pod replicas                   |
 | `image.repository`        | `stephenjr002/sairo`       | Container image registry and path        |
-| `image.tag`               | `latest`                    | Image tag                                |
+| `image.tag`               | `2.0.0`                     | Image tag                                |
 | `image.pullPolicy`        | `IfNotPresent`              | Image pull policy                        |
 | `service.type`            | `ClusterIP`                 | Kubernetes service type                  |
 | `service.port`            | `80`                        | Service port                             |
@@ -51,6 +51,7 @@ The table below lists the most important values. For the full schema, see `chart
 | `ingress.enabled`         | `false`                     | Enable ingress resource                  |
 | `ingress.className`       | `""`                        | Ingress class name                       |
 | `ingress.host`            | `sairo.example.com`         | Ingress hostname                         |
+| `s3.pathStyle`            | `false`                     | Enable path-style S3 addressing (for MinIO, Ceph) |
 | `ingress.tls`             | `[]`                        | Ingress TLS configuration                |
 
 ## LDAP configuration
