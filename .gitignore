@@ -39,3 +39,6 @@ docker-compose.override.yml
 /tmp/s3test_*
 /tmp/s3idx_*
 cookies.txt
+.pytest_cache/
+test-results/
+auth-state.json
