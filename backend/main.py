@@ -175,6 +175,17 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 DB_DIR = os.environ.get("DB_DIR", "/data")
 
+# ── Validate DB_DIR is writable at startup ───────────────────────────────────
+try:
+    os.makedirs(DB_DIR, exist_ok=True)
+    _probe_path = os.path.join(DB_DIR, ".startup_probe")
+    with open(_probe_path, "w") as _f:
+        _f.write("ok")
+    os.remove(_probe_path)
+except Exception as _e:
+    log.error("DB_DIR '%s' is not writable: %s — mount a volume at %s", DB_DIR, _e, DB_DIR)
+    raise SystemExit(f"DB_DIR '{DB_DIR}' is not writable: {_e}")
+
 # ── Auth Config ──────────────────────────────────────────────────────────────
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS")
@@ -2218,6 +2229,15 @@ def get_audit_log(
 @app.get("/healthz")
 @limiter.exempt
 def healthz():
+    # Check that /data is still writable (catches unmounted PVC, disk full, etc.)
+    try:
+        probe = os.path.join(DB_DIR, ".healthz_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+    except Exception as e:
+        log.error("Health check failed — DB_DIR '%s' not writable: %s", DB_DIR, e)
+        return JSONResponse(status_code=503, content={"status": "error", "detail": f"storage not writable: {e}"})
     return {"status": "ok"}
 
 
