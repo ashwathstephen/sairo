@@ -35,6 +35,9 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Demo intermediate files
+docs/demo.webm
+
 # Test artifacts
 /tmp/s3test_*
 /tmp/s3idx_*

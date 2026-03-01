@@ -10,6 +10,18 @@ A self-hosted, S3-compatible object storage browser. Browse, search, and manage 
 
 Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Backblaze B2**, **Leaseweb**, and any S3-compatible endpoint.
 
+## Demo
+
+![Sairo Demo](docs/demo.gif)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Bucket List](docs/screenshots/bucket-list.png) | ![Object Browser](docs/screenshots/object-browser.png) |
+| ![Search](docs/screenshots/search.png) | ![Storage Dashboard](docs/screenshots/storage-dashboard.png) |
+| ![File Details](docs/screenshots/file-details.png) | ![Dark Mode](docs/screenshots/dark-mode.png) |
+
 ## Features
 
 - **Object Browser** — Navigate buckets and prefixes with virtual scrolling for 100K+ objects
