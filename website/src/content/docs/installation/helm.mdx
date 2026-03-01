@@ -11,14 +11,14 @@ Sairo provides an official Helm chart for Kubernetes deployments. The chart bund
 
 | Field       | Value                    |
 | ----------- | ------------------------ |
-| Registry      | `oci://registry-1.docker.io/stephenjr002/sairo` |
+| Registry      | `oci://registry-1.docker.io/stephenjr002/sairo-helm` |
 
 Chart and app versions track releases automatically. When you install without `--version`, you get the latest published chart.
 
 ## Install
 
 ```bash
-helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --namespace sairo \
   --create-namespace \
   --set s3.endpoint=https://your-s3-endpoint.com \
@@ -31,7 +31,7 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
 To pin a specific version:
 
 ```bash
-helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --version 0.1.0 \
   --namespace sairo \
   --create-namespace \
@@ -174,7 +174,7 @@ networkPolicy:
 Install with the override file:
 
 ```bash
-helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --namespace sairo \
   --create-namespace \
   -f values-production.yaml
@@ -183,7 +183,7 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
 ## Upgrading
 
 ```bash
-helm upgrade sairo oci://registry-1.docker.io/stephenjr002/sairo \
+helm upgrade sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --namespace sairo \
   -f values-production.yaml
 ```
@@ -203,7 +203,7 @@ helm uninstall sairo --namespace sairo
 If you prefer plain Kubernetes YAML without Helm, pull the chart and use `helm template` to render the manifests:
 
 ```bash
-helm template sairo oci://registry-1.docker.io/stephenjr002/sairo \
+helm template sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   -f values-production.yaml > sairo-manifests.yaml
 kubectl apply -f sairo-manifests.yaml
 ```

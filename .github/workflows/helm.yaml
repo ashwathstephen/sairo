@@ -89,4 +89,4 @@ jobs:
         run: helm package ${{ env.CHART_PATH }}
 
       - name: Push chart to OCI registry
-        run: helm push sairo-*.tgz oci://${{ env.OCI_REPO }}
+        run: helm push sairo-helm-*.tgz oci://${{ env.OCI_REPO }}
