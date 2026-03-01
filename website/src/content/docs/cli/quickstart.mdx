@@ -1,0 +1,212 @@
+---
+title: CLI Quickstart
+description: Install the Sairo CLI and start browsing your S3 storage from the terminal.
+---
+
+import { Aside, Tabs, TabItem, Steps } from "@astrojs/starlight/components";
+
+The Sairo CLI brings indexed search and listing to your terminal. Instead of enumerating S3 objects live on every command (like `mc` or `aws s3`), it queries Sairo's pre-built SQLite FTS5 index — returning results in milliseconds regardless of bucket size.
+
+## Installation
+
+<Tabs>
+  <TabItem label="Homebrew" icon="apple">
+
+  ```bash
+  brew install ashwathstephen/sairo/sairo
+  ```
+
+  </TabItem>
+  <TabItem label="Go Install" icon="seti:go">
+
+  ```bash
+  go install github.com/ashwathstephen/sairo/cli@latest
+  ```
+
+  </TabItem>
+  <TabItem label="Binary Download" icon="down-caret">
+
+  Download the latest release from [GitHub Releases](https://github.com/AshwathStephen/sairo/releases) for your platform:
+
+  - **macOS (ARM):** `sairo_*_darwin_arm64.tar.gz`
+  - **macOS (Intel):** `sairo_*_darwin_amd64.tar.gz`
+  - **Linux (AMD64):** `sairo_*_linux_amd64.tar.gz`
+  - **Linux (ARM64):** `sairo_*_linux_arm64.tar.gz`
+  - **Windows:** `sairo_*_windows_amd64.zip`
+
+  Extract and move to your PATH:
+
+  ```bash
+  tar xzf sairo_*_darwin_arm64.tar.gz
+  sudo mv sairo /usr/local/bin/
+  ```
+
+  </TabItem>
+</Tabs>
+
+Verify installation:
+
+```bash
+sairo version
+```
+
+## Login
+
+<Steps>
+
+1. **Connect to your Sairo instance:**
+
+   ```bash
+   sairo login https://sairo.example.com
+   ```
+
+   Enter your username and password when prompted. If 2FA is enabled, you'll be asked for your TOTP code.
+
+2. **Verify the connection:**
+
+   ```bash
+   sairo status
+   ```
+
+   ```
+     Profile:    production
+     Server:     https://sairo.example.com
+     User:       admin (admin)
+     Session:    expires in 23h 14m
+     Version:    2.0.0
+     S3:         https://s3.amazonaws.com (connected, 12ms)
+
+     BUCKETS     OBJECTS     TOTAL SIZE    LAST CRAWL
+     ───────     ───────     ──────────    ──────────
+     4           134,707     38.2 TB       2m ago
+   ```
+
+</Steps>
+
+<Aside type="tip">
+  Credentials are stored in your OS keyring (macOS Keychain, Linux libsecret, Windows Credential Manager) — never in plaintext config files.
+</Aside>
+
+## Core Commands
+
+### List buckets and objects
+
+```bash
+# List all buckets
+sairo ls
+
+# List objects in a bucket
+sairo ls my-bucket/logs/ -l
+
+# Recursive listing (all objects under a prefix)
+sairo ls my-bucket/data/ -r --sort size
+```
+
+### Search (indexed full-text search)
+
+```bash
+# Search across a bucket — returns in milliseconds
+sairo search my-bucket "parquet"
+
+# Search within a specific prefix
+sairo search my-bucket "config" --prefix settings/
+```
+
+### Download and upload
+
+```bash
+# Download a file
+sairo get my-bucket/reports/summary.pdf ./
+
+# Upload a file
+sairo put ./data.csv my-bucket/uploads/
+
+# Recursive download
+sairo get my-bucket/exports/ ./local-dir/ -r
+```
+
+### Storage analytics
+
+```bash
+# Disk usage breakdown
+sairo du my-bucket -d 1
+
+# Object metadata
+sairo info my-bucket/data/events.parquet
+
+# Directory tree
+sairo tree my-bucket/logs/ -d 2 --size
+```
+
+### File operations
+
+```bash
+# Preview file contents
+sairo cat my-bucket/config/app.yaml
+
+# Generate a presigned URL
+sairo presign my-bucket/reports/summary.pdf --expires 86400
+
+# Server-side copy
+sairo cp my-bucket/a.txt my-bucket/b.txt
+
+# Delete with confirmation
+sairo rm my-bucket/old-data/ -r
+```
+
+## JSON Output
+
+Every command supports `--json` for machine-readable output. JSON mode is auto-enabled when stdout is piped.
+
+```bash
+# Explicit JSON
+sairo ls my-bucket/ --json | jq '.files[] | .key'
+
+# Auto-detected (pipe)
+sairo search my-bucket "parquet" | jq .
+```
+
+## Multiple Profiles
+
+Manage connections to multiple Sairo instances:
+
+```bash
+# Login with a named profile
+sairo login https://staging.example.com --profile staging
+
+# Use a specific profile
+sairo ls my-bucket/ --profile staging
+
+# Switch default profile
+sairo login https://production.example.com --profile production
+```
+
+## API Token Authentication
+
+For CI/CD pipelines, use API tokens instead of interactive login:
+
+```bash
+# Login with a token
+sairo login https://sairo.example.com --token sairo_abc123...
+
+# Or use an environment variable
+export SAIRO_TOKEN=sairo_abc123...
+sairo ls my-bucket/
+```
+
+## Performance
+
+The CLI queries Sairo's indexed backend, not S3 directly. On a production bucket with 134K+ objects:
+
+| Operation | `mc` / `aws s3` | `sairo` | Speedup |
+|---|---|---|---|
+| List top-level folder | ~3 min | 0.05s | 3,000x+ |
+| Recursive list (134K objects) | ~12 min | 4.8s | 150x |
+| Search by filename | 3+ min | 0.08s | 2,000x+ |
+| Storage breakdown | 3+ min | 0.03s | 6,000x+ |
+
+## Next Steps
+
+- [Command Reference](/cli/commands/) — All 24 commands with flags and examples
+- [Benchmarks](/reference/benchmarks/) — Full performance data
+- [API Reference](/reference/api/) — The REST API the CLI talks to

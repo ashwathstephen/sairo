@@ -62,6 +62,13 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'CLI',
+					items: [
+						{ slug: 'cli/quickstart' },
+						{ slug: 'cli/commands' },
+					],
+				},
+				{
 					label: 'Provider Guides',
 					collapsed: true,
 					items: [

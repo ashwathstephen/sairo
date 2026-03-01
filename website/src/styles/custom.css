@@ -2022,6 +2022,194 @@ nav[aria-label="Main"] a[aria-current="page"] {
   color: #3b82f6;
 }
 
+/* ─── CLI Section ─── */
+.cli-demo {
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+.cli-window {
+  border-radius: 1rem;
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  background: rgba(9, 9, 11, 0.80);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.cli-body {
+  padding: 1.25rem 1.5rem 1.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.cli-line {
+  color: #fafafa;
+}
+
+.cli-prompt {
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.cli-cmd {
+  color: #60a5fa;
+  font-weight: 600;
+}
+
+.cli-string {
+  color: #fbbf24;
+}
+
+.cli-flag {
+  color: #a78bfa;
+}
+
+.cli-output {
+  margin-top: 0.5rem;
+  padding-left: 0;
+}
+
+.cli-table-header {
+  display: grid;
+  grid-template-columns: 1fr 6rem 6rem;
+  gap: 1rem;
+  color: #52525b;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.3);
+}
+
+.cli-table-header .cli-col-prefix,
+.cli-table-header .cli-col-objs,
+.cli-table-header .cli-col-sz,
+.cli-table-header .cli-col-pct {
+  color: #52525b;
+  font-size: 0.6875rem;
+}
+
+.cli-table-row {
+  display: grid;
+  grid-template-columns: 1fr 6rem 6rem;
+  gap: 1rem;
+  color: #a1a1aa;
+  font-size: 0.8125rem;
+  padding: 0.125rem 0;
+}
+
+.cli-table-row .cli-col-prefix { color: #fafafa; }
+.cli-table-row .cli-col-key { color: #fafafa; }
+.cli-table-row .cli-col-size,
+.cli-table-row .cli-col-sz { color: #a1a1aa; text-align: right; }
+.cli-table-row .cli-col-date,
+.cli-table-row .cli-col-pct { color: #71717a; text-align: right; }
+.cli-table-row .cli-col-objs { color: #a1a1aa; text-align: right; }
+
+.cli-result {
+  margin-top: 0.375rem;
+  color: #52525b;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.cli-result-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  display: inline-block;
+}
+
+.cli-features {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  margin-top: 1.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.cli-feature {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.25rem 0.5rem;
+  background: #09090b;
+}
+
+.cli-feature-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fafafa;
+}
+
+.cli-feature-label {
+  font-size: 0.75rem;
+  color: #71717a;
+  margin-top: 0.25rem;
+}
+
+.cli-install-hint {
+  text-align: center;
+  margin-top: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cli-install-hint code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.875rem;
+  color: #d4d4d8;
+  background: rgba(24, 24, 27, 0.80);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+}
+
+.cli-install-or {
+  color: #52525b;
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 768px) {
+  .cli-features {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .cli-table-header,
+  .cli-table-row {
+    grid-template-columns: 1fr 5rem 5rem;
+    gap: 0.5rem;
+  }
+  .cli-body {
+    padding: 1rem;
+    font-size: 0.6875rem;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .cli-table-header .cli-col-date,
+  .cli-table-row .cli-col-date,
+  .cli-table-header .cli-col-pct,
+  .cli-table-row .cli-col-pct {
+    display: none;
+  }
+  .cli-table-header,
+  .cli-table-row {
+    grid-template-columns: 1fr 5rem;
+  }
+}
+
 /* ─── Install Block ─── */
 .install-block {
   max-width: 48rem;

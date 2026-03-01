@@ -42,6 +42,7 @@ const features = [
   '2FA / TOTP',
   'OAuth & LDAP',
   'API tokens',
+  'CLI tool (sairo)',
 ];
 ---
 
@@ -89,6 +90,7 @@ const features = [
       <div class="landing-nav-center" id="nav-links">
         <a href="#features" data-scroll>Features</a>
         <a href="#telemetry" data-scroll>Benchmarks</a>
+        <a href="#cli" data-scroll>CLI</a>
         <a href="/getting-started/quickstart/">Documentation</a>
       </div>
       <div class="landing-nav-right">
@@ -375,7 +377,7 @@ const features = [
           <span class="benchmark-time benchmark-time-slow">~14s</span>
         </div>
         <div class="benchmark-row">
-          <span class="benchmark-name">Sairo</span>
+          <span class="benchmark-name">Sairo Web</span>
           <div class="benchmark-track">
             <div class="benchmark-fill benchmark-fast" style="width: 0.5%"></div>
           </div>
@@ -383,6 +385,29 @@ const features = [
         </div>
       </div>
       <p class="benchmark-note">Paginated prefix listing vs. pre-built FTS5 full-text index &middot; <a href="https://github.com/AshwathStephen/sairo/blob/main/benchmark/results/LATEST-RESULTS.md" style="color: var(--text-muted); text-decoration: underline;">Full benchmark results</a></p>
+    </div>
+
+    <div class="benchmark" style="margin-top: 1.5rem;">
+      <div class="benchmark-header">
+        <span class="benchmark-label">CLI: List 134K objects in a production bucket</span>
+      </div>
+      <div class="benchmark-bars">
+        <div class="benchmark-row">
+          <span class="benchmark-name">mc ls</span>
+          <div class="benchmark-track">
+            <div class="benchmark-fill benchmark-slow" style="width: 100%"></div>
+          </div>
+          <span class="benchmark-time benchmark-time-slow">3m 2s</span>
+        </div>
+        <div class="benchmark-row">
+          <span class="benchmark-name">sairo ls</span>
+          <div class="benchmark-track">
+            <div class="benchmark-fill benchmark-fast" style="width: 0.5%"></div>
+          </div>
+          <span class="benchmark-time benchmark-time-fast">0.05s</span>
+        </div>
+      </div>
+      <p class="benchmark-note">Live S3 enumeration vs. indexed query &middot; <strong>3,400x faster</strong> &middot; <a href="/cli/quickstart/" style="color: var(--text-muted); text-decoration: underline;">Install the CLI</a></p>
     </div>
     <div class="perf-stats">
       <div class="perf-stat">
@@ -418,8 +443,8 @@ const features = [
           </thead>
           <tbody>
             <tr><td><code>parquet</code></td><td class="telemetry-accent">2.3ms</td><td>4.1ms</td></tr>
-            <tr><td><code>adrequest</code></td><td class="telemetry-accent">2.4ms</td><td>16.2ms</td></tr>
-            <tr><td><code>flatevents</code></td><td class="telemetry-accent">2.5ms</td><td>3.4ms</td></tr>
+            <tr><td><code>events</code></td><td class="telemetry-accent">2.4ms</td><td>16.2ms</td></tr>
+            <tr><td><code>analytics</code></td><td class="telemetry-accent">2.5ms</td><td>3.4ms</td></tr>
             <tr><td><code>metadata</code></td><td class="telemetry-accent">2.4ms</td><td>4.3ms</td></tr>
             <tr><td><code>2026</code></td><td class="telemetry-accent">2.2ms</td><td>22.0ms</td></tr>
           </tbody>
@@ -508,6 +533,67 @@ const features = [
     </div>
   </section>
 
+  <!-- CLI -->
+  <section class="landing-section" id="cli">
+    <h2>Terminal-native. Index-powered.</h2>
+    <p class="section-desc">The Sairo CLI queries the same indexed backend as the web UI. Stop waiting for <code>mc ls</code> to enumerate millions of objects.</p>
+    <div class="cli-demo">
+      <div class="cli-window">
+        <div class="mockup-titlebar">
+          <div class="mockup-dots">
+            <span style="background:#ff5f57"></span>
+            <span style="background:#febc2e"></span>
+            <span style="background:#28c840"></span>
+          </div>
+          <span class="mockup-title">Terminal</span>
+        </div>
+        <div class="cli-body">
+          <div class="cli-line"><span class="cli-prompt">$</span> <span class="cli-cmd">sairo search</span> production-data <span class="cli-string">"parquet"</span> <span class="cli-flag">--limit 5</span></div>
+          <div class="cli-output">
+            <div class="cli-table-header"><span class="cli-col-key">KEY</span><span class="cli-col-size">SIZE</span><span class="cli-col-date">MODIFIED</span></div>
+            <div class="cli-table-row"><span class="cli-col-key">events/2026-03/hour=12/data.parquet</span><span class="cli-col-size">892 MB</span><span class="cli-col-date">2h ago</span></div>
+            <div class="cli-table-row"><span class="cli-col-key">events/2026-03/hour=11/data.parquet</span><span class="cli-col-size">847 MB</span><span class="cli-col-date">3h ago</span></div>
+            <div class="cli-table-row"><span class="cli-col-key">events/2026-03/hour=10/data.parquet</span><span class="cli-col-size">824 MB</span><span class="cli-col-date">4h ago</span></div>
+            <div class="cli-table-row"><span class="cli-col-key">analytics/2026-03/part-0001.parquet</span><span class="cli-col-size">641 MB</span><span class="cli-col-date">5h ago</span></div>
+            <div class="cli-table-row"><span class="cli-col-key">analytics/2026-03/part-0002.parquet</span><span class="cli-col-size">618 MB</span><span class="cli-col-date">5h ago</span></div>
+            <div class="cli-result"><span class="cli-result-dot"></span>5 results in 2.1ms &middot; 134,707 objects indexed</div>
+          </div>
+          <div class="cli-line" style="margin-top: 0.75rem;"><span class="cli-prompt">$</span> <span class="cli-cmd">sairo du</span> production-data <span class="cli-flag">-d 1</span></div>
+          <div class="cli-output">
+            <div class="cli-table-header"><span class="cli-col-prefix">PREFIX</span><span class="cli-col-objs">OBJECTS</span><span class="cli-col-sz">SIZE</span><span class="cli-col-pct">%</span></div>
+            <div class="cli-table-row"><span class="cli-col-prefix">events/</span><span class="cli-col-objs">74,201</span><span class="cli-col-sz">14.8 TB</span><span class="cli-col-pct">38.0%</span></div>
+            <div class="cli-table-row"><span class="cli-col-prefix">analytics/</span><span class="cli-col-objs">48,330</span><span class="cli-col-sz">12.1 TB</span><span class="cli-col-pct">31.1%</span></div>
+            <div class="cli-table-row"><span class="cli-col-prefix">warehouse/</span><span class="cli-col-objs">12,176</span><span class="cli-col-sz">11.3 TB</span><span class="cli-col-pct">29.0%</span></div>
+            <div class="cli-result"><span class="cli-result-dot"></span>38.2 TB total &middot; 0.03s</div>
+          </div>
+        </div>
+      </div>
+      <div class="cli-features">
+        <div class="cli-feature">
+          <span class="cli-feature-value">3,400x</span>
+          <span class="cli-feature-label">faster than mc ls</span>
+        </div>
+        <div class="cli-feature">
+          <span class="cli-feature-value">24</span>
+          <span class="cli-feature-label">commands</span>
+        </div>
+        <div class="cli-feature">
+          <span class="cli-feature-value">--json</span>
+          <span class="cli-feature-label">on every command</span>
+        </div>
+        <div class="cli-feature">
+          <span class="cli-feature-value">OS keyring</span>
+          <span class="cli-feature-label">credential storage</span>
+        </div>
+      </div>
+    </div>
+    <div class="cli-install-hint">
+      <code>brew install ashwathstephen/sairo/sairo</code>
+      <span class="cli-install-or">or</span>
+      <a href="/cli/quickstart/" class="bento-link">CLI docs &rarr;</a>
+    </div>
+  </section>
+
   <!-- Install -->
   <section class="landing-section" id="install">
     <h2>Up and running in 30 seconds.</h2>
@@ -587,6 +673,7 @@ const features = [
   <footer class="landing-footer">
     <div class="footer-links">
       <a href="/getting-started/quickstart/">Quickstart</a>
+      <a href="/cli/quickstart/">CLI</a>
       <a href="/security/authentication/">Security</a>
       <a href="/installation/configuration/">Configuration</a>
       <a href="https://github.com/AshwathStephen/sairo" target="_blank" rel="noopener">GitHub</a>

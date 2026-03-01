@@ -2,7 +2,7 @@
 
 **Date**: 2026-02-28
 **Environment**: Docker container (macOS, Apple Silicon), single Uvicorn process
-**Storage backends**: Local MinIO + Leaseweb Production S3 (us.object-storage.io)
+**Storage backends**: Local MinIO + Production S3 (remote object storage)
 **Methodology**: 30 iterations per measurement, percentile-based reporting
 
 ---
@@ -24,7 +24,7 @@
 | `csv` | 0 | **3.8ms** | 5.4ms | 1.8ms | 6.2ms |
 | `report` | 0 | **2.0ms** | 2.7ms | 1.7ms | 2.8ms |
 
-### Production S3 — ssp-production-reports (134,707 objects, 38.25 TB)
+### Production S3 — production-bucket (134,707 objects, 38.25 TB)
 
 | Query | Results | p50 | p95 | Min | Max |
 |-------|---------|-----|-----|-----|-----|
@@ -32,11 +32,11 @@
 | `parquet` (limit=100) | 100 | **3.1ms** | 4.8ms | 1.9ms | 5.0ms |
 | `parquet` (limit=500) | 500 | **40.3ms** | 43.1ms | 39.3ms | 43.1ms |
 | `parquet` (limit=5000) | 5,000 | **63.1ms** | 78.5ms | 61.1ms | 86.7ms |
-| `iceberg` | 200 | **3.1ms** | 34.4ms | 2.6ms | 46.0ms |
-| `adrequest` | 200 | **2.4ms** | 16.2ms | 1.9ms | 24.8ms |
-| `pixel` | 200 | **2.3ms** | 3.0ms | 1.8ms | 39.0ms |
-| `flatevents` | 200 | **2.5ms** | 3.4ms | 1.9ms | 44.0ms |
-| `sampling` | 200 | **2.4ms** | 5.5ms | 2.0ms | 40.0ms |
+| `warehouse` | 200 | **3.1ms** | 34.4ms | 2.6ms | 46.0ms |
+| `events` | 200 | **2.4ms** | 16.2ms | 1.9ms | 24.8ms |
+| `tracking` | 200 | **2.3ms** | 3.0ms | 1.8ms | 39.0ms |
+| `analytics` | 200 | **2.5ms** | 3.4ms | 1.9ms | 44.0ms |
+| `ingest` | 200 | **2.4ms** | 5.5ms | 2.0ms | 40.0ms |
 | `metadata` | 200 | **2.4ms** | 4.3ms | 2.0ms | 40.1ms |
 | `snapshot` | 200 | **2.4ms** | 21.2ms | 1.8ms | 43.5ms |
 | `data` | 200 | **2.3ms** | 11.0ms | 1.7ms | 29.0ms |
@@ -56,9 +56,9 @@
 | bench-small | 1,000 | 1.08s | **926 obj/s** |
 | bench-mixed | 2,416 | 1.08s | **1,348 obj/s** |
 | bench-medium | 6,620 | — | — |
-| **ssp-production-reports** | **134,707** | completed | **Production-scale crawl complete** |
+| **production-bucket** | **134,707** | completed | **Production-scale crawl complete** |
 
-**Indexing rate: 1,000-1,350 objects/second** (local MinIO). Production crawl successfully indexed 134,707 objects (38.25 TB) across a real Leaseweb S3 bucket.
+**Indexing rate: 1,000-1,350 objects/second** (local MinIO). Production crawl successfully indexed 134,707 objects (38.25 TB) across a real S3-compatible object storage bucket.
 
 ---
 
@@ -78,9 +78,9 @@
 | Endpoint | p50 | p95 | Min | Max |
 |----------|-----|-----|-----|-----|
 | Root listing | **2.9ms** | 36.6ms | 2.0ms | 42.4ms |
-| Prefix: iceberg/ | **2.4ms** | 4.6ms | 1.9ms | 46.4ms |
-| Prefix: adrequest-*/ | **2.3ms** | 4.5ms | 2.0ms | 40.2ms |
-| Deep prefix (iceberg/pixel_tracking/data/) | **2.2ms** | 5.1ms | 1.8ms | 17.7ms |
+| Prefix: warehouse/ | **2.4ms** | 4.6ms | 1.9ms | 46.4ms |
+| Prefix: events-*/ | **2.3ms** | 4.5ms | 2.0ms | 40.2ms |
+| Deep prefix (warehouse/tracking/data/) | **2.2ms** | 5.1ms | 1.8ms | 17.7ms |
 | Delimiter listing (folders only) | **2.3ms** | 5.2ms | 1.8ms | 5.5ms |
 
 **Listing: sub-3ms p50 on production data (134K objects). Faster than local MinIO.**

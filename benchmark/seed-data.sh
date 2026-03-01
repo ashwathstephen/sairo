@@ -95,11 +95,11 @@ seed_mixed() {
   local count=0
 
   # Parquet-like files (data lake pattern)
-  for table in pixel_tracking adrequest flatevents sampling; do
+  for table in tracking events analytics ingest; do
     for year in 2024 2025; do
       for month in 01 02 03 04 05 06 07 08 09 10 11 12; do
         for part in $(seq -w 0 9); do
-          mc cp "$TMPDIR/100kb.bin" "$MC_ALIAS/bench-mixed/iceberg/$table/data/year=$year/month=$month/part-$part-$(openssl rand -hex 4).parquet" --quiet 2>/dev/null
+          mc cp "$TMPDIR/100kb.bin" "$MC_ALIAS/bench-mixed/warehouse/$table/data/year=$year/month=$month/part-$part-$(openssl rand -hex 4).parquet" --quiet 2>/dev/null
           count=$((count + 1))
         done
       done

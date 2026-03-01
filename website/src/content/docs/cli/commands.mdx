@@ -1,0 +1,398 @@
+---
+title: Command Reference
+description: Complete reference for all Sairo CLI commands — flags, examples, and API mappings.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+## Global Flags
+
+Every command accepts these flags:
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--json` | `-j` | false | Output as JSON (auto-enabled when stdout is not a TTY) |
+| `--profile` | `-p` | from config | Use a specific login profile |
+| `--endpoint` | `-e` | from profile | Route through a specific S3 endpoint |
+| `--quiet` | `-q` | false | Suppress non-essential output |
+| `--no-color` | | false | Disable colored output |
+| `--debug` | | false | Print HTTP request/response details |
+
+## Session Commands
+
+### `sairo login [url]`
+
+Authenticate with a Sairo instance.
+
+```bash
+# Interactive login
+sairo login https://sairo.example.com
+
+# API token (for CI/CD)
+sairo login https://sairo.example.com --token sairo_abc123...
+
+# Named profile
+sairo login https://staging.example.com --profile staging
+```
+
+| Flag | Description |
+|---|---|
+| `--token <string>` | Use an API token instead of username/password |
+| `--profile <name>` | Save as named profile |
+
+### `sairo logout`
+
+Clear stored credentials.
+
+```bash
+sairo logout             # Current profile
+sairo logout --all       # All profiles
+```
+
+### `sairo status`
+
+Show session info, server health, and bucket summary.
+
+```bash
+sairo status
+sairo status --json
+```
+
+---
+
+## Indexed Read Commands
+
+These commands query Sairo's SQLite FTS5 index — results return in milliseconds regardless of bucket size.
+
+### `sairo ls [bucket[/prefix]]`
+
+List buckets, folders, or objects.
+
+```bash
+sairo ls                                    # All buckets
+sairo ls my-bucket/                         # Top-level objects
+sairo ls my-bucket/logs/ -l                 # Long format (size, date)
+sairo ls my-bucket/data/ -r --sort size     # Recursive, sorted by size
+sairo ls my-bucket/ --fresh                 # Bypass index, query S3 directly
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--long` | `-l` | false | Show size and date |
+| `--recursive` | `-r` | false | List all objects under prefix |
+| `--sort` | `-s` | name | Sort by: name, size, date |
+| `--reverse` | | false | Reverse sort order |
+| `--fresh` | | false | Bypass index, query S3 directly |
+| `--limit` | `-n` | 0 | Limit results (0 = unlimited) |
+
+### `sairo search <bucket> <query>`
+
+Full-text search across indexed object keys.
+
+```bash
+sairo search my-bucket "parquet"
+sairo search my-bucket "config" --prefix settings/ -l
+sairo search my-bucket "2026-03" --limit 50
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--prefix` | | "" | Restrict search to a prefix |
+| `--limit` | `-n` | 200 | Maximum results |
+| `--long` | `-l` | false | Show size and date |
+
+### `sairo du [bucket[/prefix]]`
+
+Show disk usage (like `du -sh`), using pre-computed index stats.
+
+```bash
+sairo du my-bucket -d 1
+sairo du my-bucket/logs/ --sort size --top 10
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--depth` | `-d` | 1 | Folder depth for breakdown |
+| `--sort` | `-s` | size | Sort by: size, name, count |
+| `--top` | `-n` | 0 | Show only top N entries |
+
+### `sairo info <bucket>/<key>`
+
+Show detailed object metadata. For Parquet/ORC/Avro files, includes schema info.
+
+```bash
+sairo info my-bucket/data/events.parquet
+sairo info my-bucket/config/app.yaml
+```
+
+### `sairo tree <bucket[/prefix]>`
+
+Display directory tree structure.
+
+```bash
+sairo tree my-bucket/logs/ -d 2 --size
+sairo tree my-bucket/ --dirs-only
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--depth` | `-d` | 3 | Max depth to display |
+| `--dirs-only` | | false | Only show directories |
+| `--size` | | false | Show folder sizes |
+
+---
+
+## File Operations
+
+### `sairo get <bucket>/<key> [local-path]`
+
+Download objects with progress display.
+
+```bash
+sairo get my-bucket/report.pdf ./
+sairo get my-bucket/exports/ ./local/ -r --parallel 8
+sairo get my-bucket/config.yaml ./config.yaml --version abc123
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--recursive` | `-r` | false | Download all objects under prefix |
+| `--version` | `-v` | "" | Download a specific version |
+| `--parallel` | | 4 | Concurrent downloads (recursive) |
+| `--overwrite` | | false | Overwrite existing files |
+| `--dry-run` | | false | Show what would be downloaded |
+
+### `sairo put <local-path> <bucket>[/prefix]`
+
+Upload files with progress display.
+
+```bash
+sairo put ./data.csv my-bucket/uploads/
+sairo put ./reports/ my-bucket/reports/2026/ -r
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--recursive` | `-r` | false | Upload directory contents |
+| `--parallel` | | 4 | Concurrent uploads |
+| `--dry-run` | | false | Show what would be uploaded |
+| `--exclude` | | "" | Glob pattern to exclude |
+
+### `sairo cp <src> <dst>`
+
+Server-side copy (no download).
+
+```bash
+sairo cp my-bucket/a.txt my-bucket/b.txt
+sairo cp my-bucket/data/ other-bucket/data/ -r
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--recursive` | `-r` | false | Copy all objects under prefix |
+
+### `sairo mv <src> <dst>`
+
+Rename or move objects (server-side copy + delete).
+
+```bash
+sairo mv my-bucket/old-name.log my-bucket/new-name.log
+```
+
+### `sairo rm <bucket>/<key>`
+
+Delete objects with safety confirmation.
+
+```bash
+sairo rm my-bucket/temp/file.txt
+sairo rm my-bucket/old-data/ -r -f
+sairo rm my-bucket/archive/ -r --purge-versions --force
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--recursive` | `-r` | false | Delete all objects under prefix |
+| `--force` | `-f` | false | Skip confirmation |
+| `--purge-versions` | | false | Also delete all old versions |
+| `--dry-run` | | false | Show what would be deleted |
+
+### `sairo cat <bucket>/<key>`
+
+Print object contents to stdout.
+
+```bash
+sairo cat my-bucket/config/app.yaml
+sairo cat my-bucket/logs/app.log --tail 1000 | grep ERROR
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--head` | 0 | Show first N bytes |
+| `--tail` | 0 | Show last N bytes |
+| `--max` | 5MB | Max bytes to fetch |
+
+### `sairo presign <bucket>/<key>`
+
+Generate a presigned URL for sharing.
+
+```bash
+sairo presign my-bucket/report.pdf --expires 86400
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--expires` | | 3600 | Expiry in seconds (60-604800) |
+| `--version` | `-v` | "" | Presign a specific version |
+
+---
+
+## Versioning Commands
+
+### `sairo versions <bucket>/<key>`
+
+List all versions of an object.
+
+```bash
+sairo versions my-bucket/config/app.yaml
+```
+
+### `sairo restore <bucket>/<key> --version <id>`
+
+Restore a previous version as latest.
+
+```bash
+sairo restore my-bucket/config/app.yaml --version abc123
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--version` | `-v` | Version ID to restore (required) |
+
+### `sairo purge <bucket>/<key-or-prefix>`
+
+Permanently delete all versions and delete markers.
+
+```bash
+sairo purge my-bucket/old-file.txt --force
+sairo purge my-bucket/old-data/ -r --force
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--force` | `-f` | false | Skip confirmation |
+| `--recursive` | `-r` | false | Purge all objects under prefix |
+
+---
+
+## Bucket Configuration
+
+### `sairo versioning <bucket> [enable|suspend|status]`
+
+```bash
+sairo versioning my-bucket              # Show status
+sairo versioning my-bucket enable       # Enable versioning
+sairo versioning my-bucket suspend      # Suspend versioning
+```
+
+### `sairo lifecycle <bucket> [get|set|delete]`
+
+```bash
+sairo lifecycle my-bucket               # Show rules
+sairo lifecycle my-bucket set --file rules.json
+sairo lifecycle my-bucket delete
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--file` | "" | JSON file containing lifecycle rules (for `set`) |
+
+### `sairo tags <bucket>[/<key>] [get|set|delete]`
+
+```bash
+sairo tags my-bucket                              # Bucket tags
+sairo tags my-bucket/file.txt                     # Object tags
+sairo tags my-bucket set env=production team=data # Set bucket tags
+sairo tags my-bucket/file.txt delete              # Remove object tags
+```
+
+### `sairo mb <bucket>` / `sairo rb <bucket>`
+
+Create or remove buckets.
+
+```bash
+sairo mb new-bucket
+sairo rb old-bucket --force
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--force` | `-f` | (`rb` only) Skip confirmation |
+
+---
+
+## Live Operations
+
+### `sairo watch <bucket>[/prefix]`
+
+Watch for changes in real-time (polls at an interval, diffs against previous state).
+
+```bash
+sairo watch my-bucket/logs/ -i 30
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--interval` | `-i` | 30 | Poll interval in seconds |
+| `--filter` | `-f` | "" | Glob pattern to filter |
+
+### `sairo diff <bucket>/<prefix>`
+
+Show what changed in a prefix over a time period.
+
+```bash
+sairo diff my-bucket/logs/ --since 24h
+sairo diff my-bucket/data/ --since 7d --type added
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--since` | `-s` | 24h | Time window (1h, 7d, 30d) |
+| `--type` | `-t` | all | Filter: added, removed, modified |
+
+---
+
+## Utility Commands
+
+### `sairo version`
+
+Print the CLI version, commit hash, and build date.
+
+```bash
+sairo version
+sairo version --json
+```
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | General error |
+| 2 | Authentication error |
+| 3 | Permission denied |
+| 4 | Not found |
+| 5 | User cancelled |
+
+## Credential Storage
+
+| OS | Backend |
+|---|---|
+| macOS | Keychain |
+| Linux | libsecret (GNOME Keyring / KWallet) |
+| Windows | Credential Manager |
+
+Fallback: `~/.config/sairo/credentials` with `0600` permissions (when no keyring is available).
+
+Environment variable: `SAIRO_TOKEN` for CI/CD use.
