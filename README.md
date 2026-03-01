@@ -1,5 +1,11 @@
 # Sairo
 
+[![Docker](https://github.com/AshwathStephen/sairo/actions/workflows/docker.yaml/badge.svg)](https://github.com/AshwathStephen/sairo/actions/workflows/docker.yaml)
+[![Helm](https://github.com/AshwathStephen/sairo/actions/workflows/helm.yaml/badge.svg)](https://github.com/AshwathStephen/sairo/actions/workflows/helm.yaml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/stephenjr002/sairo)](https://hub.docker.com/r/stephenjr002/sairo)
+[![GitHub Release](https://img.shields.io/github/v/release/AshwathStephen/sairo)](https://github.com/AshwathStephen/sairo/releases)
+[![License](https://img.shields.io/github/license/AshwathStephen/sairo)](LICENSE)
+
 A self-hosted, S3-compatible object storage browser. Browse, search, and manage any S3-compatible storage from your browser.
 
 Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Backblaze B2**, **Leaseweb**, and any S3-compatible endpoint.
@@ -53,7 +59,7 @@ docker compose up -d
 ### Helm
 
 ```bash
-helm install sairo charts/sairo \
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --namespace sairo \
   --create-namespace \
   --set s3.endpoint=https://your-s3-endpoint.com \
