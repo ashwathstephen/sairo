@@ -2,7 +2,7 @@ apiVersion: v2
 name: sairo-helm
 description: S3-compatible object storage browser with search, versioning, and analytics
 type: application
-version: 0.1.0
+version: 1.0.0
 appVersion: "latest"
 keywords:
   - s3
