@@ -30,6 +30,7 @@ brews:
   - repository:
       owner: ashwathstephen
       name: homebrew-sairo
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/ashwathstephen/sairo
     description: "Fast S3 storage browser CLI — sub-second queries on petabyte-scale buckets"
     install: |
