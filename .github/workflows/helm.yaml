@@ -1,0 +1,91 @@
+name: Helm
+
+on:
+  push:
+    branches: [main]
+    paths: ["charts/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths: ["charts/**"]
+
+permissions:
+  contents: read
+
+env:
+  CHART_PATH: charts/sairo
+  OCI_REGISTRY: registry-1.docker.io
+  OCI_REPO: registry-1.docker.io/stephenjr002
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Helm lint
+        run: helm lint ${{ env.CHART_PATH }}
+
+      - name: Helm template (dry-run)
+        run: |
+          helm template sairo ${{ env.CHART_PATH }} \
+            --set s3.endpoint=https://test.example.com \
+            --set s3.accessKey=test \
+            --set s3.secretKey=test \
+            > rendered.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin
+
+      - name: Validate Kubernetes manifests
+        run: |
+          helm template sairo ${{ env.CHART_PATH }} \
+            --set s3.endpoint=https://test.example.com \
+            --set s3.accessKey=test \
+            --set s3.secretKey=test \
+            --set ingress.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set ldap.enabled=true \
+            --set ldap.server=ldaps://test \
+            --set ldap.baseDn=dc=test \
+            --set ldap.bindPassword=test \
+          | kubeconform -strict -kubernetes-version 1.29.0 -summary
+
+  publish:
+    needs: lint-and-validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Update chart metadata for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" ${{ env.CHART_PATH }}/Chart.yaml
+          sed -i "s/^  tag:.*/  tag: \"${VERSION}\"/" ${{ env.CHART_PATH }}/values.yaml
+          echo "Updated appVersion and image.tag to ${VERSION}"
+          cat ${{ env.CHART_PATH }}/Chart.yaml
+
+      - name: Login to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login ${{ env.OCI_REGISTRY }} \
+            --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Package chart
+        run: helm package ${{ env.CHART_PATH }}
+
+      - name: Push chart to OCI registry
+        run: helm push sairo-*.tgz oci://${{ env.OCI_REPO }}
