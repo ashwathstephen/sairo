@@ -82,47 +82,29 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Pull image for scanning
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Pull image
         run: docker pull stephenjr002/sairo@${{ needs.build.outputs.digest }}
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: stephenjr002/sairo@${{ needs.build.outputs.digest }}
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-
-      - name: Trivy SARIF report
-        if: always()
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: stephenjr002/sairo@${{ needs.build.outputs.digest }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-
-      - name: Upload SARIF to GitHub Security
-        if: always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results.sarif
+        run: |
+          trivy image --severity HIGH,CRITICAL --exit-code 1 \
+            stephenjr002/sairo@${{ needs.build.outputs.digest }}
 
       - name: Generate SBOM
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: stephenjr002/sairo@${{ needs.build.outputs.digest }}
-          format: cyclonedx
-          output: sbom.cdx.json
+        run: |
+          trivy image --format cyclonedx --output sbom.cdx.json \
+            stephenjr002/sairo@${{ needs.build.outputs.digest }}
 
       - name: Upload SBOM artifact
         if: always()
