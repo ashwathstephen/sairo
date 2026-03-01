@@ -1,0 +1,55 @@
+version: 2
+project_name: sairo
+
+builds:
+  - main: ./main.go
+    binary: sairo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - repository:
+      owner: ashwathstephen
+      name: homebrew-sairo
+    homepage: https://github.com/ashwathstephen/sairo
+    description: "Fast S3 storage browser CLI — sub-second queries on petabyte-scale buckets"
+    install: |
+      bin.install "sairo"
+    test: |
+      system "#{bin}/sairo", "version"
+
+nfpms:
+  - package_name: sairo
+    vendor: Sairo
+    homepage: https://github.com/ashwathstephen/sairo
+    maintainer: Ashwath Stephen
+    description: "Fast S3 storage browser CLI"
+    formats:
+      - deb
+      - rpm
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
