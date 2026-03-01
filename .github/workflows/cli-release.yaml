@@ -3,7 +3,7 @@ name: CLI Release
 on:
   push:
     tags:
-      - "cli/v*"
+      - "v*"
 
 permissions:
   contents: write

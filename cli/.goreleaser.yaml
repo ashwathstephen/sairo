@@ -1,9 +1,6 @@
 version: 2
 project_name: sairo
 
-monorepo:
-  tag_prefix: cli/
-
 builds:
   - main: ./main.go
     binary: sairo
