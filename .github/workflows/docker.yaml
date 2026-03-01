@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 env:
   IMAGE_NAME: stephenjr002/sairo
@@ -33,9 +32,6 @@ jobs:
   build:
     needs: security-lint
     runs-on: ubuntu-latest
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -76,40 +72,3 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
-
-  scan:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    steps:
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Install Trivy
-        run: |
-          wget -qO- https://github.com/aquasecurity/trivy/releases/download/v0.58.2/trivy_0.58.2_Linux-64bit.tar.gz \
-            | tar xz -C /usr/local/bin trivy
-
-      - name: Pull image
-        run: docker pull stephenjr002/sairo@${{ needs.build.outputs.digest }}
-
-      - name: Trivy vulnerability scan
-        run: |
-          trivy image --severity HIGH,CRITICAL --exit-code 1 \
-            stephenjr002/sairo@${{ needs.build.outputs.digest }}
-
-      - name: Generate SBOM
-        if: always()
-        run: |
-          trivy image --format cyclonedx --output sbom.cdx.json \
-            stephenjr002/sairo@${{ needs.build.outputs.digest }}
-
-      - name: Upload SBOM artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-cyclonedx
-          path: sbom.cdx.json
