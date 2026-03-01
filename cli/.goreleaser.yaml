@@ -67,7 +67,7 @@ release:
 
     **Helm**
     ```bash
-    helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm --version {{ .Version }}
+    helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm
     ```
 
 changelog:

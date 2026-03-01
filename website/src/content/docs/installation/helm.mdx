@@ -13,7 +13,7 @@ Sairo provides an official Helm chart for Kubernetes deployments. The chart bund
 | ----------- | ------------------------ |
 | Registry      | `oci://registry-1.docker.io/stephenjr002/sairo-helm` |
 
-Chart and app versions track releases automatically. When you install without `--version`, you get the latest published chart.
+The chart version (`1.0.0`) is independent of the app version. Each chart release bundles the matching Docker image tag via `appVersion`. When you install without `--version`, you get the latest published chart.
 
 ## Install
 
@@ -32,7 +32,7 @@ To pin a specific version:
 
 ```bash
 helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
-  --version 0.1.0 \
+  --version 1.0.0 \
   --namespace sairo \
   --create-namespace \
   ...
