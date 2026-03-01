@@ -11,15 +11,14 @@ Sairo provides an official Helm chart for Kubernetes deployments. The chart bund
 
 | Field       | Value                    |
 | ----------- | ------------------------ |
-| Chart version | `0.1.0`                |
-| App version   | `2.0.0`                |
 | Registry      | `oci://registry-1.docker.io/stephenjr002/sairo` |
+
+Chart and app versions track releases automatically. When you install without `--version`, you get the latest published chart.
 
 ## Install
 
 ```bash
 helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
-  --version 0.1.0 \
   --namespace sairo \
   --create-namespace \
   --set s3.endpoint=https://your-s3-endpoint.com \
@@ -27,6 +26,16 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
   --set s3.secretKey=your-secret-key \
   --set auth.adminPass=choose-a-strong-password \
   --set auth.jwtSecret=$(openssl rand -hex 32)
+```
+
+To pin a specific version:
+
+```bash
+helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
+  --version 0.1.0 \
+  --namespace sairo \
+  --create-namespace \
+  ...
 ```
 
 ## Key values
@@ -37,7 +46,7 @@ The table below lists the most important values. For the full schema, see `chart
 | ------------------------- | --------------------------- | ---------------------------------------- |
 | `replicaCount`            | `1`                         | Number of pod replicas                   |
 | `image.repository`        | `stephenjr002/sairo`       | Container image registry and path        |
-| `image.tag`               | `2.0.0`                     | Image tag                                |
+| `image.tag`               | `latest`                    | Image tag (pinned to exact version in released charts) |
 | `image.pullPolicy`        | `IfNotPresent`              | Image pull policy                        |
 | `service.type`            | `ClusterIP`                 | Kubernetes service type                  |
 | `service.port`            | `80`                        | Service port                             |
@@ -118,7 +127,7 @@ replicaCount: 1
 
 image:
   repository: stephenjr002/sairo
-  tag: "2.0.0"
+  tag: "latest"
 
 s3:
   endpoint: "https://s3.us-east-1.amazonaws.com"
@@ -166,7 +175,6 @@ Install with the override file:
 
 ```bash
 helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
-  --version 0.1.0 \
   --namespace sairo \
   --create-namespace \
   -f values-production.yaml
@@ -176,7 +184,6 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo \
 
 ```bash
 helm upgrade sairo oci://registry-1.docker.io/stephenjr002/sairo \
-  --version 0.1.0 \
   --namespace sairo \
   -f values-production.yaml
 ```
@@ -197,7 +204,6 @@ If you prefer plain Kubernetes YAML without Helm, pull the chart and use `helm t
 
 ```bash
 helm template sairo oci://registry-1.docker.io/stephenjr002/sairo \
-  --version 0.1.0 \
   -f values-production.yaml > sairo-manifests.yaml
 kubectl apply -f sairo-manifests.yaml
 ```

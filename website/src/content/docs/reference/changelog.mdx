@@ -3,6 +3,16 @@ title: "Changelog"
 description: "Release history and notable changes for each version of Sairo."
 ---
 
+import { Aside } from "@astrojs/starlight/components";
+
+Each version release produces all three artifacts from the same `v*` tag:
+
+- **Docker image** — `stephenjr002/sairo:X.Y.Z` on [Docker Hub](https://hub.docker.com/r/stephenjr002/sairo)
+- **Helm chart** — published to `oci://registry-1.docker.io/stephenjr002/sairo`
+- **CLI binaries** — on [GitHub Releases](https://github.com/AshwathStephen/sairo/releases) and via `brew install ashwathstephen/sairo/sairo`
+
+---
+
 ## v2.0.0
 
 Current release. A complete rewrite of Sairo with a modern frontend and significantly expanded feature set.

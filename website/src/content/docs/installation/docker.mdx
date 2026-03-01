@@ -62,6 +62,23 @@ volumes:
   sairo-data:
 ```
 
+## Image tags
+
+Every push to `main` and every version tag produces a Docker image. The following tags are available on [Docker Hub](https://hub.docker.com/r/stephenjr002/sairo):
+
+| Tag | When pushed | Use case |
+|-----|-------------|----------|
+| `:latest` | Every push to `main` | Development, always the newest build |
+| `:X.Y.Z` (e.g. `:2.1.0`) | On `vX.Y.Z` release | Production — pin to an exact release |
+| `:X.Y` (e.g. `:2.1`) | On `vX.Y.Z` release | Track patch updates within a minor version |
+| `:sha-abc1234` | Every push + release | Pinpoint a specific commit |
+
+All images are built for **linux/amd64** and **linux/arm64**.
+
+<Aside type="tip">
+  Use `:latest` for development and testing. For production, pin to a specific version like `:2.1.0` so upgrades are intentional.
+</Aside>
+
 ## Volume mount
 
 The `/data` directory inside the container stores all SQLite database files (one per bucket). Mounting a named volume or host path to `/data` ensures your index survives container restarts.

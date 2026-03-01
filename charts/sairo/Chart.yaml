@@ -3,7 +3,7 @@ name: sairo
 description: S3-compatible object storage browser with search, versioning, and analytics
 type: application
 version: 0.1.0
-appVersion: "2.0.0"
+appVersion: "latest"
 keywords:
   - s3
   - object-storage

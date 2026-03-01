@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: stephenjr002/sairo
-  tag: "2.0.0"
+  tag: "latest"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
