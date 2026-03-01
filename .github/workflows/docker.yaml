@@ -88,20 +88,24 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Install Trivy
+        run: |
+          wget -qO- https://github.com/aquasecurity/trivy/releases/download/v0.58.2/trivy_0.58.2_Linux-64bit.tar.gz \
+            | tar xz -C /usr/local/bin trivy
+
+      - name: Pull image
+        run: docker pull stephenjr002/sairo@${{ needs.build.outputs.digest }}
+
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: stephenjr002/sairo@${{ needs.build.outputs.digest }}
-          severity: HIGH,CRITICAL
-          exit-code: '1'
+        run: |
+          trivy image --severity HIGH,CRITICAL --exit-code 1 \
+            stephenjr002/sairo@${{ needs.build.outputs.digest }}
 
       - name: Generate SBOM
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: stephenjr002/sairo@${{ needs.build.outputs.digest }}
-          format: cyclonedx
-          output: sbom.cdx.json
+        run: |
+          trivy image --format cyclonedx --output sbom.cdx.json \
+            stephenjr002/sairo@${{ needs.build.outputs.digest }}
 
       - name: Upload SBOM artifact
         if: always()
