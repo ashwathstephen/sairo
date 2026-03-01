@@ -89,8 +89,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install Trivy
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        uses: aquasecurity/setup-trivy@v0.2.1
 
       - name: Pull image
         run: docker pull stephenjr002/sairo@${{ needs.build.outputs.digest }}
