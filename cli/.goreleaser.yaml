@@ -51,6 +51,25 @@ nfpms:
 checksum:
   name_template: "checksums.txt"
 
+release:
+  header: |
+    ## Install
+
+    **CLI**
+    ```bash
+    brew install ashwathstephen/sairo/sairo
+    ```
+
+    **Docker** (amd64 + arm64)
+    ```bash
+    docker pull stephenjr002/sairo:{{ .Version }}
+    ```
+
+    **Helm**
+    ```bash
+    helm install sairo oci://registry-1.docker.io/stephenjr002/sairo --version {{ .Version }}
+    ```
+
 changelog:
   use: github
   sort: asc
