@@ -433,13 +433,18 @@ def _init_users_db():
         )
     """)
     conn.commit()
-    # Create default admin if no users exist
-    row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
-    if row[0] == 0:
+    # Ensure default admin user exists and password matches ADMIN_PASS env var
+    admin_row = conn.execute("SELECT password_hash FROM users WHERE username=?", (ADMIN_USER,)).fetchone()
+    if admin_row is None:
         conn.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
                      (ADMIN_USER, bcrypt.hash(ADMIN_PASS), "admin"))
         conn.commit()
-        log.info("Created default admin user '%s' — change password immediately", ADMIN_USER)
+        log.info("Created default admin user '%s'", ADMIN_USER)
+    elif ADMIN_PASS and not bcrypt.verify(ADMIN_PASS, admin_row[0]):
+        conn.execute("UPDATE users SET password_hash=? WHERE username=?",
+                     (bcrypt.hash(ADMIN_PASS), ADMIN_USER))
+        conn.commit()
+        log.info("Admin password synced from ADMIN_PASS env var")
     # Auto-seed default S3 endpoint
     ep_row = conn.execute("SELECT id FROM s3_endpoints WHERE id='default'").fetchone()
     if not ep_row:
