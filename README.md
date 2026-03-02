@@ -16,11 +16,13 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 
 ## Screenshots
 
+![Login](docs/screenshots/login.png)
+
 | | |
 |---|---|
-| ![Bucket List](docs/screenshots/bucket-list.png) | ![Object Browser](docs/screenshots/object-browser.png) |
-| ![Search](docs/screenshots/search.png) | ![Storage Dashboard](docs/screenshots/storage-dashboard.png) |
-| ![File Details](docs/screenshots/file-details.png) | ![Dark Mode](docs/screenshots/dark-mode.png) |
+| ![Dark Mode](docs/screenshots/dark-mode.png) | ![Object Browser](docs/screenshots/object-browser-dark.png) |
+| ![Search](docs/screenshots/search-dark.png) | ![Storage Dashboard](docs/screenshots/storage-dashboard-dark.png) |
+| ![File Details](docs/screenshots/file-details-dark.png) | ![Bucket List — Light](docs/screenshots/bucket-list.png) |
 
 ## Features
 
