@@ -156,7 +156,11 @@ export default function BucketList({ onSelect, role, onDashboard }) {
               {ep.buckets.map((b) => (
                 <div key={`${ep.endpoint_id}:${b.name}`} className="bucket-card" onClick={() => handleSelectBucket(b.name, b.permission, ep.endpoint_id)}>
                   <div className="bucket-card-header">
-                    <span className="bucket-card-icon">&#128230;</span>
+                    <span className="bucket-card-icon">
+                      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="18" height="18">
+                        <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
+                      </svg>
+                    </span>
                     <span className="bucket-card-name">{b.name}</span>
                     {multiEndpoint && <span className="ep-inline-badge">{ep.endpoint_name}</span>}
                   </div>

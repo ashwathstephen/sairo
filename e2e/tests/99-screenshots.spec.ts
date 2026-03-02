@@ -28,6 +28,20 @@ test.describe('Screenshots', () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test('00 — Login page', async ({ browser }) => {
+    // Fresh context with no auth to show login page
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      storageState: { cookies: [], origins: [] },
+    });
+    const page = await context.newPage();
+    await page.goto('/');
+    await expect(page.locator(SEL.loginForm)).toBeVisible({ timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await page.screenshot(screenshot('login'));
+    await context.close();
+  });
+
   test('01 — Bucket list (light mode)', async ({ page }) => {
     await page.goto('/');
     await dismissWelcomeIfPresent(page);
@@ -165,5 +179,66 @@ test.describe('Screenshots', () => {
     await expect(page.locator(SEL.tableRow).first()).toBeVisible();
 
     await page.screenshot(screenshot('object-browser-dark'));
+  });
+
+  test('08 — Search results (dark mode)', async ({ page }) => {
+    await page.goto('/');
+    await dismissWelcomeIfPresent(page);
+
+    const theme = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    if (theme !== 'dark') {
+      await page.locator(SEL.themeToggle).click();
+      await page.waitForTimeout(300);
+    }
+
+    await navigateToBucket(page, BUCKETS.MAIN);
+    await page.locator(SEL.searchButton).click();
+    await expect(page.locator(SEL.searchInput)).toBeVisible();
+    await page.locator(SEL.searchInput).fill('sample');
+    await expect(
+      page.locator(`${SEL.searchItem}, ${SEL.searchCount}`).first()
+    ).toBeVisible({ timeout: 10_000 });
+
+    await page.screenshot(screenshot('search-dark'));
+  });
+
+  test('09 — Storage dashboard (dark mode)', async ({ page }) => {
+    await page.goto('/');
+    await dismissWelcomeIfPresent(page);
+
+    const theme = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    if (theme !== 'dark') {
+      await page.locator(SEL.themeToggle).click();
+      await page.waitForTimeout(300);
+    }
+
+    await navigateToBucket(page, BUCKETS.MAIN);
+    await page.locator(SEL.dashboardButton).click();
+    await expect(page.locator(SEL.dashboardModal)).toBeVisible();
+    await expect(page.locator(SEL.dashboardCard).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(SEL.dashboardBarRow).first()).toBeVisible({ timeout: 10_000 });
+
+    await page.screenshot(screenshot('storage-dashboard-dark'));
+  });
+
+  test('10 — Object details (dark mode)', async ({ page }) => {
+    await page.goto('/');
+    await dismissWelcomeIfPresent(page);
+
+    const theme = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    if (theme !== 'dark') {
+      await page.locator(SEL.themeToggle).click();
+      await page.waitForTimeout(300);
+    }
+
+    await navigateToBucket(page, BUCKETS.MAIN);
+
+    const fileRow = page.locator(`${SEL.tableRow}:has-text("sample.json")`);
+    await expect(fileRow).toBeVisible();
+    await fileRow.locator(`${SEL.colActions} button:has-text("i")`).click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+    await expect(page.locator(SEL.infoTable)).toBeVisible({ timeout: 10_000 });
+
+    await page.screenshot(screenshot('file-details-dark'));
   });
 });

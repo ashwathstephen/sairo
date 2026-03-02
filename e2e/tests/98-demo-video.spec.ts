@@ -24,15 +24,42 @@ const GIF_PATH = path.join(DOCS_DIR, 'demo.gif');
 // Deliberate pause so viewers can see each state
 const pause = (ms = 1500) => new Promise((r) => setTimeout(r, ms));
 
-// video config must be top-level (not inside describe)
 test.use({
   viewport: { width: 1440, height: 900 },
-  video: { mode: 'on', size: { width: 1440, height: 900 } },
 });
 
-test('Feature walkthrough', async ({ page }, testInfo) => {
+test('Feature walkthrough', async ({ browser }, testInfo) => {
   // Increase timeout for this long demo
   test.setTimeout(120_000);
+
+  // ── 0. Login page (unauthenticated) ──
+  const loginContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    video: { mode: 'off' },
+    storageState: { cookies: [], origins: [] },
+  });
+  const loginPage = await loginContext.newPage();
+  await loginPage.goto('/');
+  await expect(loginPage.locator(SEL.loginForm)).toBeVisible({ timeout: 10_000 });
+  await pause(2000);
+
+  // Log in
+  await loginPage.locator('input[aria-label="Username"]').fill('admin');
+  await loginPage.locator('input[aria-label="Password"]').fill('password');
+  await loginPage.locator('button[type="submit"]').click();
+  await expect(loginPage.locator(SEL.bucketCard).first()).toBeVisible({ timeout: 15_000 });
+
+  // Save auth state for the recorded context
+  const authState = await loginPage.context().storageState();
+  await loginContext.close();
+
+  // ── Start recorded context (authenticated) ──
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    recordVideo: { dir: DOCS_DIR, size: { width: 1440, height: 900 } },
+    storageState: authState,
+  });
+  const page = await context.newPage();
 
   // ── 1. Bucket list (light mode) ──
   await page.goto('/');
@@ -153,4 +180,5 @@ test('Feature walkthrough', async ({ page }, testInfo) => {
       console.warn('ffmpeg not available — skipping GIF conversion. Install ffmpeg and re-run.');
     }
   }
+  await context.close();
 });

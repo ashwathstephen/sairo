@@ -82,8 +82,13 @@ export default function Login({ onLogin, branding = {} }) {
       <div className="login-page">
         <div className="login-container">
           <form className="login-form" onSubmit={handle2FASubmit}>
-            <div className="login-logo">
-              <span className="login-logo-icon">&#128272;</span>
+            <div className="login-branding">
+              <div className="login-logo-mark">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" width="28" height="28">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                  <circle cx="12" cy="16" r="1"/>
+                </svg>
+              </div>
               <h1>Two-Factor Authentication</h1>
             </div>
             <p className="login-subtitle">
@@ -133,11 +138,19 @@ export default function Login({ onLogin, branding = {} }) {
     <div className="login-page">
       <div className="login-container">
         <form className="login-form" onSubmit={handleSubmit}>
-          <div className="login-logo">
-            <span className="login-logo-icon">&#128230;</span>
+          <div className="login-branding">
+            <div className="login-logo-mark">
+              <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="32" height="32">
+                <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/>
+                <path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/>
+                <path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/>
+                <line x1="12" y1="10" x2="12" y2="30"/>
+                <line x1="28" y1="10" x2="28" y2="30"/>
+              </svg>
+            </div>
             <h1>{appName}</h1>
+            <p className="login-subtitle">Object storage, <span className="login-subtitle-fade">beautifully browsed.</span></p>
           </div>
-          <p className="login-subtitle">S3-compatible object storage browser</p>
           {loginMessage && <p className="login-message">{loginMessage}</p>}
           {error && <div className="login-error">{error}</div>}
           {ldapEnabled && (

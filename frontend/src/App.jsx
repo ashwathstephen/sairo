@@ -549,6 +549,11 @@ function MainApp() {
       <div className="app">
         <header>
           <div className="header-left">
+            <span className="header-logo-mark">
+              <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="22" height="22">
+                <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
+              </svg>
+            </span>
             <h1>{appName}</h1>
             <span className="bucket-name">Object Storage</span>
           </div>
@@ -590,6 +595,11 @@ function MainApp() {
     >
       <header>
         <div className="header-left">
+          <span className="header-logo-mark" style={{ cursor: "pointer" }} onClick={goHome}>
+            <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="20" height="20">
+              <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
+            </svg>
+          </span>
           <h1 style={{ cursor: "pointer" }} onClick={goHome}>{appName}</h1>
           <span className="bucket-name">{bucket}</span>
         </div>
