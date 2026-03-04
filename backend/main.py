@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1168,6 +1169,145 @@ def _run_crawl(bucket, endpoint_id=None):
 _version_scanning = {}  # bucket -> bool
 _version_scan_lock = threading.Lock()
 
+# ── Background Purge Tasks ────────────────────────────────────────────────
+_purge_tasks = {}        # task_id -> {status, purged, errors, detail, ...}
+_purge_tasks_lock = threading.Lock()
+_PURGE_TASK_TTL = 600    # Keep completed task results for 10 minutes
+
+
+def _purge_task_set(task_id, **kwargs):
+    """Thread-safe update of a purge task's state."""
+    with _purge_tasks_lock:
+        if task_id in _purge_tasks:
+            _purge_tasks[task_id].update(kwargs)
+
+
+def _purge_task_cleanup():
+    """Remove completed tasks older than TTL."""
+    now = time.time()
+    with _purge_tasks_lock:
+        expired = [tid for tid, t in _purge_tasks.items()
+                   if t.get("status") in ("complete", "error") and now - t.get("finished_at", now) > _PURGE_TASK_TTL]
+        for tid in expired:
+            del _purge_tasks[tid]
+
+
+def _run_purge(task_id, bucket, keys, target_prefix, username, endpoint_id=None):
+    """Background worker: collect versions from S3, batch-delete, clean index."""
+    eid = endpoint_id or "default"
+    crawl_key = f"{eid}:{bucket}"
+    _s3_context.endpoint_id = eid
+    client = _s3_manager.get_client(eid)
+
+    # Block recrawl from running on this bucket while we purge
+    with _crawl_lock:
+        _crawling[crawl_key] = True
+
+    try:
+        # Phase 1: Collect all version+marker entries
+        to_delete = []
+        if keys:
+            for key in keys:
+                try:
+                    resp = client.list_object_versions(Bucket=bucket, Prefix=key, MaxKeys=1000)
+                    for v in resp.get("Versions", []):
+                        if v["Key"] == key:
+                            to_delete.append({"Key": key, "VersionId": v["VersionId"]})
+                    for d in resp.get("DeleteMarkers", []):
+                        if d["Key"] == key:
+                            to_delete.append({"Key": key, "VersionId": d["VersionId"]})
+                except Exception as e:
+                    log.error("Purge task %s: failed to list versions for key %s: %s", task_id, key, e)
+            _purge_task_set(task_id, detail=f"Found {len(to_delete)} versions for {len(keys)} keys")
+        elif target_prefix:
+            key_marker = None
+            version_marker = None
+            while True:
+                params = {"Bucket": bucket, "Prefix": target_prefix, "MaxKeys": 1000}
+                if key_marker:
+                    params["KeyMarker"] = key_marker
+                    if version_marker:
+                        params["VersionIdMarker"] = version_marker
+                try:
+                    resp = client.list_object_versions(**params)
+                except Exception as e:
+                    log.error("Purge task %s: S3 list_object_versions failed: %s", task_id, e)
+                    _purge_task_set(task_id, status="error", detail=f"S3 error: {e}",
+                                   finished_at=time.time())
+                    return
+                for v in resp.get("Versions", []):
+                    to_delete.append({"Key": v["Key"], "VersionId": v["VersionId"]})
+                for d in resp.get("DeleteMarkers", []):
+                    to_delete.append({"Key": d["Key"], "VersionId": d["VersionId"]})
+                _purge_task_set(task_id, detail=f"Collecting versions... {len(to_delete)} found")
+                if not resp.get("IsTruncated", False):
+                    break
+                key_marker = resp.get("NextKeyMarker")
+                version_marker = resp.get("NextVersionIdMarker")
+
+        if not to_delete:
+            _purge_cleanup_index(bucket, target_prefix, keys, endpoint_id)
+            _audit("purge_versions", username, bucket=bucket,
+                   details=f"{'keys=' + str(len(keys)) if keys else 'prefix=' + target_prefix}, purged=0 (cleaned index)")
+            log.info("Purge task %s: no S3 objects found, cleaned index", task_id)
+            _purge_task_set(task_id, status="complete", purged=0, errors=0,
+                           detail="No versioned data found (index cleaned)",
+                           finished_at=time.time())
+            return
+
+        # Phase 2: Delete in batches of 1000
+        log.info("Purge task %s: deleting %d version entries", task_id, len(to_delete))
+        total_purged = 0
+        total_errors = 0
+        total = len(to_delete)
+        for i in range(0, total, 1000):
+            batch = to_delete[i:i + 1000]
+            try:
+                resp = client.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
+                batch_errors = len(resp.get("Errors", []))
+                total_errors += batch_errors
+                total_purged += len(batch) - batch_errors
+            except Exception as e:
+                log.error("Purge task %s: delete_objects failed on batch %d: %s", task_id, i // 1000, e)
+                total_errors += len(batch)
+            _purge_task_set(task_id, purged=total_purged, errors=total_errors,
+                           detail=f"Deleting... {total_purged}/{total}")
+
+        # Phase 3: Clean up index
+        _purge_cleanup_index(bucket, target_prefix, keys, endpoint_id)
+
+        details = f"keys={len(keys)}" if keys else f"prefix={target_prefix}"
+        _audit("purge_versions", username, bucket=bucket, details=f"{details}, purged={total_purged}")
+        log.info("Purge task %s complete: %d deleted, %d errors", task_id, total_purged, total_errors)
+        _purge_task_set(task_id, status="complete", purged=total_purged, errors=total_errors,
+                       detail=f"Purged {total_purged} versions" + (f" ({total_errors} errors)" if total_errors else ""),
+                       finished_at=time.time())
+    except Exception as e:
+        log.error("Purge task %s failed: %s\n%s", task_id, e, traceback.format_exc())
+        _purge_task_set(task_id, status="error", detail=f"Unexpected error: {e}",
+                       finished_at=time.time())
+    finally:
+        # Release crawl lock so recrawl can proceed
+        with _crawl_lock:
+            _crawling[crawl_key] = False
+
+
+def _purge_cleanup_index(bucket, target_prefix, keys, endpoint_id=None):
+    """Clean up index tables after purge."""
+    if not os.path.exists(_db_path(bucket, endpoint_id)):
+        return
+    with _get_db(bucket, endpoint_id) as db:
+        if keys:
+            db.executemany("DELETE FROM objects WHERE key=?", [(k,) for k in keys])
+        elif target_prefix:
+            db.execute("DELETE FROM objects WHERE key LIKE ?", (target_prefix + "%",))
+            db.execute("DELETE FROM discovered_prefixes WHERE prefix = ?", (target_prefix,))
+            db.execute("DELETE FROM discovered_prefixes WHERE prefix LIKE ?", (target_prefix + "%",))
+            db.execute("DELETE FROM version_scan_cache WHERE prefix = ?", (target_prefix,))
+            db.execute("DELETE FROM version_scan_cache WHERE prefix LIKE ?", (target_prefix + "%",))
+        db.commit()
+    _update_crawl_counters(bucket, endpoint_id)
+
 
 def _scan_versioned_prefixes(bucket, endpoint_id=None):
     """Background scan: discover all top-level prefixes with version history.
@@ -2234,14 +2374,24 @@ def get_audit_log(
 @app.get("/healthz")
 @limiter.exempt
 def healthz():
-    # Check that /data is still writable (catches unmounted PVC, disk full, etc.)
+    # Liveness: just confirm the process is responsive.
+    # Storage checks belong in readiness, not liveness — killing the pod
+    # on a transient Longhorn unmount just causes a restart loop.
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+@limiter.exempt
+def readyz():
+    # Readiness: verify /data is writable so k8s stops routing traffic
+    # during transient PVC issues, without killing the pod.
     try:
-        probe = os.path.join(DB_DIR, ".healthz_probe")
+        probe = os.path.join(DB_DIR, ".readyz_probe")
         with open(probe, "w") as f:
             f.write("ok")
         os.remove(probe)
     except Exception as e:
-        log.error("Health check failed — DB_DIR '%s' not writable: %s", DB_DIR, e)
+        log.warning("Readiness check failed — DB_DIR '%s' not writable: %s", DB_DIR, e)
         return JSONResponse(status_code=503, content={"status": "error", "detail": f"storage not writable: {e}"})
     return {"status": "ok"}
 
@@ -3350,61 +3500,55 @@ class DeleteFolderRequest(BaseModel):
 @app.delete("/api/buckets/{bucket}/folder")
 def delete_folder(bucket: str, req: DeleteFolderRequest, user: dict = Depends(require_admin)):
     """Recursively delete all objects under a prefix (folder).
-    If purge_versions=true, permanently removes ALL versions and delete markers."""
+    If purge_versions=true, dispatches to background purge task."""
     pfx = req.prefix if req.prefix.endswith("/") else req.prefix + "/"
     if not pfx or pfx == "/" or len(pfx.rstrip("/")) == 0:
         raise HTTPException(400, "Cannot delete root prefix")
 
     if req.purge_versions:
-        # Use list_object_versions to find ALL versions + delete markers
-        to_delete = []
-        key_marker = None
-        version_marker = None
-        while True:
-            params = {"Bucket": bucket, "Prefix": pfx, "MaxKeys": 1000}
-            if key_marker:
-                params["KeyMarker"] = key_marker
-                if version_marker:
-                    params["VersionIdMarker"] = version_marker
-            resp = s3.list_object_versions(**params)
-            for v in resp.get("Versions", []):
-                to_delete.append({"Key": v["Key"], "VersionId": v["VersionId"]})
-            for d in resp.get("DeleteMarkers", []):
-                to_delete.append({"Key": d["Key"], "VersionId": d["VersionId"]})
-            if not resp.get("IsTruncated", False):
-                break
-            key_marker = resp.get("NextKeyMarker")
-            version_marker = resp.get("NextVersionIdMarker")
-        total_deleted = 0
-        total_errors = 0
-        for i in range(0, len(to_delete), 1000):
-            batch = to_delete[i:i + 1000]
-            resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
-            total_errors += len(resp.get("Errors", []))
-            total_deleted += len(batch) - len(resp.get("Errors", []))
-    else:
-        # Current behavior: list_objects_v2 + delete (creates delete markers)
-        all_keys = []
-        token = None
-        while True:
-            params = {"Bucket": bucket, "Prefix": pfx, "MaxKeys": 1000}
-            if token:
-                params["ContinuationToken"] = token
-            resp = s3.list_objects_v2(**params)
-            for obj in resp.get("Contents", []):
-                all_keys.append(obj["Key"])
-            if not resp.get("IsTruncated", False):
-                break
-            token = resp.get("NextContinuationToken")
-        all_keys.append(pfx)
-        all_keys = list(set(all_keys))
-        total_deleted = 0
-        total_errors = 0
-        for i in range(0, len(all_keys), 1000):
-            batch = all_keys[i:i + 1000]
-            resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
-            total_errors += len(resp.get("Errors", []))
-            total_deleted += len(batch) - len(resp.get("Errors", []))
+        # Dispatch to background purge (same as purge-versions endpoint)
+        task_id = uuid.uuid4().hex[:12]
+        log.info("Purge folder task %s: bucket=%s, prefix=%s", task_id, bucket, pfx)
+        with _purge_tasks_lock:
+            _purge_tasks[task_id] = {
+                "status": "running",
+                "bucket": bucket,
+                "purged": 0,
+                "errors": 0,
+                "detail": "Starting folder purge...",
+                "started_at": time.time(),
+            }
+        eid = _current_endpoint_id()
+        threading.Thread(
+            target=_run_purge,
+            args=(task_id, bucket, [], pfx, user["username"], eid),
+            daemon=True,
+        ).start()
+        _purge_task_cleanup()
+        return {"task_id": task_id, "status": "running", "prefix": pfx}
+
+    # Non-purge: regular delete (fast — only current versions)
+    all_keys = []
+    token = None
+    while True:
+        params = {"Bucket": bucket, "Prefix": pfx, "MaxKeys": 1000}
+        if token:
+            params["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**params)
+        for obj in resp.get("Contents", []):
+            all_keys.append(obj["Key"])
+        if not resp.get("IsTruncated", False):
+            break
+        token = resp.get("NextContinuationToken")
+    all_keys.append(pfx)
+    all_keys = list(set(all_keys))
+    total_deleted = 0
+    total_errors = 0
+    for i in range(0, len(all_keys), 1000):
+        batch = all_keys[i:i + 1000]
+        resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
+        total_errors += len(resp.get("Errors", []))
+        total_deleted += len(batch) - len(resp.get("Errors", []))
 
     # Clean up index
     if os.path.exists(_db_path(bucket)):
@@ -3414,8 +3558,7 @@ def delete_folder(bucket: str, req: DeleteFolderRequest, user: dict = Depends(re
             db.execute("DELETE FROM discovered_prefixes WHERE prefix = ?", (pfx,))
             db.commit()
         _update_crawl_counters(bucket)
-    action = "purge_folder" if req.purge_versions else "delete_folder"
-    _audit(action, user["username"], bucket=bucket, details=f"prefix={pfx}, objects={total_deleted}")
+    _audit("delete_folder", user["username"], bucket=bucket, details=f"prefix={pfx}, objects={total_deleted}")
     return {"deleted": total_deleted, "errors": total_errors, "prefix": pfx}
 
 
@@ -3653,81 +3796,54 @@ class PurgeVersionsRequest(BaseModel):
 
 @app.post("/api/buckets/{bucket}/purge-versions")
 def purge_versions(bucket: str, req: PurgeVersionsRequest, user: dict = Depends(require_admin)):
-    """Permanently delete ALL versions and delete markers for the given keys or prefix."""
-    log.info(f"Purge request: bucket={bucket}, keys={req.keys}, prefix={req.prefix!r}")
+    """Start a background purge of ALL versions and delete markers for the given keys or prefix.
+    Returns a task_id immediately; poll GET /api/purge-status/{task_id} for progress."""
     if not req.keys and not req.prefix:
         raise HTTPException(400, "Provide keys or prefix")
-    # Collect all version+marker entries to delete
-    to_delete = []  # list of {Key, VersionId}
-    target_prefix = req.prefix
-    if req.keys:
-        for key in req.keys:
-            resp = s3.list_object_versions(Bucket=bucket, Prefix=key, MaxKeys=1000)
-            for v in resp.get("Versions", []):
-                if v["Key"] == key:
-                    to_delete.append({"Key": key, "VersionId": v["VersionId"]})
-            for d in resp.get("DeleteMarkers", []):
-                if d["Key"] == key:
-                    to_delete.append({"Key": key, "VersionId": d["VersionId"]})
-    elif target_prefix:
-        if not target_prefix.endswith("/"):
-            target_prefix += "/"
-        key_marker = None
-        version_marker = None
-        while True:
-            params = {"Bucket": bucket, "Prefix": target_prefix, "MaxKeys": 1000}
-            if key_marker:
-                params["KeyMarker"] = key_marker
-                if version_marker:
-                    params["VersionIdMarker"] = version_marker
-            resp = s3.list_object_versions(**params)
-            for v in resp.get("Versions", []):
-                to_delete.append({"Key": v["Key"], "VersionId": v["VersionId"]})
-            for d in resp.get("DeleteMarkers", []):
-                to_delete.append({"Key": d["Key"], "VersionId": d["VersionId"]})
-            if not resp.get("IsTruncated", False):
-                break
-            key_marker = resp.get("NextKeyMarker")
-            version_marker = resp.get("NextVersionIdMarker")
-    def _cleanup_index(prefix_to_clean, keys_to_clean=None):
-        """Clean up index tables after purge."""
-        if not os.path.exists(_db_path(bucket)):
-            return
-        with _get_db(bucket) as db:
-            if keys_to_clean:
-                db.executemany("DELETE FROM objects WHERE key=?", [(k,) for k in keys_to_clean])
-            elif prefix_to_clean:
-                db.execute("DELETE FROM objects WHERE key LIKE ?", (prefix_to_clean + "%",))
-                db.execute("DELETE FROM discovered_prefixes WHERE prefix = ?", (prefix_to_clean,))
-                db.execute("DELETE FROM discovered_prefixes WHERE prefix LIKE ?", (prefix_to_clean + "%",))
-                # Also remove from version scan cache
-                db.execute("DELETE FROM version_scan_cache WHERE prefix = ?", (prefix_to_clean,))
-                db.execute("DELETE FROM version_scan_cache WHERE prefix LIKE ?", (prefix_to_clean + "%",))
-            db.commit()
-        _update_crawl_counters(bucket)
 
-    if not to_delete:
-        # Still clean up stale index entries even if nothing in S3
-        _cleanup_index(target_prefix, req.keys if req.keys else None)
-        _audit("purge_versions", user["username"], bucket=bucket,
-               details=f"{'keys=' + str(len(req.keys)) if req.keys else 'prefix=' + target_prefix}, purged=0 (cleaned index)")
-        log.info(f"Purge: no S3 objects found for {'keys=' + str(req.keys) if req.keys else 'prefix=' + target_prefix}, cleaned index")
-        return {"purged": 0, "errors": 0}
-    # Delete in batches of 1000
-    log.info(f"Purge: deleting {len(to_delete)} version entries for {'keys=' + str(req.keys) if req.keys else 'prefix=' + target_prefix}")
-    total_purged = 0
-    total_errors = 0
-    for i in range(0, len(to_delete), 1000):
-        batch = to_delete[i:i + 1000]
-        resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": batch, "Quiet": True})
-        total_errors += len(resp.get("Errors", []))
-        total_purged += len(batch) - len(resp.get("Errors", []))
-    # Clean up index
-    _cleanup_index(target_prefix, req.keys if req.keys else None)
-    details = f"keys={len(req.keys)}" if req.keys else f"prefix={target_prefix}"
-    _audit("purge_versions", user["username"], bucket=bucket, details=f"{details}, purged={total_purged}")
-    log.info(f"Purge complete: {total_purged} deleted, {total_errors} errors")
-    return {"purged": total_purged, "errors": total_errors}
+    target_prefix = req.prefix
+    if target_prefix and not target_prefix.endswith("/"):
+        target_prefix += "/"
+
+    task_id = uuid.uuid4().hex[:12]
+    label = f"keys={len(req.keys)}" if req.keys else f"prefix={target_prefix}"
+    log.info("Purge task %s started: bucket=%s, %s", task_id, bucket, label)
+
+    with _purge_tasks_lock:
+        _purge_tasks[task_id] = {
+            "status": "running",
+            "bucket": bucket,
+            "purged": 0,
+            "errors": 0,
+            "detail": "Starting purge...",
+            "started_at": time.time(),
+        }
+
+    eid = _current_endpoint_id()
+    threading.Thread(
+        target=_run_purge,
+        args=(task_id, bucket, req.keys, target_prefix, user["username"], eid),
+        daemon=True,
+    ).start()
+
+    _purge_task_cleanup()
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/purge-status/{task_id}")
+def purge_status(task_id: str, user: dict = Depends(require_admin)):
+    """Poll the status of a background purge task."""
+    with _purge_tasks_lock:
+        task = _purge_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Purge task not found")
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "purged": task.get("purged", 0),
+        "errors": task.get("errors", 0),
+        "detail": task.get("detail", ""),
+    }
 
 
 class RestoreVersionRequest(BaseModel):

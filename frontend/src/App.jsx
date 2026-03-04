@@ -317,12 +317,15 @@ function MainApp() {
   const handlePurgeDeleted = async (keys, folderPrefix) => {
     const label = folderPrefix || (keys && keys[0]) || "items";
     const toastId = toast(`Purging ${label}...`, "info", 0);
+    const onProgress = (data) => {
+      if (data.detail) toast(data.detail, "info", 0, toastId);
+    };
     try {
       let result;
       if (folderPrefix) {
-        result = await purgePrefix(bucket, folderPrefix);
+        result = await purgePrefix(bucket, folderPrefix, onProgress);
       } else if (keys && keys.length > 0) {
-        result = await purgeVersions(bucket, keys);
+        result = await purgeVersions(bucket, keys, onProgress);
       }
       const purged = result?.purged || 0;
       const errors = result?.errors || 0;
@@ -358,23 +361,27 @@ function MainApp() {
     setShowDelete(false);
     let errors = 0;
     const action = doPurge ? "Purging" : "Deleting";
-    const toastId = folderCount > 0
-      ? toast(`${action}... 0/${folderCount} folders`, "info", 0)
-      : null;
+    const toastId = toast(
+      folderCount > 0 ? `${action}... 0/${folderCount} folders` : `${action}...`,
+      "info", 0,
+    );
+    const onProgress = (data) => {
+      if (data.detail) toast(data.detail, "info", 0, toastId);
+    };
     try {
       // Delete/purge files first
       if (fileCount > 0) {
         if (doPurge) {
-          await purgeVersions(bucket, [...selected]);
+          await purgeVersions(bucket, [...selected], onProgress);
         } else {
           await deleteObjects(bucket, [...selected]);
         }
       }
       // Delete/purge folders sequentially (large folders can take time)
       for (let i = 0; i < folderList.length; i++) {
-        if (toastId) toast(`${action} folder ${i + 1}/${folderCount}: ${folderList[i].split("/").filter(Boolean).pop()}...`, "info", 0, toastId);
+        toast(`${action} folder ${i + 1}/${folderCount}: ${folderList[i].split("/").filter(Boolean).pop()}...`, "info", 0, toastId);
         try {
-          await deleteFolder(bucket, folderList[i], doPurge);
+          await deleteFolder(bucket, folderList[i], doPurge, onProgress);
         } catch (e) {
           console.error("Failed to delete folder", folderList[i], e);
           errors++;
@@ -390,7 +397,7 @@ function MainApp() {
     if (fileCount > 0) parts.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
     if (folderCount > 0) parts.push(`${folderCount - errors} folder${folderCount - errors !== 1 ? "s" : ""}`);
     const verb = doPurge ? "Purged" : "Deleted";
-    toast(`${verb} ${parts.join(" and ")}${errors ? ` (${errors} failed)` : ""}`, errors ? "warning" : "success", 5000, toastId || undefined);
+    toast(`${verb} ${parts.join(" and ")}${errors ? ` (${errors} failed)` : ""}`, errors ? "warning" : "success", 5000, toastId);
     load(bucket, prefix);
     if (showDeleted) {
       listDeletedVersions(bucket, prefix).then(setDeletedItems).catch(() => {});

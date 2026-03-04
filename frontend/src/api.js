@@ -117,13 +117,19 @@ export async function deleteObjects(bucket, keys) {
   return res.json();
 }
 
-export async function deleteFolder(bucket, prefix, purgeVersions = false) {
+export async function deleteFolder(bucket, prefix, purgeVersions = false, onProgress) {
   const res = await apiFetch(`${bucketBase(bucket)}/folder`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prefix, purge_versions: purgeVersions }),
   });
-  return res.json();
+  const data = await res.json();
+  if (data.task_id) {
+    const result = await _pollPurgeTask(data.task_id, onProgress);
+    if (result.status === "error") throw new Error(result.detail || "Purge failed");
+    return { deleted: result.purged, errors: result.errors, prefix: data.prefix };
+  }
+  return data;
 }
 
 export async function uploadFiles(bucket, prefix, files) {
@@ -519,24 +525,49 @@ export async function listDeletedVersions(bucket, prefix = "") {
   return res.json();
 }
 
-export async function purgeVersions(bucket, keys) {
+async function _pollPurgeTask(taskId, onProgress) {
+  const POLL_INTERVAL = 1000;
+  const MAX_POLLS = 600; // 10 minutes max
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    const res = await apiFetch(`${BASE}/purge-status/${taskId}`);
+    const data = await res.json();
+    if (onProgress) onProgress(data);
+    if (data.status === "complete" || data.status === "error") {
+      return data;
+    }
+  }
+  throw new Error("Purge timed out");
+}
+
+export async function purgeVersions(bucket, keys, onProgress) {
   const res = await apiFetch(`${bucketBase(bucket)}/purge-versions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ keys }),
   });
-  if (!res.ok) throw new Error(`Purge failed: ${res.status}`);
-  return res.json();
+  const start = await res.json();
+  if (start.task_id) {
+    const result = await _pollPurgeTask(start.task_id, onProgress);
+    if (result.status === "error") throw new Error(result.detail || "Purge failed");
+    return result;
+  }
+  return start;
 }
 
-export async function purgePrefix(bucket, prefix) {
+export async function purgePrefix(bucket, prefix, onProgress) {
   const res = await apiFetch(`${bucketBase(bucket)}/purge-versions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prefix }),
   });
-  if (!res.ok) throw new Error(`Purge prefix failed: ${res.status}`);
-  return res.json();
+  const start = await res.json();
+  if (start.task_id) {
+    const result = await _pollPurgeTask(start.task_id, onProgress);
+    if (result.status === "error") throw new Error(result.detail || "Purge failed");
+    return result;
+  }
+  return start;
 }
 
 // ── Audit Log ───────────────────────────────────────────
