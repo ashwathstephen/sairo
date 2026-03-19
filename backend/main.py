@@ -123,6 +123,33 @@ async def bucket_permission_middleware(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Write access required"})
     return await call_next(request)
 
+# ── Query Result Cache (TTL-based, thread-safe) ───────────────────────────
+_query_cache: dict[str, tuple[float, object]] = {}  # key -> (expire_ts, result)
+_query_cache_lock = threading.Lock()
+_QUERY_CACHE_TTL = 30  # seconds
+
+def _cache_get(key: str):
+    """Return cached result if present and not expired, else None."""
+    with _query_cache_lock:
+        entry = _query_cache.get(key)
+        if entry and time.time() < entry[0]:
+            return entry[1]
+        if entry:
+            del _query_cache[key]
+    return None
+
+def _cache_set(key: str, value):
+    """Store result in cache with TTL."""
+    with _query_cache_lock:
+        _query_cache[key] = (time.time() + _QUERY_CACHE_TTL, value)
+
+def _cache_invalidate_bucket(bucket: str):
+    """Invalidate all cache entries for a bucket (called after mutations)."""
+    with _query_cache_lock:
+        stale = [k for k in _query_cache if k.startswith(f"{bucket}:")]
+        for k in stale:
+            del _query_cache[k]
+
 # ── Login Rate Limiter ──────────────────────────────────────────────────────
 _login_attempts: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
@@ -1059,6 +1086,7 @@ def _run_crawl(bucket, endpoint_id=None):
                      eid, bucket, f"{row[0]:,}", row[1] / (1024**3), elapsed)
             _record_storage_snapshot(bucket, eid)
             _rebuild_folder_stats(bucket, eid)
+            _cache_invalidate_bucket(bucket)
             return
 
         # Prefix-parallel crawl
@@ -1151,6 +1179,7 @@ def _run_crawl(bucket, endpoint_id=None):
             _enable_fts_triggers(db)
         _record_storage_snapshot(bucket, eid)
         _rebuild_folder_stats(bucket, eid)
+        _cache_invalidate_bucket(bucket)
 
     except BaseException as e:
         log.error("[%s:%s] Crawl error: %s\n%s", eid, bucket, e, traceback.format_exc())
@@ -2935,7 +2964,15 @@ def list_objects(bucket: str, prefix: str = "", fresh: bool = False, user: dict 
     Pass fresh=true to force a direct S3 listing bypassing the index."""
     eid = _current_endpoint_id()
     if _is_index_ready(bucket) and not fresh:
-        folders, files = _list_from_index(bucket, prefix)
+        cache_key = f"{bucket}:list:{prefix}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            folders, files = cached
+            log.info("[perf] _list_from_index CACHE HIT (%d folders, %d files) prefix=%s",
+                     len(folders), len(files), prefix[:60])
+        else:
+            folders, files = _list_from_index(bucket, prefix)
+            _cache_set(cache_key, (folders, files))
         def gen():
             yield json.dumps({"folders": folders, "files": files, "done": True,
                               "total_folders": len(folders), "total_files": len(files), "indexed": True}) + "\n"
@@ -3059,6 +3096,12 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
 
+    cache_key = f"{bucket}:sb:{prefix}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        log.info("[perf] storage_breakdown CACHE HIT prefix=%s", prefix[:60])
+        return cached
+
     # Fast path: use precomputed folder_stats for root-level breakdown
     if not prefix:
         with _get_db(bucket) as db:
@@ -3087,8 +3130,10 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
                                 "object_count": r["object_count"], "total_size": r["total_size"]})
                 total_size = sum(c["total_size"] for c in children)
                 total_count = sum(c["object_count"] for c in children)
-                return {"prefix": "(root)", "total_size": total_size,
-                        "object_count": total_count, "children": children}
+                result = {"prefix": "(root)", "total_size": total_size,
+                          "object_count": total_count, "children": children}
+                _cache_set(cache_key, result)
+                return result
 
     # Slow path: full GROUP BY query for sub-prefix or when folder_stats not yet populated
     t_sb = time.monotonic()
@@ -3121,8 +3166,10 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
         })
     total_size = sum(c["total_size"] for c in children)
     total_count = sum(c["object_count"] for c in children)
-    return {"prefix": prefix or "(root)", "total_size": total_size,
-            "object_count": total_count, "children": children}
+    result = {"prefix": prefix or "(root)", "total_size": total_size,
+              "object_count": total_count, "children": children}
+    _cache_set(cache_key, result)
+    return result
 
 
 # ── API: Storage History ──────────────────────────────────────────────────
