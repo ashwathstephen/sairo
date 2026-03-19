@@ -2835,6 +2835,7 @@ def delete_bucket(bucket: str, user: dict = Depends(require_admin)):
 
 def _list_from_index(bucket, prefix):
     prefix_len = len(prefix)
+    t0 = time.monotonic()
 
     with _get_db(bucket) as db:
         seen = set()
@@ -2866,9 +2867,12 @@ def _list_from_index(bucket, prefix):
         else:
             # Subfolder: range scan on prefix index, extract immediate children
             prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+            t_q = time.monotonic()
             rows = db.execute(
                 "SELECT DISTINCT prefix FROM objects WHERE prefix >= ? AND prefix < ?",
                 (prefix, prefix_end)).fetchall()
+            log.info("[perf] _list_from_index DISTINCT query: %.3fs (%d rows) prefix=%s",
+                     time.monotonic() - t_q, len(rows), prefix[:60])
             for (p,) in rows:
                 rest = p[prefix_len:]
                 slash = rest.find('/')
@@ -2881,6 +2885,7 @@ def _list_from_index(bucket, prefix):
                             folders.append({"prefix": child, "name": name})
 
         folders.sort(key=lambda f: f["name"])
+        t_files = time.monotonic()
 
         file_rows = db.execute("""
             SELECT key, size, last_modified FROM objects
@@ -2891,7 +2896,11 @@ def _list_from_index(bucket, prefix):
             {"key": r["key"], "name": r["key"][prefix_len:], "size": r["size"], "last_modified": r["last_modified"]}
             for r in file_rows
         ]
+        log.info("[perf] _list_from_index files query: %.3fs (%d files) prefix=%s",
+                 time.monotonic() - t_files, len(files), prefix[:60])
 
+    log.info("[perf] _list_from_index total: %.3fs (%d folders, %d files) prefix=%s",
+             time.monotonic() - t0, len(folders), len(files), prefix[:60])
     return folders, files
 
 
