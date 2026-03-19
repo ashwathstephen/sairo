@@ -3091,6 +3091,7 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
                         "object_count": total_count, "children": children}
 
     # Slow path: full GROUP BY query for sub-prefix or when folder_stats not yet populated
+    t_sb = time.monotonic()
     prefix_len = len(prefix)
     like_pattern = (prefix + "%") if prefix else "%"
     with _get_db(bucket) as db:
@@ -3104,6 +3105,8 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
             SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
             FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
         """, (like_pattern, prefix_len)).fetchone()
+    log.info("[perf] storage_breakdown slow path: %.3fs (%d children) prefix=%s",
+             time.monotonic() - t_sb, len(rows), prefix[:60])
     children = [
         {"prefix": r["child_prefix"], "name": r["child_prefix"][prefix_len:].rstrip("/"),
          "object_count": r["count"], "total_size": r["total_size"]}
