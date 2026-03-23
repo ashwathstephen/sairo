@@ -1138,13 +1138,15 @@ def _run_crawl(bucket, endpoint_id=None):
             for future in futures:
                 p = futures[future]
                 try:
-                    count = future.result(timeout=600)
+                    # Scale timeout: 600s base + 1s per 5000 objects expected
+                    prefix_timeout = max(600, 600 + existing_count // 5000)
+                    count = future.result(timeout=prefix_timeout)
                     total_new += count
                     log.info("[%s:%s] Prefix '%s': %s objects",
                              eid, bucket, p[:40], f"{count:,}")
                 except Exception as e:
                     failed_prefixes.append(p)
-                    log.warning("[%s:%s] Prefix '%s' failed: %s", eid, bucket, p[:40], e)
+                    log.warning("[%s:%s] Prefix '%s' failed: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
 
                 # Update progress after each prefix
                 with _get_db(bucket, eid) as db:
