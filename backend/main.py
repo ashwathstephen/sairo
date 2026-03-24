@@ -811,8 +811,8 @@ def _rebuild_prefix_children(bucket, endpoint_id=None):
     t0 = time.monotonic()
     with _get_db(bucket, eid) as db:
         db.execute("DELETE FROM prefix_children")
-        # Build all parent->child relationships using cursor iteration (memory-safe for millions of prefixes)
-        children = {}  # (parent, child) -> [name, count, size]
+        # Step 1: Get leaf prefix stats from objects table
+        leaf_stats = {}  # prefix -> [count, size]
         cursor = db.execute("""
             SELECT prefix, COUNT(*) as cnt, COALESCE(SUM(size), 0) as sz
             FROM objects WHERE prefix != ''
@@ -820,23 +820,38 @@ def _rebuild_prefix_children(bucket, endpoint_id=None):
         """)
         for row in cursor:
             pfx, cnt, sz = row[0], row[1], row[2]
-            stripped = pfx.rstrip("/")
-            last_slash = stripped.rfind("/")
-            if last_slash >= 0:
-                parent = stripped[:last_slash + 1]
-                name = stripped[last_slash + 1:]
-            else:
-                parent = ""
-                name = stripped
+            leaf_stats[pfx] = [cnt, sz]
 
-            key = (parent, pfx)
-            if key in children:
-                children[key][1] += cnt
-                children[key][2] += sz
-            else:
-                children[key] = [name, cnt, sz]
+        # Step 2: Build parent->child mappings, aggregating up through all intermediate levels
+        children = {}  # (parent, child) -> [name, count, size]
+        for pfx, (cnt, sz) in leaf_stats.items():
+            # Walk up the entire prefix path, creating intermediate entries
+            # e.g. "a/b/c/d/" creates: ("a/b/c/", "a/b/c/d/"), ("a/b/", "a/b/c/"), ("a/", "a/b/"), ("", "a/")
+            current = pfx
+            current_cnt, current_sz = cnt, sz
+            while current:
+                stripped = current.rstrip("/")
+                last_slash = stripped.rfind("/")
+                if last_slash >= 0:
+                    parent = stripped[:last_slash + 1]
+                    name = stripped[last_slash + 1:]
+                else:
+                    parent = ""
+                    name = stripped
 
-        # Batch insert in chunks to limit memory
+                key = (parent, current)
+                if key in children:
+                    children[key][1] += current_cnt
+                    children[key][2] += current_sz
+                else:
+                    children[key] = [name, current_cnt, current_sz]
+
+                # Move up: the parent becomes the current, but only aggregate count/size once at each level
+                current = parent
+                # For intermediate levels, we're rolling up the same count/size
+                # so we keep current_cnt and current_sz the same
+
+        # Step 3: Batch insert
         batch = []
         for (parent, child), (name, cnt, sz) in children.items():
             batch.append((parent, child, name, cnt, sz))
