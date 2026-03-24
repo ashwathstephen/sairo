@@ -123,32 +123,6 @@ async def bucket_permission_middleware(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Write access required"})
     return await call_next(request)
 
-# ── Query Result Cache (TTL-based, thread-safe) ───────────────────────────
-_query_cache: dict[str, tuple[float, object]] = {}  # key -> (expire_ts, result)
-_query_cache_lock = threading.Lock()
-_QUERY_CACHE_TTL = 30  # seconds
-
-def _cache_get(key: str):
-    """Return cached result if present and not expired, else None."""
-    with _query_cache_lock:
-        entry = _query_cache.get(key)
-        if entry and time.time() < entry[0]:
-            return entry[1]
-        if entry:
-            del _query_cache[key]
-    return None
-
-def _cache_set(key: str, value):
-    """Store result in cache with TTL."""
-    with _query_cache_lock:
-        _query_cache[key] = (time.time() + _QUERY_CACHE_TTL, value)
-
-def _cache_invalidate_bucket(bucket: str):
-    """Invalidate all cache entries for a bucket (called after mutations)."""
-    with _query_cache_lock:
-        stale = [k for k in _query_cache if k.startswith(f"{bucket}:")]
-        for k in stale:
-            del _query_cache[k]
 
 # ── Login Rate Limiter ──────────────────────────────────────────────────────
 _login_attempts: dict[str, list[float]] = {}
@@ -708,6 +682,17 @@ def _init_db(bucket, endpoint_id=None):
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS prefix_children (
+            parent_prefix TEXT NOT NULL,
+            child_prefix TEXT NOT NULL,
+            child_name TEXT NOT NULL,
+            object_count INTEGER DEFAULT 0,
+            total_size INTEGER DEFAULT 0,
+            PRIMARY KEY (parent_prefix, child_prefix)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pc_parent ON prefix_children(parent_prefix)")
+    conn.execute("""
         INSERT OR IGNORE INTO crawl_status (id, status, total_objects, total_size)
         VALUES (1, 'idle', 0, 0)
     """)
@@ -816,6 +801,80 @@ def _adjust_folder_stats(db, key, size_delta, count_delta):
             total_size = total_size + ?,
             last_updated = ?
     """, (top, max(0, count_delta), max(0, size_delta), ts, count_delta, size_delta, ts))
+
+
+def _rebuild_prefix_children(bucket, endpoint_id=None):
+    """Rebuild prefix_children table from objects after a crawl."""
+    eid = endpoint_id or "default"
+    if not os.path.exists(_db_path(bucket, eid)):
+        return
+    t0 = time.monotonic()
+    with _get_db(bucket, eid) as db:
+        db.execute("DELETE FROM prefix_children")
+        # Build all parent->child relationships using cursor iteration (memory-safe for millions of prefixes)
+        children = {}  # (parent, child) -> [name, count, size]
+        cursor = db.execute("""
+            SELECT prefix, COUNT(*) as cnt, COALESCE(SUM(size), 0) as sz
+            FROM objects WHERE prefix != ''
+            GROUP BY prefix
+        """)
+        for row in cursor:
+            pfx, cnt, sz = row[0], row[1], row[2]
+            stripped = pfx.rstrip("/")
+            last_slash = stripped.rfind("/")
+            if last_slash >= 0:
+                parent = stripped[:last_slash + 1]
+                name = stripped[last_slash + 1:]
+            else:
+                parent = ""
+                name = stripped
+
+            key = (parent, pfx)
+            if key in children:
+                children[key][1] += cnt
+                children[key][2] += sz
+            else:
+                children[key] = [name, cnt, sz]
+
+        # Batch insert in chunks to limit memory
+        batch = []
+        for (parent, child), (name, cnt, sz) in children.items():
+            batch.append((parent, child, name, cnt, sz))
+            if len(batch) >= 5000:
+                db.executemany(
+                    "INSERT OR REPLACE INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size) VALUES (?,?,?,?,?)",
+                    batch)
+                batch.clear()
+        if batch:
+            db.executemany(
+                "INSERT OR REPLACE INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size) VALUES (?,?,?,?,?)",
+                batch)
+        db.commit()
+    log.info("[perf] _rebuild_prefix_children: %.3fs (%d mappings) bucket=%s",
+             time.monotonic() - t0, len(children), bucket)
+
+
+def _adjust_prefix_children(db, key, size_delta, count_delta):
+    """Incrementally adjust prefix_children for a key mutation."""
+    prefix = _key_prefix(key)
+    if not prefix:
+        return
+    stripped = prefix.rstrip("/")
+    last_slash = stripped.rfind("/")
+    if last_slash >= 0:
+        parent = stripped[:last_slash + 1]
+        name = stripped[last_slash + 1:]
+    else:
+        parent = ""
+        name = stripped
+
+    db.execute("""
+        INSERT INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(parent_prefix, child_prefix) DO UPDATE SET
+            object_count = MAX(0, object_count + ?),
+            total_size = MAX(0, total_size + ?)
+    """, (parent, prefix, name, max(0, count_delta), max(0, size_delta), count_delta, size_delta))
 
 
 def _record_storage_snapshot(bucket, endpoint_id=None):
@@ -1086,7 +1145,7 @@ def _run_crawl(bucket, endpoint_id=None):
                      eid, bucket, f"{row[0]:,}", row[1] / (1024**3), elapsed)
             _record_storage_snapshot(bucket, eid)
             _rebuild_folder_stats(bucket, eid)
-            _cache_invalidate_bucket(bucket)
+            _rebuild_prefix_children(bucket, eid)
             return
 
         # Prefix-parallel crawl
@@ -1181,7 +1240,7 @@ def _run_crawl(bucket, endpoint_id=None):
             _enable_fts_triggers(db)
         _record_storage_snapshot(bucket, eid)
         _rebuild_folder_stats(bucket, eid)
-        _cache_invalidate_bucket(bucket)
+        _rebuild_prefix_children(bucket, eid)
 
     except BaseException as e:
         log.error("[%s:%s] Crawl error: %s\n%s", eid, bucket, e, traceback.format_exc())
@@ -2896,22 +2955,34 @@ def _list_from_index(bucket, prefix):
             except Exception:
                 pass
         else:
-            # Subfolder: compute immediate child prefixes in SQL (avoids fetching millions of rows)
-            prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+            # Subfolder: use pre-computed prefix_children (instant), fallback to DISTINCT scan
             t_q = time.monotonic()
-            rows = db.execute(
-                "SELECT DISTINCT substr(prefix, 1, ? + instr(substr(prefix, ?+1), '/')) "
-                "FROM objects WHERE prefix >= ? AND prefix < ? "
-                "AND instr(substr(prefix, ?+1), '/') > 0",
-                (prefix_len, prefix_len, prefix, prefix_end, prefix_len)).fetchall()
-            log.info("[perf] _list_from_index DISTINCT query: %.3fs (%d rows) prefix=%s",
-                     time.monotonic() - t_q, len(rows), prefix[:60])
-            for (child,) in rows:
-                if child and child not in seen:
-                    seen.add(child)
-                    name = child[prefix_len:].rstrip("/")
-                    if name:
-                        folders.append({"prefix": child, "name": name})
+            pc_rows = db.execute(
+                "SELECT child_prefix, child_name FROM prefix_children WHERE parent_prefix = ?",
+                (prefix,)).fetchall()
+            if pc_rows:
+                for child_prefix, child_name in pc_rows:
+                    if child_name and child_prefix not in seen:
+                        seen.add(child_prefix)
+                        folders.append({"prefix": child_prefix, "name": child_name})
+                log.info("[perf] _list_from_index prefix_children: %.3fs (%d rows) prefix=%s",
+                         time.monotonic() - t_q, len(pc_rows), prefix[:60])
+            else:
+                # Fallback: compute children in SQL (first boot or table not yet populated)
+                prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+                rows = db.execute(
+                    "SELECT DISTINCT substr(prefix, 1, ? + instr(substr(prefix, ?+1), '/')) "
+                    "FROM objects WHERE prefix >= ? AND prefix < ? "
+                    "AND instr(substr(prefix, ?+1), '/') > 0",
+                    (prefix_len, prefix_len, prefix, prefix_end, prefix_len)).fetchall()
+                log.info("[perf] _list_from_index DISTINCT fallback: %.3fs (%d rows) prefix=%s",
+                         time.monotonic() - t_q, len(rows), prefix[:60])
+                for (child,) in rows:
+                    if child and child not in seen:
+                        seen.add(child)
+                        name = child[prefix_len:].rstrip("/")
+                        if name:
+                            folders.append({"prefix": child, "name": name})
 
         folders.sort(key=lambda f: f["name"])
         t_files = time.monotonic()
@@ -2964,15 +3035,7 @@ def list_objects(bucket: str, prefix: str = "", fresh: bool = False, user: dict 
     Pass fresh=true to force a direct S3 listing bypassing the index."""
     eid = _current_endpoint_id()
     if _is_index_ready(bucket) and not fresh:
-        cache_key = f"{bucket}:list:{prefix}"
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            folders, files = cached
-            log.info("[perf] _list_from_index CACHE HIT (%d folders, %d files) prefix=%s",
-                     len(folders), len(files), prefix[:60])
-        else:
-            folders, files = _list_from_index(bucket, prefix)
-            _cache_set(cache_key, (folders, files))
+        folders, files = _list_from_index(bucket, prefix)
         def gen():
             yield json.dumps({"folders": folders, "files": files, "done": True,
                               "total_folders": len(folders), "total_files": len(files), "indexed": True}) + "\n"
@@ -3096,12 +3159,6 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
 
-    cache_key = f"{bucket}:sb:{prefix}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        log.info("[perf] storage_breakdown CACHE HIT prefix=%s", prefix[:60])
-        return cached
-
     # Fast path: use precomputed folder_stats for root-level breakdown
     if not prefix:
         with _get_db(bucket) as db:
@@ -3132,43 +3189,55 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
                 total_count = sum(c["object_count"] for c in children)
                 result = {"prefix": "(root)", "total_size": total_size,
                           "object_count": total_count, "children": children}
-                _cache_set(cache_key, result)
                 return result
 
-    # Slow path: full GROUP BY query for sub-prefix or when folder_stats not yet populated
+    # Fast path: use pre-computed prefix_children for sub-prefix breakdown
     t_sb = time.monotonic()
     prefix_len = len(prefix)
-    like_pattern = (prefix + "%") if prefix else "%"
     with _get_db(bucket) as db:
-        rows = db.execute("""
-            SELECT substr(key, 1, ? + instr(substr(key, ? + 1), '/')) as child_prefix,
-                   COUNT(*) as count, SUM(size) as total_size
-            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') > 0
-            GROUP BY child_prefix ORDER BY total_size DESC
-        """, (prefix_len, prefix_len, like_pattern, prefix_len)).fetchall()
-        root_row = db.execute("""
-            SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
-            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
-        """, (like_pattern, prefix_len)).fetchone()
-    log.info("[perf] storage_breakdown slow path: %.3fs (%d children) prefix=%s",
-             time.monotonic() - t_sb, len(rows), prefix[:60])
-    children = [
-        {"prefix": r["child_prefix"], "name": r["child_prefix"][prefix_len:].rstrip("/"),
-         "object_count": r["count"], "total_size": r["total_size"]}
-        for r in rows if r["child_prefix"] and r["child_prefix"] != prefix
-    ]
-    if root_row and root_row["count"] > 0:
-        children.append({
-            "prefix": prefix or "(root files)",
-            "name": "(files)",
-            "object_count": root_row["count"],
-            "total_size": root_row["total_size"],
-        })
+        pc_rows = db.execute(
+            "SELECT child_prefix, child_name, object_count, total_size FROM prefix_children WHERE parent_prefix = ? ORDER BY total_size DESC",
+            (prefix,)).fetchall()
+        if pc_rows:
+            children = [{"prefix": r[0], "name": r[1], "object_count": r[2], "total_size": r[3]} for r in pc_rows]
+            root_row = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM objects WHERE prefix = ?",
+                (prefix,)).fetchone()
+            if root_row and root_row[0] > 0:
+                children.append({"prefix": "(root files)", "name": "(files)", "object_count": root_row[0], "total_size": root_row[1]})
+            log.info("[perf] storage_breakdown prefix_children: %.3fs (%d children) prefix=%s",
+                     time.monotonic() - t_sb, len(children), prefix[:60])
+        else:
+            # Fallback: full GROUP BY query for sub-prefix or when prefix_children not yet populated
+            like_pattern = (prefix + "%") if prefix else "%"
+            rows = db.execute("""
+                SELECT substr(key, 1, ? + instr(substr(key, ? + 1), '/')) as child_prefix,
+                       COUNT(*) as count, SUM(size) as total_size
+                FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') > 0
+                GROUP BY child_prefix ORDER BY total_size DESC
+            """, (prefix_len, prefix_len, like_pattern, prefix_len)).fetchall()
+            root_row = db.execute("""
+                SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
+                FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
+            """, (like_pattern, prefix_len)).fetchone()
+            log.info("[perf] storage_breakdown slow path: %.3fs (%d children) prefix=%s",
+                     time.monotonic() - t_sb, len(rows), prefix[:60])
+            children = [
+                {"prefix": r["child_prefix"], "name": r["child_prefix"][prefix_len:].rstrip("/"),
+                 "object_count": r["count"], "total_size": r["total_size"]}
+                for r in rows if r["child_prefix"] and r["child_prefix"] != prefix
+            ]
+            if root_row and root_row["count"] > 0:
+                children.append({
+                    "prefix": prefix or "(root files)",
+                    "name": "(files)",
+                    "object_count": root_row["count"],
+                    "total_size": root_row["total_size"],
+                })
     total_size = sum(c["total_size"] for c in children)
     total_count = sum(c["object_count"] for c in children)
     result = {"prefix": prefix or "(root)", "total_size": total_size,
               "object_count": total_count, "children": children}
-    _cache_set(cache_key, result)
     return result
 
 
@@ -3541,6 +3610,7 @@ def delete_objects(bucket: str, req: DeleteRequest, user: dict = Depends(require
                 size_row = db.execute("SELECT size FROM objects WHERE key=?", (k,)).fetchone()
                 if size_row:
                     _adjust_folder_stats(db, k, -size_row[0], -1)
+                    _adjust_prefix_children(db, k, -size_row[0], -1)
             db.executemany("DELETE FROM objects WHERE key=?", [(k,) for k in req.keys])
             db.commit()
         _update_crawl_counters(bucket)
@@ -3704,8 +3774,10 @@ async def upload_files(bucket: str, request: Request, prefix: str = Form(""), fi
                            (r["key"], r["size"], now, "", _key_prefix(r["key"]), _key_depth(r["key"])))
                 if old:
                     _adjust_folder_stats(db, r["key"], r["size"] - old[0], 0)
+                    _adjust_prefix_children(db, r["key"], r["size"] - old[0], 0)
                 else:
                     _adjust_folder_stats(db, r["key"], r["size"], 1)
+                    _adjust_prefix_children(db, r["key"], r["size"], 1)
             db.commit()
     if results:
         _update_crawl_counters(bucket, eid)
@@ -3734,6 +3806,7 @@ def create_folder(bucket: str, req: CreateFolderRequest, user: dict = Depends(re
                 (folder_key, 0, time.strftime("%Y-%m-%dT%H:%M:%SZ"), "", _key_prefix(folder_key), _key_depth(folder_key)))
             if not old:
                 _adjust_folder_stats(db, folder_key, 0, 1)
+                _adjust_prefix_children(db, folder_key, 0, 1)
             db.commit()
         _update_crawl_counters(bucket)
     _audit("create_folder", user["username"], bucket=bucket, details=folder_key)
@@ -4284,8 +4357,10 @@ def copy_object(bucket: str, req: CopyRequest, request: Request, user: dict = De
                      head.get("ETag", "").strip('"'), _key_prefix(req.dest_key), _key_depth(req.dest_key)))
                 if old:
                     _adjust_folder_stats(db, req.dest_key, head["ContentLength"] - old[0], 0)
+                    _adjust_prefix_children(db, req.dest_key, head["ContentLength"] - old[0], 0)
                 else:
                     _adjust_folder_stats(db, req.dest_key, head["ContentLength"], 1)
+                    _adjust_prefix_children(db, req.dest_key, head["ContentLength"], 1)
                 db.commit()
             _update_crawl_counters(target)
         except Exception as e:
@@ -4304,12 +4379,14 @@ def rename_object(bucket: str, req: CopyRequest, user: dict = Depends(require_ad
             row = db.execute("SELECT size, last_modified, etag FROM objects WHERE key=?", (req.source_key,)).fetchone()
             if row:
                 _adjust_folder_stats(db, req.source_key, -row[0], -1)
+                _adjust_prefix_children(db, req.source_key, -row[0], -1)
             db.execute("DELETE FROM objects WHERE key=?", (req.source_key,))
             if row:
                 db.execute(
                     "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth) VALUES (?,?,?,?,?,?)",
                     (req.dest_key, row[0], row[1], row[2], _key_prefix(req.dest_key), _key_depth(req.dest_key)))
                 _adjust_folder_stats(db, req.dest_key, row[0], 1)
+                _adjust_prefix_children(db, req.dest_key, row[0], 1)
             else:
                 try:
                     head = s3.head_object(Bucket=bucket, Key=req.dest_key)
@@ -4318,6 +4395,7 @@ def rename_object(bucket: str, req: CopyRequest, user: dict = Depends(require_ad
                         (req.dest_key, head["ContentLength"], head["LastModified"].isoformat(),
                          head.get("ETag", "").strip('"'), _key_prefix(req.dest_key), _key_depth(req.dest_key)))
                     _adjust_folder_stats(db, req.dest_key, head["ContentLength"], 1)
+                    _adjust_prefix_children(db, req.dest_key, head["ContentLength"], 1)
                 except Exception as head_e:
                     log.debug("Head object after rename failed for %s: %s", req.dest_key, head_e)
             db.commit()
