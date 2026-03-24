@@ -1212,8 +1212,8 @@ def _run_crawl(bucket, endpoint_id=None):
             for future in futures:
                 p = futures[future]
                 try:
-                    # Scale timeout: 600s base + 1s per 5000 objects expected
-                    prefix_timeout = max(600, 600 + existing_count // 5000)
+                    # Scale timeout: 600s base + 1s per 2000 objects expected
+                    prefix_timeout = max(600, 600 + existing_count // 2000)
                     count = future.result(timeout=prefix_timeout)
                     total_new += count
                     log.info("[%s:%s] Prefix '%s': %s objects",
