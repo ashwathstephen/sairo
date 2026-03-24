@@ -808,6 +808,13 @@ def _rebuild_prefix_children(bucket, endpoint_id=None):
     eid = endpoint_id or "default"
     if not os.path.exists(_db_path(bucket, eid)):
         return
+    # Skip for very large buckets — the in-memory dict would OOM. They use the DISTINCT fallback instead.
+    with _get_db(bucket, eid) as db:
+        obj_count = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+    if obj_count > 1_000_000:
+        log.info("[perf] _rebuild_prefix_children: SKIPPED (bucket has %s objects, limit 1M) bucket=%s",
+                 f"{obj_count:,}", bucket)
+        return
     t0 = time.monotonic()
     with _get_db(bucket, eid) as db:
         db.execute("DELETE FROM prefix_children")
