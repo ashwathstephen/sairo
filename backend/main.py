@@ -2896,24 +2896,22 @@ def _list_from_index(bucket, prefix):
             except Exception:
                 pass
         else:
-            # Subfolder: range scan on prefix index, extract immediate children
+            # Subfolder: compute immediate child prefixes in SQL (avoids fetching millions of rows)
             prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
             t_q = time.monotonic()
             rows = db.execute(
-                "SELECT DISTINCT prefix FROM objects WHERE prefix >= ? AND prefix < ?",
-                (prefix, prefix_end)).fetchall()
+                "SELECT DISTINCT substr(prefix, 1, ? + instr(substr(prefix, ?+1), '/')) "
+                "FROM objects WHERE prefix >= ? AND prefix < ? "
+                "AND instr(substr(prefix, ?+1), '/') > 0",
+                (prefix_len, prefix_len, prefix, prefix_end, prefix_len)).fetchall()
             log.info("[perf] _list_from_index DISTINCT query: %.3fs (%d rows) prefix=%s",
                      time.monotonic() - t_q, len(rows), prefix[:60])
-            for (p,) in rows:
-                rest = p[prefix_len:]
-                slash = rest.find('/')
-                if slash >= 0:
-                    child = prefix + rest[:slash + 1]
-                    if child not in seen:
-                        seen.add(child)
-                        name = rest[:slash]
-                        if name:
-                            folders.append({"prefix": child, "name": name})
+            for (child,) in rows:
+                if child and child not in seen:
+                    seen.add(child)
+                    name = child[prefix_len:].rstrip("/")
+                    if name:
+                        folders.append({"prefix": child, "name": name})
 
         folders.sort(key=lambda f: f["name"])
         t_files = time.monotonic()
