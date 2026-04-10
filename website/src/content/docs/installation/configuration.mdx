@@ -24,6 +24,7 @@ These variables control login credentials and session behavior.
 
 | Variable         | Required | Default          | Description                                                                 |
 | ---------------- | -------- | ---------------- | --------------------------------------------------------------------------- |
+| `AUTH_MODE`      | No       | `local`          | Auth mode: `local` (username/password) or `s3` (authenticate with S3 access key/secret key directly). |
 | `ADMIN_USER`     | No       | `admin`          | Username for the built-in admin account.                                    |
 | `ADMIN_PASS`     | No       | Auto-generated   | Password for the admin account. If not set, a random password is generated and printed to stdout on first startup. |
 | `JWT_SECRET`     | No       | Auto-generated   | Secret key used to sign JWT tokens. If not set, a random value is generated on startup. **Set this explicitly in production** so tokens survive container restarts. |

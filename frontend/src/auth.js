@@ -34,6 +34,19 @@ export async function logout() {
   await fetch(`${BASE}/logout`, { method: "POST" });
 }
 
+export async function loginS3(accessKey, secretKey) {
+  const res = await fetch(`${BASE}/login-s3`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Invalid S3 credentials");
+  }
+  return res.json();
+}
+
 export async function loginLdap(username, password) {
   const res = await fetch(`${BASE}/ldap`, {
     method: "POST",

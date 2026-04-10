@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { login, loginLdap } from "../auth";
+import { login, loginLdap, loginS3 } from "../auth";
 import { verify2FA, recover2FA } from "../api";
 
 const FEATURES = [
@@ -12,9 +12,12 @@ const FEATURES = [
 export default function Login({ onLogin, branding = {} }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [accessKey, setAccessKey] = useState("");
+  const [secretKey, setSecretKey] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [authMode, setAuthMode] = useState("local"); // "local" or "ldap"
+  const serverAuthMode = branding.auth_mode || "local";
+  const [authMode, setAuthMode] = useState(serverAuthMode === "s3" ? "s3" : "local"); // "local", "ldap", or "s3"
   // 2FA state
   const [needs2FA, setNeeds2FA] = useState(false);
   const [tfaCode, setTfaCode] = useState("");
@@ -40,7 +43,9 @@ export default function Login({ onLogin, branding = {} }) {
     setError("");
     setLoading(true);
     try {
-      if (authMode === "ldap") {
+      if (authMode === "s3") {
+        await loginS3(accessKey, secretKey);
+      } else if (authMode === "ldap") {
         await loginLdap(username, password);
       } else {
         await login(username, password);
@@ -153,31 +158,58 @@ export default function Login({ onLogin, branding = {} }) {
           </div>
           {loginMessage && <p className="login-message">{loginMessage}</p>}
           {error && <div className="login-error">{error}</div>}
-          {ldapEnabled && (
+          {(ldapEnabled || serverAuthMode === "s3") && (
             <div className="login-auth-toggle">
-              <button type="button" className={`auth-toggle-btn ${authMode === "local" ? "auth-toggle-active" : ""}`} onClick={() => setAuthMode("local")}>Local</button>
-              <button type="button" className={`auth-toggle-btn ${authMode === "ldap" ? "auth-toggle-active" : ""}`} onClick={() => setAuthMode("ldap")}>LDAP</button>
+              <div className={`auth-slider ${authMode !== "s3" ? "slide-right" : ""}`} />
+              <button type="button" className={`auth-toggle-btn ${authMode === "s3" ? "auth-toggle-active" : ""}`} onClick={() => setAuthMode("s3")}>S3 Keys</button>
+              <button type="button" className={`auth-toggle-btn ${authMode !== "s3" ? "auth-toggle-active" : ""}`} onClick={() => setAuthMode("local")}>Password</button>
             </div>
           )}
-          <input
-            type="text"
-            placeholder="Username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoFocus
-            required
-            aria-label="Username"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            aria-label="Password"
-          />
+          {authMode === "s3" ? (
+            <>
+              <input
+                type="text"
+                placeholder="S3 Access Key"
+                value={accessKey}
+                onChange={(e) => setAccessKey(e.target.value)}
+                autoFocus
+                required
+                aria-label="S3 Access Key"
+                autoComplete="username"
+              />
+              <input
+                type="password"
+                placeholder="S3 Secret Key"
+                value={secretKey}
+                onChange={(e) => setSecretKey(e.target.value)}
+                required
+                aria-label="S3 Secret Key"
+                autoComplete="current-password"
+              />
+            </>
+          ) : (
+            <>
+              <input
+                type="text"
+                placeholder="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoFocus
+                required
+                aria-label="Username"
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                aria-label="Password"
+              />
+            </>
+          )}
           <button type="submit" disabled={loading} className="btn-primary">
-            {loading ? "Signing in..." : authMode === "ldap" ? "Sign In with LDAP" : "Sign In"}
+            {loading ? "Signing in..." : authMode === "s3" ? "Sign In with S3 Keys" : authMode === "ldap" ? "Sign In with LDAP" : "Sign In"}
           </button>
           {oauthProviders.length > 0 && (
             <div className="login-oauth-divider">

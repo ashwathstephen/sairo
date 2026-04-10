@@ -5,6 +5,24 @@ description: "How Sairo handles authentication with JWT tokens, secure cookies, 
 
 Sairo uses JWT-based authentication with secure cookie storage. Tokens are issued on login and validated on every API request.
 
+## Auth Modes
+
+Sairo supports two authentication modes, controlled by the `AUTH_MODE` environment variable:
+
+| Mode | `AUTH_MODE` | Login Fields | Best For |
+|---|---|---|---|
+| **Local** (default) | `local` | Username + Password | Teams with multiple users, RBAC, 2FA |
+| **S3 Keys** | `s3` | S3 Access Key + Secret Key | Single-user setups, quick start, headless |
+
+In **S3 mode**, users authenticate by entering their S3 access key and secret key. Sairo validates the credentials by calling `list_buckets()` against the configured S3 endpoint. If it succeeds, the user gets an admin session. No user account setup needed.
+
+```yaml
+environment:
+  AUTH_MODE: "s3"  # Authenticate with S3 credentials instead of username/password
+```
+
+Both modes can be used simultaneously — the login page shows a toggle to switch between "S3 Keys" and "Password". In `s3` mode, the S3 tab is shown first. In `local` mode, the password tab is shown first (S3 tab appears only if explicitly enabled).
+
 ## How It Works
 
 When a user logs in, the backend issues a signed JWT and sets it as an **httpOnly** cookie with `SameSite=Strict`. This prevents JavaScript from reading the token and blocks the cookie on all cross-site navigations.

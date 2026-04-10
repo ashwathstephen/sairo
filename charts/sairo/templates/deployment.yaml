@@ -62,6 +62,8 @@ spec:
                   name: {{ .Release.Name }}-secrets
                   key: s3-secret-key
             # ── Auth ──
+            - name: AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
             - name: ADMIN_USER
               value: {{ .Values.auth.adminUser | quote }}
             - name: ADMIN_PASS

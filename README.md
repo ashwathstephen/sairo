@@ -128,6 +128,7 @@ Benchmarked on production data (557K objects, 167 TB, NetApp StorageGRID):
 | `S3_ACCESS_KEY` | (required) | S3 access key |
 | `S3_SECRET_KEY` | (required) | S3 secret key |
 | `S3_REGION` | _(empty)_ | S3 region (if required by provider) |
+| `AUTH_MODE` | `local` | Auth mode: `local` (username/password) or `s3` (S3 access key/secret key) |
 | `ADMIN_USER` | `admin` | Default admin username (first run only) |
 | `ADMIN_PASS` | (auto-generated) | Default admin password (first run only) |
 | `JWT_SECRET` | (auto-generated) | Secret for signing JWT tokens. Set for persistent sessions |

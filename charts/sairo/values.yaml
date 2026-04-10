@@ -45,6 +45,7 @@ s3:
 
 # Auth Configuration
 auth:
+  mode: "local"        # "local" (username/password) or "s3" (authenticate with S3 access key/secret key)
   adminUser: "admin"
   adminPass: ""        # Auto-generated if empty
   jwtSecret: ""        # Auto-generated if empty

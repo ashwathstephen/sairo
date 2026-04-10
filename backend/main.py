@@ -189,13 +189,19 @@ except Exception as _e:
     raise SystemExit(f"DB_DIR '{DB_DIR}' is not writable: {_e}")
 
 # ── Auth Config ──────────────────────────────────────────────────────────────
+# AUTH_MODE: "local" (default — username/password) or "s3" (authenticate with S3 access key/secret key)
+AUTH_MODE = os.environ.get("AUTH_MODE", "local").lower()
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS")
-if not ADMIN_PASS:
+if not ADMIN_PASS and AUTH_MODE == "local":
     ADMIN_PASS = secrets.token_urlsafe(16)
     log.warning("ADMIN_PASS not set — generated temporary password: %s", ADMIN_PASS)
+elif not ADMIN_PASS:
+    ADMIN_PASS = secrets.token_urlsafe(32)  # Set a strong random password in s3 mode (not displayed)
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "24"))
+if AUTH_MODE == "s3":
+    log.info("Auth mode: S3 — users authenticate with S3 access key and secret key")
 
 # ── Fernet Encryption for credentials at rest ─────────────────────────────
 # Derive a Fernet key from JWT_SECRET (deterministic so we can decrypt on restart)
@@ -1664,6 +1670,10 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class LoginS3Request(BaseModel):
+    access_key: str
+    secret_key: str
+
 class CreateUserRequest(BaseModel):
     username: str
     password: str
@@ -1706,6 +1716,48 @@ def auth_login(req: LoginRequest, request: Request):
                         secure=_secure_cookie, max_age=SESSION_HOURS * 3600, path="/")
     _audit("login", row["username"])
     return response
+
+@app.post("/api/auth/login-s3")
+@limiter.limit("10/minute")
+def auth_login_s3(req: LoginS3Request, request: Request):
+    """Authenticate by validating S3 credentials directly.
+    Calls list_buckets() with the provided access key / secret key.
+    If it succeeds, the credentials are valid and the user gets an admin session.
+    """
+    _check_login_rate(request.client.host)
+    if not req.access_key or not req.secret_key:
+        raise HTTPException(400, "Access key and secret key are required")
+    # Test the S3 credentials
+    try:
+        cfg = _S3_CONFIG
+        if _S3_PATH_STYLE:
+            cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
+        test_client = boto3.client(
+            "s3",
+            endpoint_url=S3_ENDPOINT,
+            aws_access_key_id=req.access_key,
+            aws_secret_access_key=req.secret_key,
+            region_name=_S3_REGION or None,
+            config=cfg,
+        )
+        test_client.list_buckets()
+    except Exception as e:
+        log.warning("S3 auth failed for access_key=%s: %s", req.access_key[:6] + "...", e)
+        raise HTTPException(401, "Invalid S3 credentials")
+    # Credentials valid — issue a session as admin
+    # Use a sanitized version of the access key as the username
+    username = f"s3:{req.access_key[:8]}"
+    token = jwt.encode(
+        {"sub": username, "role": "admin",
+         "exp": datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)},
+        JWT_SECRET, algorithm="HS256")
+    response = JSONResponse({"username": username, "role": "admin"})
+    _secure_cookie = os.environ.get("SECURE_COOKIE", "true").lower() != "false"
+    response.set_cookie("access_token", token, httponly=True, samesite="strict",
+                        secure=_secure_cookie, max_age=SESSION_HOURS * 3600, path="/")
+    _audit("login", username, details="s3_auth")
+    return response
+
 
 @app.post("/api/auth/logout")
 def auth_logout():
@@ -2230,6 +2282,7 @@ def get_branding():
         "login_message": os.environ.get("LOGIN_MESSAGE", ""),
         "ldap_enabled": os.environ.get("LDAP_ENABLED", "false").lower() == "true",
         "oauth_providers": oauth_providers,
+        "auth_mode": AUTH_MODE,
     }
 
 
