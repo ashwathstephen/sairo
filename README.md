@@ -6,9 +6,9 @@
 [![GitHub Release](https://img.shields.io/github/v/release/AshwathStephen/sairo)](https://github.com/AshwathStephen/sairo/releases)
 [![License](https://img.shields.io/github/license/AshwathStephen/sairo)](LICENSE)
 
-A self-hosted, S3-compatible object storage browser. Browse, search, and manage any S3-compatible storage from your browser.
+A self-hosted, S3-compatible object storage browser. Browse, search, and manage any S3-compatible storage from your browser. Built for petabyte scale.
 
-Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Backblaze B2**, **Leaseweb**, and any S3-compatible endpoint.
+Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Backblaze B2**, **Leaseweb**, **NetApp StorageGRID**, and any S3-compatible endpoint.
 
 ## Demo
 
@@ -41,6 +41,8 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 - **User Management** — Role-based access control (admin / viewer) with per-bucket permissions
 - **Two-Factor Auth** — TOTP-based 2FA with QR setup and recovery codes
 - **OAuth & LDAP** — Google, GitHub OAuth and LDAP authentication
+- **AI-Powered Analysis (MCP)** — Connect Claude, Cursor, or any MCP client to ask natural language questions about your storage. 26 tools for analytics, cost optimization, pipeline health, and more
+- **Petabyte-Scale Performance** — Folder listings in 0.05ms on 500K+ objects. Pre-computed prefix hierarchies, 64MB SQLite page cache, 256MB memory-mapped I/O, async FTS rebuilds
 - **Dark Mode** — Full dark/light theme with system preference detection
 - **Keyboard Shortcuts** — 30+ shortcuts for power users
 - **Single Container** — No dependencies. No microservices. Just `docker run` and go.
@@ -83,6 +85,41 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
   --set auth.jwtSecret=$(openssl rand -hex 32)
 ```
 
+## AI Storage Intelligence (MCP)
+
+Sairo includes an optional MCP (Model Context Protocol) server that lets AI assistants analyze your storage infrastructure. Deploy it as a sidecar alongside Sairo.
+
+```bash
+# Uncomment sairo-mcp in docker-compose.yml, then:
+docker compose up -d
+```
+
+Connect Claude Desktop, Cursor, or any MCP-compatible client and ask:
+
+- *"What buckets do I have?"* — Lists all buckets with sizes and status
+- *"What's eating all the space?"* — Storage breakdown by folder with percentages
+- *"How much is this costing me?"* — Cost estimates across AWS, R2, B2, Wasabi, Leaseweb
+- *"Find all parquet files"* — Full-text search across millions of objects
+- *"Are there any duplicates?"* — Finds redundant files with estimated savings
+- *"Is my data pipeline still running?"* — Freshness check per folder
+- *"Run a full storage audit"* — 7-step analysis with actionable recommendations
+
+**26 tools, 4 guided workflows, zero configuration.** The AI picks the right tools automatically.
+
+## Performance
+
+Benchmarked on production data (557K objects, 167 TB, NetApp StorageGRID):
+
+| Operation | Speed |
+|-----------|-------|
+| Folder listing | 0.05ms (pre-computed prefix hierarchy) |
+| Object count | 1.5ms on 557K objects |
+| Full-text search | 22ms, 200 results on 139K objects |
+| Storage breakdown | 310ms on 557K objects |
+| Crawl throughput | 16 parallel prefix workers, 10K batch inserts |
+
+**Scaling:** Tested up to 2M objects per bucket. Designed for petabyte scale with instant folder navigation at any dataset size.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -107,6 +144,8 @@ helm install sairo oci://registry-1.docker.io/stephenjr002/sairo-helm \
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | S3 Client | boto3 with S3v4 signatures |
 | Auth | PyJWT, passlib (bcrypt), pyotp (TOTP), slowapi |
-| Database | SQLite (WAL mode, FTS5) per bucket |
+| Database | SQLite (WAL mode, FTS5, 64MB cache, 256MB mmap) per bucket |
 | Encryption | Fernet (cryptography) |
+| AI / MCP | FastMCP, 26 tools, Streamable HTTP + stdio transports |
+| CLI | Go 1.24, Cobra, system keyring integration |
 | Container | Multi-stage Docker (node:20 + python:3.12) |

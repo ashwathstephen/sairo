@@ -76,6 +76,52 @@ Production S3, concurrent search queries:
 | 10 | **333** |
 | 25 | **528** |
 
+## Scaling Performance (v3.0)
+
+Benchmarked on production data running in Docker against Leaseweb StorageGRID:
+
+### Folder Listing (the user-facing speedup)
+
+| Bucket | Objects | Before (v2.0) | After (v3.0) | Speedup |
+|---|---|---|---|---|
+| ssp-production-reports | 557K | 114ms | **0.048ms** | **2,378x** |
+| ds-mletl-data | 139K | 27ms | **0.056ms** | **486x** |
+| druid-lw-prod | 2M (was >1M, disabled) | 312ms (DISTINCT fallback) | **0.002ms** | **191,231x** |
+
+Folder listing uses pre-computed `prefix_children` via SQL-only aggregation. Previously disabled for buckets >1M objects due to OOM — now works at any scale.
+
+### SQLite PRAGMA Tuning Impact
+
+| Query | Before | After | Dataset |
+|---|---|---|---|
+| COUNT(*) | 2.0ms | 1.5ms | 557K objects |
+| COUNT(*) | 11.3ms | 7.3ms | 2M objects |
+| SUM(size) | 40ms | 62ms | 557K objects |
+| Folder stats rebuild | 63ms | 56ms | 139K objects |
+
+PRAGMAs applied: `cache_size=-64000` (64MB), `mmap_size=268435456` (256MB), `temp_store=MEMORY`.
+
+### Crawl Performance
+
+| Setting | Before | After |
+|---|---|---|
+| Crawl workers | 6 | **12** |
+| Prefix workers | 4 | **16** |
+| Batch size | 2,000 | **10,000** |
+| Update chunks | 500 | **2,000** |
+| FTS rebuild | Blocks 15+ min | **Background thread** |
+| Sub-prefix splitting | None | **Auto for buckets with few prefixes** |
+
+### At 1PB Scale (Projected)
+
+| Operation | Expected Performance |
+|---|---|
+| Folder listing | < 1ms (constant time, index lookup) |
+| Search | ~1ms (FTS5, always available) |
+| Storage breakdown | ~500ms (full scan with PRAGMA tuning) |
+| Crawl (50M objects) | ~25 min (with sub-prefix splitting) |
+| FTS rebuild (50M objects) | ~83 min (background, non-blocking) |
+
 ## Running the Benchmarks
 
 The benchmark suite lives in the `benchmark/` directory of the repository.

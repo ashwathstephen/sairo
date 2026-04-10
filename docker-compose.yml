@@ -23,5 +23,29 @@ services:
       timeout: 5s
       retries: 3
 
+  # Optional: AI-powered storage intelligence (MCP server)
+  # Uncomment to enable AI assistant access via Claude Desktop, Cursor, etc.
+  # sairo-mcp:
+  #   build: ./mcp
+  #   ports:
+  #     - "8100:8100"
+  #   environment:
+  #     SAIRO_API_URL: http://sairo:8000
+  #     SAIRO_API_TOKEN: ${MCP_SERVICE_TOKEN:-}
+  #     DB_DIR: /data
+  #     MCP_BIND_HOST: "0.0.0.0"
+  #     MCP_PORT: "8100"
+  #   volumes:
+  #     - sairo-data:/data:ro
+  #   depends_on:
+  #     sairo:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+
 volumes:
   sairo-data:

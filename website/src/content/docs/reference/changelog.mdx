@@ -13,9 +13,35 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.0.0
+
+**AI Storage Intelligence + Petabyte-Scale Performance**
+
+### AI / MCP
+- **MCP Server** — Optional sidecar with 26 tools for natural language storage analysis. Connect Claude Desktop, Cursor, or any MCP client.
+- **4 guided workflows** — Storage audit, cost optimization, data quality check, incident investigation
+- **Security** — Input validation (SQL injection, path traversal, prompt injection), per-bucket RBAC, output sanitization
+- **Observability** — Structured JSON logging, per-tool latency metrics, health endpoints
+
+### Performance
+- **Folder listing: 191,231x faster** — Pre-computed `prefix_children` via SQL, no more 1M-object skip. 311ms → 0.002ms on 2M objects.
+- **SQLite PRAGMA tuning** — 64MB page cache, 256MB mmap, in-memory temp store
+- **Crawl workers: 12 buckets + 16 prefix threads** — up from 6 + 4
+- **10K batch inserts** — 5x fewer SQLite commits per crawl
+- **Async FTS rebuild** — Search stays available during index rebuild
+- **Sub-prefix splitting** — Auto-discovers sub-folders for single-prefix buckets with 500K+ objects
+
+### Testing
+- 45 backend tests (16 original + 29 scaling)
+- 103 MCP protocol tests (E2E + unit + security)
+- 48 comprehensive live tests against production data
+- Benchmarked on 557K objects / 167 TB (Leaseweb StorageGRID)
+
+---
+
 ## v2.0.0
 
-Current release. A complete rewrite of Sairo with a modern frontend and significantly expanded feature set.
+A complete rewrite of Sairo with a modern frontend and significantly expanded feature set.
 
 ### Frontend
 

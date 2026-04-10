@@ -34,6 +34,14 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+docker-compose.local-test.yml
+
+# Local test configs (contain credentials)
+.env.local-test
+.env.test
+
+# Claude Code memory
+.claude/
 
 # Demo intermediate files
 docs/*.webm

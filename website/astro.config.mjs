@@ -47,6 +47,7 @@ export default defineConfig({
 						{ slug: 'features/bucket-settings' },
 						{ slug: 'features/share-links' },
 						{ slug: 'features/multi-endpoint' },
+						{ slug: 'features/mcp' },
 						{ slug: 'features/keyboard-shortcuts' },
 					],
 				},

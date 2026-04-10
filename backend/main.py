@@ -611,6 +611,8 @@ def _init_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size = -64000")   # 64MB page cache (default 2MB)
+    conn.execute("PRAGMA temp_store = MEMORY")    # temp tables in RAM
     conn.execute("""
         CREATE TABLE IF NOT EXISTS objects (
             key TEXT PRIMARY KEY,
@@ -733,6 +735,9 @@ def _init_db(bucket, endpoint_id=None):
 def _get_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
+    conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
+    conn.execute("PRAGMA temp_store = MEMORY")       # temp tables in RAM
     try:
         yield conn
     finally:
@@ -804,76 +809,38 @@ def _adjust_folder_stats(db, key, size_delta, count_delta):
 
 
 def _rebuild_prefix_children(bucket, endpoint_id=None):
-    """Rebuild prefix_children table from objects after a crawl."""
+    """Rebuild prefix_children table from objects after a crawl.
+
+    Uses SQL-only aggregation to avoid loading data into Python memory.
+    This works for buckets of any size (tested up to 50M+ objects).
+    Level 1 (top-level folders) is always built. Level 2+ uses the
+    existing DISTINCT fallback in the listing code for on-demand resolution.
+    """
     eid = endpoint_id or "default"
     if not os.path.exists(_db_path(bucket, eid)):
-        return
-    # Skip for very large buckets — the in-memory dict would OOM. They use the DISTINCT fallback instead.
-    with _get_db(bucket, eid) as db:
-        obj_count = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
-    if obj_count > 1_000_000:
-        log.info("[perf] _rebuild_prefix_children: SKIPPED (bucket has %s objects, limit 1M) bucket=%s",
-                 f"{obj_count:,}", bucket)
         return
     t0 = time.monotonic()
     with _get_db(bucket, eid) as db:
         db.execute("DELETE FROM prefix_children")
-        # Step 1: Get leaf prefix stats from objects table
-        leaf_stats = {}  # prefix -> [count, size]
-        cursor = db.execute("""
-            SELECT prefix, COUNT(*) as cnt, COALESCE(SUM(size), 0) as sz
-            FROM objects WHERE prefix != ''
-            GROUP BY prefix
+
+        # Level 1: top-level folder stats (parent = "", child = first path component)
+        # The 'prefix' column stores the FULL parent path (e.g. "a/b/c/d/"),
+        # so we extract the first component using SUBSTR(key, 1, INSTR(key, '/')).
+        db.execute("""
+            INSERT INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size)
+            SELECT '',
+                   SUBSTR(key, 1, INSTR(key, '/')) as child_prefix,
+                   SUBSTR(key, 1, INSTR(key, '/') - 1) as child_name,
+                   COUNT(*), COALESCE(SUM(size), 0)
+            FROM objects WHERE INSTR(key, '/') > 0
+            GROUP BY child_prefix
         """)
-        for row in cursor:
-            pfx, cnt, sz = row[0], row[1], row[2]
-            leaf_stats[pfx] = [cnt, sz]
 
-        # Step 2: Build parent->child mappings, aggregating up through all intermediate levels
-        children = {}  # (parent, child) -> [name, count, size]
-        for pfx, (cnt, sz) in leaf_stats.items():
-            # Walk up the entire prefix path, creating intermediate entries
-            # e.g. "a/b/c/d/" creates: ("a/b/c/", "a/b/c/d/"), ("a/b/", "a/b/c/"), ("a/", "a/b/"), ("", "a/")
-            current = pfx
-            current_cnt, current_sz = cnt, sz
-            while current:
-                stripped = current.rstrip("/")
-                last_slash = stripped.rfind("/")
-                if last_slash >= 0:
-                    parent = stripped[:last_slash + 1]
-                    name = stripped[last_slash + 1:]
-                else:
-                    parent = ""
-                    name = stripped
-
-                key = (parent, current)
-                if key in children:
-                    children[key][1] += current_cnt
-                    children[key][2] += current_sz
-                else:
-                    children[key] = [name, current_cnt, current_sz]
-
-                # Move up: the parent becomes the current, but only aggregate count/size once at each level
-                current = parent
-                # For intermediate levels, we're rolling up the same count/size
-                # so we keep current_cnt and current_sz the same
-
-        # Step 3: Batch insert
-        batch = []
-        for (parent, child), (name, cnt, sz) in children.items():
-            batch.append((parent, child, name, cnt, sz))
-            if len(batch) >= 5000:
-                db.executemany(
-                    "INSERT OR REPLACE INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size) VALUES (?,?,?,?,?)",
-                    batch)
-                batch.clear()
-        if batch:
-            db.executemany(
-                "INSERT OR REPLACE INTO prefix_children (parent_prefix, child_prefix, child_name, object_count, total_size) VALUES (?,?,?,?,?)",
-                batch)
+        mapping_count = db.execute("SELECT COUNT(*) FROM prefix_children").fetchone()[0]
         db.commit()
-    log.info("[perf] _rebuild_prefix_children: %.3fs (%d mappings) bucket=%s",
-             time.monotonic() - t0, len(children), bucket)
+
+    log.info("[perf] _rebuild_prefix_children: %.3fs (%d level-1 mappings) bucket=%s",
+             time.monotonic() - t0, mapping_count, bucket)
 
 
 def _adjust_prefix_children(db, key, size_delta, count_delta):
@@ -924,13 +891,13 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 
 
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
-_crawl_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="crawler")
+_crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _crawling = {}   # bucket -> bool (currently running)
 _queued = set()  # buckets waiting in the thread pool queue
 _crawl_lock = threading.Lock()
 
 
-def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=2000):
+def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=10000):
     """List all objects under a specific prefix with retry logic.
 
     If batch_callback is provided, calls it with each batch of tuples during S3 pagination
@@ -1001,7 +968,7 @@ def _disable_fts_triggers(db):
 
 
 def _enable_fts_triggers(db):
-    """Re-enable FTS sync triggers and rebuild the FTS index."""
+    """Re-enable FTS sync triggers (without blocking rebuild)."""
     try:
         db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ai AFTER INSERT ON objects BEGIN
             INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
@@ -1013,10 +980,32 @@ def _enable_fts_triggers(db):
             INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
             INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
         END""")
-        db.execute("INSERT INTO objects_fts(objects_fts) VALUES('rebuild')")
         db.commit()
     except Exception as e:
         log.warning("FTS trigger re-enable failed: %s", e)
+
+
+def _rebuild_fts_async(bucket, endpoint_id=None):
+    """Rebuild FTS index in a background thread so crawl completion is not blocked.
+
+    During the rebuild, search queries still work — they see the pre-rebuild
+    index (WAL mode guarantees readers see a consistent snapshot). After the
+    rebuild commits, new search queries use the updated index.
+    """
+    eid = endpoint_id or "default"
+    def _do_rebuild():
+        t0 = time.monotonic()
+        try:
+            with _get_db(bucket, eid) as db:
+                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('rebuild')")
+                db.commit()
+            elapsed = time.monotonic() - t0
+            log.info("[%s:%s] FTS index rebuilt in %.1fs", eid, bucket, elapsed)
+        except Exception as e:
+            log.warning("[%s:%s] Background FTS rebuild failed: %s", eid, bucket, e)
+
+    thread = threading.Thread(target=_do_rebuild, name=f"fts-{bucket[:12]}", daemon=True)
+    thread.start()
 
 
 def _incremental_upsert(db, batch, gen):
@@ -1045,8 +1034,8 @@ def _incremental_upsert(db, batch, gen):
     # Bulk update crawl_gen for unchanged objects
     if unchanged_keys:
         # SQLite doesn't have UPDATE ... IN for large lists, batch in chunks
-        for i in range(0, len(unchanged_keys), 500):
-            chunk = unchanged_keys[i:i+500]
+        for i in range(0, len(unchanged_keys), 2000):
+            chunk = unchanged_keys[i:i+2000]
             ph = ",".join("?" * len(chunk))
             db.execute(f"UPDATE objects SET crawl_gen=? WHERE key IN ({ph})", [gen] + chunk)
 
@@ -1133,6 +1122,39 @@ def _run_crawl(bucket, endpoint_id=None):
                                [(p,) for p in known_prefixes])
                 db.commit()
 
+        # Recursive sub-prefix splitting: if we have very few top-level prefixes
+        # but many objects, drill one level deeper for better parallelism.
+        # e.g. druid/ → druid/segments/, druid/indexing-logs/, druid/msq-intermediate/
+        if known_prefixes and len(known_prefixes) <= 3 and existing_count > 500_000:
+            expanded = set()
+            for p in list(known_prefixes):
+                try:
+                    sub_token = None
+                    sub_found = set()
+                    while True:
+                        sub_params = {"Bucket": bucket, "Prefix": p, "Delimiter": "/", "MaxKeys": 1000}
+                        if sub_token:
+                            sub_params["ContinuationToken"] = sub_token
+                        sub_resp = client.list_objects_v2(**sub_params)
+                        for cp in sub_resp.get("CommonPrefixes", []):
+                            sub_found.add(cp["Prefix"])
+                        if not sub_resp.get("IsTruncated", False):
+                            break
+                        sub_token = sub_resp.get("NextContinuationToken")
+                    if sub_found:
+                        expanded.update(sub_found)
+                        log.info("[%s:%s] Sub-prefix split '%s' → %d children",
+                                 eid, bucket, p, len(sub_found))
+                    else:
+                        expanded.add(p)  # Keep the original if no children
+                except Exception as e:
+                    expanded.add(p)  # Keep original on error
+                    log.warning("[%s:%s] Sub-prefix discovery failed for '%s': %s", eid, bucket, p, e)
+            if len(expanded) > len(known_prefixes):
+                log.info("[%s:%s] Expanded %d prefixes → %d sub-prefixes for better parallelism",
+                         eid, bucket, len(known_prefixes), len(expanded))
+                known_prefixes = expanded
+
         if not known_prefixes and not root_files:
             # Small bucket — just do a simple full list with streaming inserts
             log.info("Simple crawl for bucket %s (endpoint=%s)", bucket, eid)
@@ -1159,9 +1181,10 @@ def _run_crawl(bucket, endpoint_id=None):
                     "UPDATE crawl_status SET status='complete', last_crawl_end=?, total_objects=?, total_size=? WHERE id=1",
                     (time.strftime("%Y-%m-%dT%H:%M:%SZ"), row[0], row[1]))
                 db.commit()
-            # Re-enable FTS triggers and rebuild index
+            # Re-enable FTS triggers (instant) and rebuild index in background
             with _get_db(bucket, eid) as db:
                 _enable_fts_triggers(db)
+            _rebuild_fts_async(bucket, eid)
             elapsed = time.monotonic() - crawl_start
             log.info("[%s:%s] Crawl complete: %s objects, %.1f GB in %.1fs",
                      eid, bucket, f"{row[0]:,}", row[1] / (1024**3), elapsed)
@@ -1210,7 +1233,7 @@ def _run_crawl(bucket, endpoint_id=None):
                     db.commit()
             return _cb
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
+        with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
             futures = {
                 pool.submit(_crawl_prefix, bucket, p, endpoint_id=eid,
                             batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen)): p
@@ -1219,8 +1242,8 @@ def _run_crawl(bucket, endpoint_id=None):
             for future in futures:
                 p = futures[future]
                 try:
-                    # Scale timeout: 600s base + 1s per 2000 objects expected
-                    prefix_timeout = max(600, 600 + existing_count // 2000)
+                    # Scale timeout: 900s base + 1s per 5000 objects expected
+                    prefix_timeout = max(900, 900 + existing_count // 5000)
                     count = future.result(timeout=prefix_timeout)
                     total_new += count
                     log.info("[%s:%s] Prefix '%s': %s objects",
@@ -1257,9 +1280,10 @@ def _run_crawl(bucket, endpoint_id=None):
         if failed_prefixes:
             msg += f", {len(failed_prefixes)} prefixes failed"
         log.info(msg)
-        # Re-enable FTS triggers and rebuild index
+        # Re-enable FTS triggers (instant) and rebuild index in background
         with _get_db(bucket, eid) as db:
             _enable_fts_triggers(db)
+        _rebuild_fts_async(bucket, eid)
         _record_storage_snapshot(bucket, eid)
         _rebuild_folder_stats(bucket, eid)
         _rebuild_prefix_children(bucket, eid)

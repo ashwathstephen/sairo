@@ -1,0 +1,327 @@
+---
+title: AI Storage Intelligence (MCP)
+description: Connect AI assistants to analyze your storage with natural language
+---
+
+import { Aside, Steps, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Sairo includes an optional **MCP server** (Model Context Protocol) that lets AI assistants like Claude, Cursor, and Windsurf analyze your entire storage infrastructure using natural language.
+
+Instead of clicking through dashboards, just ask:
+
+- *"What's eating all the space in production-reports?"*
+- *"How much is my storage costing on Leaseweb?"*
+- *"Find all parquet files modified this week"*
+- *"Are there any duplicate files wasting storage?"*
+- *"Is my data pipeline still running?"*
+
+The AI picks the right tools automatically. No tool names to memorize, no queries to write.
+
+<Aside type="tip">
+  The MCP server is **100% read-only**. It cannot modify, delete, or upload objects. The only write operation is triggering a re-index, which requires admin permissions.
+</Aside>
+
+---
+
+## Quick Setup (5 minutes)
+
+<Steps>
+
+1. **Create an API token in Sairo**
+
+   Log into your Sairo instance, go to **API Tokens** in the top nav, and click **Create Token**. Give it a name like `mcp-server` and select the **admin** role. Copy the token — it starts with `sairo_`.
+
+2. **Start the MCP server alongside Sairo**
+
+   If you're using Docker Compose, add the MCP service to your `docker-compose.yml`:
+
+   ```yaml
+   sairo-mcp:
+     build: ./mcp
+     ports:
+       - "8100:8100"
+     environment:
+       SAIRO_API_URL: http://sairo:8000
+       SAIRO_API_TOKEN: sairo_your_token_here
+       DB_DIR: /data
+       MCP_BIND_HOST: "0.0.0.0"
+       MCP_PORT: "8100"
+     volumes:
+       - sairo-data:/data:ro
+     depends_on:
+       sairo:
+         condition: service_healthy
+   ```
+
+   Then run:
+
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Connect your AI client**
+
+   See the client-specific guides below.
+
+</Steps>
+
+---
+
+## Connect Your AI Client
+
+<Tabs>
+  <TabItem label="Claude Desktop (Mac)">
+
+The Claude Desktop Mac app connects via **stdio** — it launches the MCP server as a local process.
+
+**Prerequisites:** Python 3.11+ with the `mcp` package installed:
+
+```bash
+pip install "mcp[cli]" httpx
+```
+
+**Configure Claude Desktop:**
+
+Open (or create) `~/Library/Application Support/Claude/claude_desktop_config.json` and add:
+
+```json
+{
+  "mcpServers": {
+    "sairo-storage": {
+      "command": "python3.11",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, '/path/to/sairo/mcp'); from server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {
+        "DB_DIR": "/path/to/sairo/data",
+        "SAIRO_API_URL": "http://localhost:8000",
+        "SAIRO_API_TOKEN": "sairo_your_token_here",
+        "MCP_LOG_LEVEL": "WARNING"
+      }
+    }
+  }
+}
+```
+
+Replace the paths:
+- `/path/to/sairo/mcp` — where you cloned the Sairo repo's `mcp/` directory
+- `/path/to/sairo/data` — the Docker volume or directory where Sairo stores its SQLite databases
+- `sairo_your_token_here` — the API token you created in step 1
+
+**Restart Claude Desktop** (Cmd+Q, then reopen). You should see the tools icon in the chat input bar. Ask *"What buckets do I have?"* to test.
+
+<Aside type="note">
+  The `DB_DIR` must point to the same SQLite files Sairo uses. If Sairo runs in Docker, either mount the same volume or copy the `.db` files to a local directory.
+</Aside>
+
+  </TabItem>
+  <TabItem label="Claude Desktop (Windows)">
+
+Same as Mac, but the config file is at:
+
+```
+%APPDATA%\Claude\claude_desktop_config.json
+```
+
+Use forward slashes in paths or escape backslashes:
+
+```json
+{
+  "mcpServers": {
+    "sairo-storage": {
+      "command": "python",
+      "args": [
+        "-c",
+        "import sys; sys.path.insert(0, 'C:/path/to/sairo/mcp'); from server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {
+        "DB_DIR": "C:/path/to/sairo/data",
+        "SAIRO_API_URL": "http://localhost:8000",
+        "SAIRO_API_TOKEN": "sairo_your_token_here",
+        "MCP_LOG_LEVEL": "WARNING"
+      }
+    }
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="Cursor / Windsurf">
+
+Cursor and Windsurf connect via **Streamable HTTP** — they talk to the MCP server over the network.
+
+Make sure the MCP server is running (via Docker Compose or standalone):
+
+```bash
+# Standalone:
+cd sairo/mcp
+SAIRO_API_URL=http://localhost:8000 \
+SAIRO_API_TOKEN=sairo_your_token_here \
+DB_DIR=/path/to/sairo/data \
+python server.py
+```
+
+Then in your IDE settings, add the MCP server URL:
+
+```
+http://localhost:8100/mcp
+```
+
+For **Cursor**: Go to Settings > MCP Servers > Add Server > URL: `http://localhost:8100/mcp`
+
+For **Windsurf**: Go to Settings > AI > MCP > Add: `http://localhost:8100/mcp`
+
+  </TabItem>
+  <TabItem label="Claude Code (CLI)">
+
+Claude Code connects via stdio. Add to your project's `.mcp.json` or use the CLI:
+
+```bash
+claude mcp add sairo-storage \
+  --command "python3.11" \
+  --args "-c" "import sys; sys.path.insert(0, '/path/to/sairo/mcp'); from server import mcp; mcp.run(transport='stdio')" \
+  --env DB_DIR=/path/to/sairo/data \
+  --env SAIRO_API_URL=http://localhost:8000 \
+  --env SAIRO_API_TOKEN=sairo_your_token_here
+```
+
+  </TabItem>
+  <TabItem label="Remote / Custom Agents">
+
+For any MCP-compatible client, the server exposes **Streamable HTTP** at:
+
+```
+http://your-server:8100/mcp
+```
+
+The server follows the MCP 2025-03-26 specification:
+- `POST /mcp` — JSON-RPC requests (initialize, tools/call, etc.)
+- `GET /mcp` — Server-sent events for notifications
+- Session management via `Mcp-Session-Id` header
+
+Health check: `GET /healthz`
+Readiness: `GET /readyz`
+Metrics: `GET /metrics`
+
+  </TabItem>
+</Tabs>
+
+---
+
+## What You Can Ask
+
+You don't need to know tool names. Just ask naturally:
+
+| What you want to know | What to ask |
+|---|---|
+| Overview of your storage | *"What buckets do I have?"* |
+| Where space is going | *"What's taking up all the space in my-bucket?"* |
+| Find specific files | *"Find all parquet files in the data pipeline bucket"* |
+| Check costs | *"How much is this costing me on AWS?"* or *"Compare costs between R2 and Wasabi"* |
+| Find waste | *"Are there any duplicate files?"* or *"What can I archive?"* |
+| Monitor pipelines | *"Is the bidstream pipeline still running?"* or *"When was data/ last updated?"* |
+| Investigate issues | *"Why did storage spike last week?"* |
+| Read file contents | *"Show me the first 100 lines of that log file"* |
+| Inspect data schemas | *"What columns are in that parquet file?"* |
+| Full audit | *"Run a complete storage audit on production-reports"* |
+
+---
+
+## What's Included
+
+### 26 Tools
+
+| Category | Tools | What They Do |
+|----------|-------|-------------|
+| **Discovery** | `list_buckets`, `list_objects`, `list_folders`, `search_objects` | Navigate and search your storage |
+| **Inspection** | `get_object_metadata`, `read_object_content`, `read_object_tail`, `get_file_schema`, `sample_csv_data`, `sample_json_data` | Look inside files without downloading |
+| **Analytics** | `get_storage_breakdown`, `get_storage_trends`, `get_file_type_distribution`, `get_size_distribution`, `get_age_distribution`, `get_top_objects`, `find_duplicates` | Understand your data at a glance |
+| **Cost** | `estimate_storage_cost`, `suggest_lifecycle_rules`, `find_cold_data` | Reduce your storage bill |
+| **Pipeline** | `analyze_prefix_structure`, `detect_data_freshness`, `compare_snapshots` | Monitor data pipeline health |
+| **Operations** | `get_crawl_status`, `trigger_crawl`, `get_audit_log` | Manage the Sairo system |
+
+### 4 Guided Workflows
+
+Use these as prompts to trigger multi-step analysis:
+
+- **Storage Audit** — Calls 7 tools in sequence: breakdown, file types, size distribution, age analysis, duplicates, lifecycle suggestions. Produces a structured report.
+- **Cost Optimization** — Estimates current costs, finds cold data, identifies duplicates, recommends lifecycle rules with dollar savings.
+- **Data Quality Check** — Checks pipeline freshness, analyzes naming patterns, compares recent snapshots, flags anomalies.
+- **Incident Investigation** — Builds a timeline of storage changes, identifies which folders grew, checks audit logs for who did what.
+
+### Supported Providers for Cost Estimation
+
+| Provider | Storage Classes |
+|---|---|
+| **AWS S3** | Standard, Standard-IA, One Zone-IA, Glacier Instant, Glacier Flexible, Glacier Deep Archive |
+| **Cloudflare R2** | Standard (no egress fees) |
+| **Backblaze B2** | Standard |
+| **Wasabi** | Standard (no egress/API fees) |
+| **Leaseweb** | Standard |
+| **MinIO / Ceph** | Self-hosted ($0 software cost) |
+
+---
+
+## Security
+
+Every tool call is gated by authentication and per-bucket RBAC:
+
+- Validates API tokens against Sairo's auth system
+- Enforces bucket-level read/write permissions per user
+- Sanitizes all inputs against SQL injection, path traversal, and null bytes
+- Sanitizes all outputs to strip prompt injection patterns
+- Runs **read-only** against SQLite databases (no mutations possible)
+- Logs every tool invocation with user, bucket, and latency
+
+The MCP server has been tested against every known MCP attack vector from 2025-2026 (30+ CVEs), including tool poisoning, SSRF, DNS rebinding, and confused deputy attacks.
+
+---
+
+## How It Works
+
+```
+AI Client (Claude, Cursor, Windsurf)
+    │
+    ▼
+MCP Server (:8100)
+    ├── SQLite databases (read-only, shared /data volume)
+    │   → Folder listings in 0.05ms
+    │   → Search, analytics, distributions
+    │   → Cost estimation from indexed data
+    │
+    └── Sairo API (:8000)
+        → File previews and schema extraction
+        → Audit log queries
+        → Crawl trigger (admin only)
+```
+
+The MCP server reads Sairo's per-bucket SQLite databases directly for instant analytics. For operations that need S3 access (file previews, downloads), it calls the Sairo API.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAIRO_API_URL` | `http://localhost:8000` | URL of the Sairo API |
+| `SAIRO_API_TOKEN` | _(required)_ | API token created in Sairo's admin panel |
+| `DB_DIR` | `/data` | Path to Sairo's SQLite databases (shared volume) |
+| `MCP_PORT` | `8100` | HTTP port for Streamable HTTP transport |
+| `MCP_BIND_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for Docker) |
+| `MCP_LOG_LEVEL` | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR |
+| `MCP_LOG_FORMAT` | `json` | Log format: `json` (production) or `text` (development) |
+
+---
+
+## Troubleshooting
+
+**"No module named 'mcp'"** — Install the MCP SDK: `pip install "mcp[cli]" httpx`
+
+**Claude Desktop doesn't show the tools icon** — Make sure you restarted Claude Desktop completely (Cmd+Q). Check logs at `~/Library/Logs/Claude/mcp-server-sairo-storage.log`.
+
+**"No buckets found"** — The `DB_DIR` path must point to the directory containing Sairo's `.db` files. If Sairo runs in Docker, mount the same volume or copy the files locally.
+
+**"Authentication required"** — Create an API token in Sairo's admin panel (top nav > API Tokens > Create) and set it as `SAIRO_API_TOKEN`.
+
+**MCP server crashes on startup** — If your project directory is named `mcp/`, Python may confuse it with the `mcp` pip package. Run the server from outside the `mcp/` directory or use the `sys.path.insert` approach shown in the config examples above.
