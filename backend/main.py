@@ -172,6 +172,8 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
+SAIRO_VERSION = "3.2.0"
+TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 if not S3_ENDPOINT:
@@ -442,6 +444,13 @@ def _init_users_db():
             is_default INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             created_by TEXT
+        )
+    """)
+    # Instance metadata (telemetry ID)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS instance_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -1668,6 +1677,104 @@ def startup():
     recrawl_thread.start()
     log.info("Auto-recrawl enabled every %d seconds", RECRAWL_INTERVAL)
 
+    # Start telemetry heartbeat
+    if TELEMETRY:
+        threading.Thread(target=_telemetry_loop, daemon=True).start()
+        log.info("Anonymous telemetry enabled. Set TELEMETRY=false to disable.")
+    else:
+        log.info("Telemetry disabled.")
+
+
+# ── Telemetry ─────────────────────────────────────────────────────────────
+
+TELEMETRY_URL = "https://dashboard.sairo.dev/api/v1/ping"
+TELEMETRY_INTERVAL = 86400  # 24 hours
+
+def _get_instance_id() -> str:
+    """Get or create a persistent anonymous instance ID."""
+    with _get_users_db() as db:
+        row = db.execute("SELECT value FROM instance_meta WHERE key='instance_id'").fetchone()
+        if row:
+            return row[0]
+        import uuid
+        iid = str(uuid.uuid4())
+        db.execute("INSERT INTO instance_meta (key, value) VALUES ('instance_id', ?)", (iid,))
+        db.commit()
+        return iid
+
+def _collect_telemetry() -> dict:
+    """Collect anonymous instance metrics."""
+    import platform
+    instance_id = _get_instance_id()
+    uptime_hours = round((time.time() - _app_start_time) / 3600, 1)
+
+    # Count buckets, objects, size from crawl_status tables
+    total_objects = 0
+    total_size = 0
+    bucket_count = 0
+    try:
+        for f in os.listdir(DB_DIR):
+            if not f.endswith(".db") or f == "users.db":
+                continue
+            try:
+                path = os.path.join(DB_DIR, f)
+                conn = sqlite3.connect(path)
+                row = conn.execute("SELECT total_objects, total_size FROM crawl_status WHERE id=1").fetchone()
+                if row:
+                    total_objects += row[0] or 0
+                    total_size += row[1] or 0
+                    bucket_count += 1
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Count users and endpoints
+    user_count = 0
+    endpoint_count = 0
+    try:
+        with _get_users_db() as db:
+            user_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            endpoint_count = db.execute("SELECT COUNT(*) FROM s3_endpoints").fetchone()[0]
+    except Exception:
+        pass
+
+    provider = detect_provider(S3_ENDPOINT)
+
+    return {
+        "instance_id": instance_id,
+        "version": SAIRO_VERSION,
+        "buckets": bucket_count,
+        "total_objects": total_objects,
+        "total_size": total_size,
+        "provider": provider,
+        "uptime_hours": uptime_hours,
+        "os": f"{platform.system().lower()}/{platform.machine()}",
+        "endpoints": endpoint_count,
+        "users": user_count,
+        "auth_mode": AUTH_MODE,
+    }
+
+def _telemetry_loop():
+    """Background thread: send anonymous heartbeat every 24 hours."""
+    import urllib.request
+    import json as _json
+    time.sleep(60)  # wait 1 min after startup before first ping
+    while True:
+        try:
+            data = _collect_telemetry()
+            req = urllib.request.Request(
+                TELEMETRY_URL,
+                data=_json.dumps(data).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass  # silent failure — never crash, never retry
+        time.sleep(TELEMETRY_INTERVAL)
+
 
 # ── API: Auth ──────────────────────────────────────────────────────────────
 
@@ -2288,6 +2395,39 @@ def get_branding():
         "ldap_enabled": os.environ.get("LDAP_ENABLED", "false").lower() == "true",
         "oauth_providers": oauth_providers,
         "auth_mode": AUTH_MODE,
+        "version": SAIRO_VERSION,
+    }
+
+
+# ── API: Update Check ─────────────────────────────────────────────────────
+
+_update_cache: dict = {"latest": None, "checked_at": 0}
+
+@app.get("/api/version")
+def get_version(user: dict = Depends(get_current_user)):
+    """Return current version and latest available version (cached 24h)."""
+    import urllib.request
+    now = time.time()
+    latest = _update_cache.get("latest")
+    # Check GitHub releases API at most once per 24 hours
+    if not latest or now - _update_cache["checked_at"] > 86400:
+        try:
+            req = urllib.request.Request(
+                "https://api.github.com/repos/AshwathStephen/sairo/releases/latest",
+                headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "Sairo"},
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(resp.read())
+            latest = data.get("tag_name", "").lstrip("v")
+            _update_cache["latest"] = latest
+            _update_cache["checked_at"] = now
+        except Exception:
+            latest = _update_cache.get("latest") or SAIRO_VERSION
+    update_available = latest and latest != SAIRO_VERSION and latest > SAIRO_VERSION
+    return {
+        "current": SAIRO_VERSION,
+        "latest": latest,
+        "update_available": bool(update_available),
     }
 
 

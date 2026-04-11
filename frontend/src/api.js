@@ -770,6 +770,12 @@ export async function getBranding() {
   return res.json();
 }
 
+export async function checkForUpdate() {
+  const res = await apiFetch("/api/version");
+  if (!res.ok) return null;
+  return res.json();
+}
+
 // ── S3 Health Check ─────────────────────────────────────
 
 export async function getS3Health(endpointId = "") {

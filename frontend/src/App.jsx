@@ -27,7 +27,7 @@ import TwoFactorSetup from "./components/TwoFactorSetup";
 import EndpointManager from "./components/EndpointManager";
 import ToastContainer, { toast } from "./components/Toast";
 import { checkAuth, logout, refreshSession } from "./auth";
-import { streamList, deleteObjects, deleteFolder, createFolder, bulkCopy, bulkMove, listDeletedVersions, purgeVersions, purgePrefix, getBranding, setCurrentEndpoint } from "./api";
+import { streamList, deleteObjects, deleteFolder, createFolder, bulkCopy, bulkMove, listDeletedVersions, purgeVersions, purgePrefix, getBranding, setCurrentEndpoint, checkForUpdate } from "./api";
 
 // Share link route: /share/{token}
 function getShareToken() {
@@ -126,6 +126,7 @@ function MainApp() {
   const [showTwoFactor, setShowTwoFactor] = useState(false);
   const [showEndpointManager, setShowEndpointManager] = useState(false);
   const [branding, setBranding] = useState({ app_name: "Sairo" });
+  const [updateInfo, setUpdateInfo] = useState(null);
   const [bucketPermission, setBucketPermission] = useState(null);
   const dragCounter = useRef(0);
   const abortRef = useRef(null);
@@ -136,7 +137,10 @@ function MainApp() {
 
   // Check auth on mount
   useEffect(() => {
-    checkAuth().then((u) => setUser(u));
+    checkAuth().then((u) => {
+      setUser(u);
+      if (u) checkForUpdate().then(v => v && v.update_available && setUpdateInfo(v)).catch(() => {});
+    });
     getBranding().then(setBranding).catch(() => {});
   }, []);
 
@@ -576,6 +580,17 @@ function MainApp() {
             {userBadge}
           </div>
         </header>
+        {updateInfo && updateInfo.update_available && (
+          <div style={{ padding: "8px 16px", background: "rgba(59, 130, 246, 0.1)", border: "1px solid rgba(59, 130, 246, 0.2)", borderRadius: 8, margin: "0 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 13, color: "var(--text, #e4e4e7)" }}>
+              Sairo <strong>v{updateInfo.latest}</strong> is available. You are on v{updateInfo.current}.
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <a href="https://github.com/AshwathStephen/sairo/releases" target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none", fontWeight: 500 }}>View changelog</a>
+              <button onClick={() => setUpdateInfo(null)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16, padding: "0 4px" }}>&times;</button>
+            </div>
+          </div>
+        )}
         <BucketList onSelect={navigateBucket} role={user.role} onDashboard={setDashboardBucket} />
         {showAuditLog && <AuditLog onClose={() => setShowAuditLog(false)} />}
         {dashboardBucket && <StorageDashboard bucket={dashboardBucket} onClose={() => setDashboardBucket(null)} onNavigate={(pfx) => { setDashboardBucket(null); setHash(dashboardBucket, pfx); }} />}
