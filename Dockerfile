@@ -1,5 +1,5 @@
-# Stage 1: Build React frontend
-FROM node:20-alpine AS frontend-build
+# Stage 1: Build React frontend (always amd64 — output is static JS/CSS/HTML)
+FROM --platform=linux/amd64 node:20-alpine AS frontend-build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
