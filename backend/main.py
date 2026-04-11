@@ -1730,13 +1730,19 @@ def _collect_telemetry() -> dict:
     except Exception:
         pass
 
-    # Count users and endpoints
+    # Count users, endpoints, and API token usage (MCP/CLI indicator)
     user_count = 0
     endpoint_count = 0
+    api_tokens = 0
+    api_tokens_active = 0
     try:
         with _get_users_db() as db:
             user_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             endpoint_count = db.execute("SELECT COUNT(*) FROM s3_endpoints").fetchone()[0]
+            api_tokens = db.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]
+            api_tokens_active = db.execute(
+                "SELECT COUNT(*) FROM api_tokens WHERE last_used IS NOT NULL AND last_used > datetime('now', '-7 days')"
+            ).fetchone()[0]
     except Exception:
         pass
 
@@ -1754,6 +1760,8 @@ def _collect_telemetry() -> dict:
         "endpoints": endpoint_count,
         "users": user_count,
         "auth_mode": AUTH_MODE,
+        "api_tokens": api_tokens,
+        "api_tokens_active": api_tokens_active,
     }
 
 def _telemetry_loop():
