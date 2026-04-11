@@ -3649,19 +3649,16 @@ def optimization_summary(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     with _get_db(bucket) as db:
-        total_row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
-        total_objects, total_size = total_row
-
-        if total_objects == 0:
-            return {"bucket": bucket, "total_objects": 0, "total_size": 0, "age_distribution": [],
-                    "cold_data": {}, "duplicates": {}, "lifecycle": {}, "tiering": {}}
-
-        # ── Age distribution (single query with CASE WHEN) ──
-        age_thresholds = [7, 30, 90, 180, 365]
+        # ── Single scan: totals + age distribution + cold data by folder ──
         now_utc = datetime.now(timezone.utc)
+        age_thresholds = [7, 30, 90, 180, 365]
+        cold_threshold_days = 30
         cutoffs = {d: (now_utc - timedelta(days=d)).isoformat() for d in age_thresholds}
-        age_row = db.execute(
-            """SELECT
+        cold_cutoff = cutoffs[cold_threshold_days]
+
+        combined = db.execute("""
+            SELECT
+                COUNT(*), COALESCE(SUM(size), 0),
                 COUNT(CASE WHEN last_modified < ? THEN 1 END),
                 COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0),
                 COUNT(CASE WHEN last_modified < ? THEN 1 END),
@@ -3676,9 +3673,16 @@ def optimization_summary(
             (cutoffs[7], cutoffs[7], cutoffs[30], cutoffs[30], cutoffs[90], cutoffs[90],
              cutoffs[180], cutoffs[180], cutoffs[365], cutoffs[365]),
         ).fetchone()
+
+        total_objects, total_size = combined[0], combined[1]
+
+        if total_objects == 0:
+            return {"bucket": bucket, "total_objects": 0, "total_size": 0, "age_distribution": [],
+                    "cold_data": {}, "duplicates": {}, "lifecycle": {}, "tiering": {}}
+
         age_distribution = []
         for i, days in enumerate(age_thresholds):
-            cnt, sz = age_row[i*2], age_row[i*2+1]
+            cnt, sz = combined[2 + i*2], combined[3 + i*2]
             age_distribution.append({
                 "older_than_days": days,
                 "object_count": cnt,
@@ -3687,9 +3691,7 @@ def optimization_summary(
                 "pct_size": round(sz / total_size * 100, 1) if total_size else 0,
             })
 
-        # ── Cold data by top-level folder ──
-        cold_threshold_days = 30
-        cold_cutoff = (datetime.now(timezone.utc) - timedelta(days=cold_threshold_days)).isoformat()
+        # ── Cold data by folder (uses precomputed folder_stats for totals) ──
         cold_folders = db.execute("""
             SELECT
                 CASE WHEN INSTR(key, '/') > 0 THEN SUBSTR(key, 1, INSTR(key, '/')) ELSE '(root)' END as folder,
@@ -3702,13 +3704,9 @@ def optimization_summary(
             ORDER BY cold_size DESC
         """, (cold_cutoff,)).fetchall()
 
+        # Use precomputed folder_stats instead of a second full scan
         folder_totals = {}
-        for row in db.execute("""
-            SELECT
-                CASE WHEN INSTR(key, '/') > 0 THEN SUBSTR(key, 1, INSTR(key, '/')) ELSE '(root)' END as folder,
-                COUNT(*) as cnt, COALESCE(SUM(size), 0) as sz
-            FROM objects GROUP BY folder
-        """).fetchall():
+        for row in db.execute("SELECT prefix, object_count, total_size FROM folder_stats").fetchall():
             folder_totals[row[0]] = {"count": row[1], "size": row[2]}
 
         cold_data_folders = []
