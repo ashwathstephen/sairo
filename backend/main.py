@@ -3724,19 +3724,22 @@ def optimization_summary(
             })
             total_cold_size += row[2]
 
-        # ── Duplicate detection ──
-        dupe_rows = db.execute("""
-            SELECT
-                CASE WHEN INSTR(key, '/') > 0
-                     THEN SUBSTR(key, INSTR(key, '/') + 1) ELSE key END as filename,
-                size, COUNT(*) as cnt
-            FROM objects
-            WHERE size > 0
-            GROUP BY filename, size
-            HAVING cnt > 1
-            ORDER BY size * (cnt - 1) DESC
-            LIMIT 20
-        """).fetchall()
+        # ── Duplicate detection (skip for very large buckets to avoid long scans) ──
+        if total_objects <= 1_000_000:
+            dupe_rows = db.execute("""
+                SELECT
+                    CASE WHEN INSTR(key, '/') > 0
+                         THEN SUBSTR(key, INSTR(key, '/') + 1) ELSE key END as filename,
+                    size, COUNT(*) as cnt
+                FROM objects
+                WHERE size > 0
+                GROUP BY filename, size
+                HAVING cnt > 1
+                ORDER BY size * (cnt - 1) DESC
+                LIMIT 20
+            """).fetchall()
+        else:
+            dupe_rows = []
 
         dupe_groups = []
         total_dupe_waste = 0
@@ -3842,6 +3845,7 @@ def optimization_summary(
         "duplicates": {
             "groups": dupe_groups,
             "total_wasted": total_dupe_waste,
+            "skipped": total_objects > 1_000_000,
         },
         "lifecycle": {
             "rule_count": len(lc_rules),

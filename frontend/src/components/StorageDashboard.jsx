@@ -563,7 +563,7 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
                           </table>
                         </>
                       ) : (
-                        <p className="muted" style={{ fontSize: 12 }}>No duplicate files detected.</p>
+                        <p className="muted" style={{ fontSize: 12 }}>{optData.duplicates.skipped ? "Duplicate scan skipped for buckets with over 1M objects." : "No duplicate files detected."}</p>
                       )}
                     </div>
 
