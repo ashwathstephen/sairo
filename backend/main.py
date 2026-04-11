@@ -3506,8 +3506,10 @@ def storage_history(bucket: str, prefix: str = "", days: int = 90, user: dict = 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _get_db(bucket) as db:
         rows = db.execute(
-            "SELECT timestamp, object_count, total_size FROM storage_history "
-            "WHERE prefix = ? AND timestamp >= ? ORDER BY timestamp ASC",
+            "SELECT DATE(timestamp) as day, MAX(object_count) as object_count, MAX(total_size) as total_size, MAX(timestamp) as timestamp "
+            "FROM storage_history "
+            "WHERE prefix = ? AND timestamp >= ? "
+            "GROUP BY day ORDER BY day ASC",
             (prefix, cutoff),
         ).fetchall()
     return {"prefix": prefix or "(all)", "history": [dict(r) for r in rows]}
@@ -3654,20 +3656,35 @@ def optimization_summary(
             return {"bucket": bucket, "total_objects": 0, "total_size": 0, "age_distribution": [],
                     "cold_data": {}, "duplicates": {}, "lifecycle": {}, "tiering": {}}
 
-        # ── Age distribution by folder ──
+        # ── Age distribution (single query with CASE WHEN) ──
         age_thresholds = [7, 30, 90, 180, 365]
+        now_utc = datetime.now(timezone.utc)
+        cutoffs = {d: (now_utc - timedelta(days=d)).isoformat() for d in age_thresholds}
+        age_row = db.execute(
+            """SELECT
+                COUNT(CASE WHEN last_modified < ? THEN 1 END),
+                COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0),
+                COUNT(CASE WHEN last_modified < ? THEN 1 END),
+                COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0),
+                COUNT(CASE WHEN last_modified < ? THEN 1 END),
+                COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0),
+                COUNT(CASE WHEN last_modified < ? THEN 1 END),
+                COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0),
+                COUNT(CASE WHEN last_modified < ? THEN 1 END),
+                COALESCE(SUM(CASE WHEN last_modified < ? THEN size END), 0)
+            FROM objects""",
+            (cutoffs[7], cutoffs[7], cutoffs[30], cutoffs[30], cutoffs[90], cutoffs[90],
+             cutoffs[180], cutoffs[180], cutoffs[365], cutoffs[365]),
+        ).fetchone()
         age_distribution = []
-        for days in age_thresholds:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-            row = db.execute(
-                "SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE last_modified < ?", (cutoff,)
-            ).fetchone()
+        for i, days in enumerate(age_thresholds):
+            cnt, sz = age_row[i*2], age_row[i*2+1]
             age_distribution.append({
                 "older_than_days": days,
-                "object_count": row[0],
-                "total_size": row[1],
-                "pct_objects": round(row[0] / total_objects * 100, 1) if total_objects else 0,
-                "pct_size": round(row[1] / total_size * 100, 1) if total_size else 0,
+                "object_count": cnt,
+                "total_size": sz,
+                "pct_objects": round(cnt / total_objects * 100, 1) if total_objects else 0,
+                "pct_size": round(sz / total_size * 100, 1) if total_size else 0,
             })
 
         # ── Cold data by top-level folder ──
