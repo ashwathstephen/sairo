@@ -1,44 +1,105 @@
 ---
 title: Storage Dashboard
-description: Visualize storage usage with summary cards, growth trend charts, and per-folder breakdowns across all your buckets.
+description: Visualize storage usage, cost estimates, and optimization recommendations across all your buckets.
 ---
 
-The storage dashboard gives you an at-a-glance view of how your S3 storage is being used and how it is growing over time. Open the dashboard from the sidebar or by clicking the chart icon next to any bucket.
+The Insights panel gives you a complete view of your storage — usage, costs, trends, and optimization opportunities. Open it by clicking **Insights** in the header bar when browsing any bucket.
 
-## Summary cards
+The panel has two tabs: **Storage** and **Optimize**.
 
-Four cards at the top of the dashboard provide a high-level overview:
+## Storage tab
+
+### Summary cards
+
+Four cards at the top provide a high-level overview:
 
 | Card                | Description                                        |
 | ------------------- | -------------------------------------------------- |
 | **Total Objects**   | Number of objects across the selected scope         |
 | **Total Size**      | Aggregate storage usage in human-readable units     |
-| **Top-Level Folders** | Count of distinct top-level prefixes              |
-| **Largest Folder**  | The prefix consuming the most storage              |
+| **Est. Monthly Cost** | Estimated monthly storage cost based on detected provider |
+| **Est. Annual Cost**  | Projected annual cost                              |
 
-## Growth trend chart
+### Provider selector
+
+Below the summary cards, a provider selector lets you switch between 13 supported S3 providers to compare costs:
+
+AWS S3, Cloudflare R2, Backblaze B2, Wasabi, Leaseweb, DigitalOcean, Hetzner, Scaleway, OVHcloud, iDrive e2, Storj, MinIO (self-hosted), and Ceph (self-hosted).
+
+Sairo auto-detects your provider from the S3 endpoint URL. AWS pricing is fetched live from the AWS Bulk Pricing API with a 24-hour cache. All other provider pricing comes from s3compare.io (CC BY 4.0).
+
+### Growth trend chart
 
 A 90-day growth trend chart shows how total storage usage has changed over time. The chart is SVG-based and supports hover tooltips that display the exact size and date for each data point.
 
-Data points are captured from crawl snapshots, so the chart reflects the state of the index at each recrawl cycle.
+### Storage breakdown
 
-## Storage breakdown
+A horizontal bar chart shows storage distribution across top-level folders. Each bar includes a per-folder cost estimate in green. Click any folder to expand an inline growth trend chart for that prefix.
 
-Below the trend chart, a horizontal bar chart shows storage distribution across top-level folders. Each bar is proportional to the folder's share of total usage, making it easy to identify which prefixes are consuming the most space.
+### Data table
 
-### Per-folder expansion
-
-Click any folder in the breakdown to expand an inline growth trend chart for that specific prefix. This lets you investigate whether a particular folder is growing, shrinking, or stable over the 90-day window.
-
-## Data table
-
-A table at the bottom of the dashboard lists every top-level folder sorted by size (largest first):
+A sortable table lists every top-level folder with:
 
 | Column              | Description                              |
 | ------------------- | ---------------------------------------- |
 | **Folder**          | Top-level prefix name                    |
 | **Objects**         | Number of objects in the prefix          |
 | **Size**            | Total storage used by the prefix         |
+| **Monthly**         | Estimated monthly cost for the prefix    |
+| **Annual**          | Estimated annual cost for the prefix     |
 | **% of Total**      | Proportion of total bucket storage       |
 
-The percentage column makes it straightforward to see which folders dominate storage usage and which are negligible.
+### Storage class comparison
+
+For providers with multiple storage classes (e.g., AWS with Standard, Glacier, Standard-IA), a comparison table shows what your total storage would cost in each class.
+
+## Optimize tab
+
+The Optimize tab analyzes your bucket and surfaces actionable recommendations.
+
+### Recommendations
+
+Severity-based cards highlight issues:
+
+| Severity | Examples |
+| -------- | -------- |
+| **High** | No lifecycle rules configured; no expiration rule on a large bucket |
+| **Medium** | Versioning enabled without noncurrent version cleanup; tiering opportunity |
+| **Info** | No abort rule for incomplete multipart uploads |
+
+If no issues are found, a green "All clear" banner is shown.
+
+### Tiering opportunity
+
+For providers with multiple storage classes, Sairo calculates how much you could save by moving cold data to a cheaper tier. Shows monthly savings, annual savings, and percentage cost reduction.
+
+### Lifecycle status
+
+Five indicators show whether the bucket has:
+
+- Any lifecycle rules at all
+- An expiration rule
+- A noncurrent version cleanup rule
+- An abort-incomplete-multipart rule
+- A storage class transition rule
+
+### Data age distribution
+
+A horizontal bar chart shows what percentage of your data is older than 7, 30, 90, 180, and 365 days. Color-coded: blue for low, amber for moderate, red for high percentages.
+
+### Cold data by folder
+
+A table showing which folders have the most cold data (older than 30 days), including cold size, total size, and cold percentage per folder.
+
+### Duplicate files
+
+Lists files with identical names and sizes across different prefixes. Shows filename, size, number of copies, and total wasted space.
+
+### Accuracy disclaimer
+
+A note at the bottom of the Optimize tab explains the limitations:
+
+- "Cold" is based on last-modified time, not access patterns (S3 does not expose read timestamps)
+- Duplicate detection uses filename + size matching, not checksums
+- Cost estimates use published pricing and may not reflect negotiated rates
+- Recommendations should be verified against retention and compliance requirements

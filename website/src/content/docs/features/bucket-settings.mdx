@@ -52,15 +52,31 @@ The CORS tab includes a JSON editor for the bucket's Cross-Origin Resource Shari
 
 ## 7. Multipart
 
-The Multipart tab shows all in-progress multipart uploads for the bucket:
+The Multipart tab shows all incomplete multipart uploads in the bucket with intelligent stale/active classification.
 
-| Column          | Description                           |
-| --------------- | ------------------------------------- |
-| **Key**         | The object key being uploaded         |
-| **Started**     | When the upload was initiated         |
-| **Action**      | Abort button to cancel the upload     |
+**Data is loaded lazily** — only when you click the Multipart tab, not when the settings page opens. This keeps the settings page fast even for buckets with many incomplete uploads.
 
-Each upload has an individual "Abort" button to cancel it and free the consumed storage. This is useful for cleaning up uploads that were interrupted or abandoned.
+Each upload is shown as a card with:
+
+| Field           | Description                                       |
+| --------------- | ------------------------------------------------- |
+| **Filename**    | The object key, with folder path shown below      |
+| **Size**        | Total size of uploaded parts                       |
+| **Parts**       | Number of parts uploaded so far                    |
+| **Age**         | How long ago the upload started                    |
+| **Status**      | **Stale** (older than 24h, red) or **Active** (green) |
+
+### Stale vs. active
+
+Uploads older than 24 hours are classified as **stale** — these are likely failed or abandoned uploads wasting storage. Recent uploads (under 24 hours) are classified as **active** and may be in-progress pipeline writes.
+
+- **Abort buttons only appear on stale uploads** — you cannot accidentally abort an active upload from the UI
+- **Single abort safety** — the backend rejects aborting uploads less than 1 hour old unless explicitly forced
+- **"Abort All Stale" button** — bulk-aborts all stale uploads in one click, with a confirmation dialog showing the count and size. Active uploads are never touched.
+
+### Pagination
+
+The listing handles buckets with 1,000+ incomplete uploads by paginating through the S3 `ListMultipartUploads` API automatically.
 
 ## 8. Index
 

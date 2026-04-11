@@ -13,6 +13,52 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.2.0
+
+**Cost Intelligence, Multipart Cleanup & Optimization Recommendations**
+
+### Cost Visibility
+- **Cost heatmaps** — Per-folder cost breakdown with 13 S3 provider pricing tables
+- **Live AWS pricing** — Fetched from the AWS Bulk Pricing API with 24-hour cache
+- **Provider auto-detect** — Automatically identifies your provider from the S3 endpoint URL
+- **Storage class comparison** — See what your data would cost on Standard, Glacier, Standard-IA, and more
+- **Provider selector** — Switch between providers to compare costs side-by-side
+
+### Optimization
+- **Lifecycle gap analysis** — Detects missing expiration rules, no abort-multipart rules, versioning without cleanup
+- **Cold data detection** — Age distribution by folder with configurable thresholds
+- **Duplicate detection** — Finds files with identical names and sizes across prefixes
+- **Tiering savings** — Calculates monthly/annual savings from moving cold data to cheaper storage classes
+- **Severity badges** — High / Medium / Info recommendations with actionable suggestions
+
+### Multipart Cleanup
+- **Part sizes** — Shows size and part count for each incomplete upload
+- **Stale vs. active** — Uploads older than 24 hours flagged as stale; recent uploads protected
+- **Bulk abort** — "Abort All Stale" button with confirmation dialog; active uploads untouched
+- **Paginated** — Handles buckets with 1,000+ incomplete uploads via S3 pagination
+
+### UI
+- **Insights panel** — Consolidated "Storage" and "Optimize" tabs in one modal
+- **Lazy loading** — Optimization data fetched only when the Optimize tab is clicked
+- **Settings page: 24s to 0.3s** — Multipart data no longer blocks initial settings load
+
+### Performance
+- **`last_modified` index** — Cold data queries use indexed scans instead of full table scans
+- **Lifecycle transitions** — Model now supports `transition_days` and `transition_storage_class`
+- **6 new providers** — DigitalOcean, Hetzner, Scaleway, OVH, iDrive e2, Storj
+
+---
+
+## v3.1.0
+
+**S3 Access Key Authentication**
+
+- **S3 auth mode** — `AUTH_MODE=s3` lets users log in with S3 access key and secret key
+- **Login toggle** — Sliding pill on the login page to switch between Password and S3 Keys
+- **Helm support** — `auth.mode` value in Helm chart
+
+---
+
 ## v3.0.0
 
 **AI Storage Intelligence + Petabyte-Scale Performance**

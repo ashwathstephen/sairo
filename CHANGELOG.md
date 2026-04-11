@@ -2,6 +2,30 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-04-11
+
+### Added
+
+- **Cost Heatmaps** — Per-folder cost breakdown with 13 S3 provider pricing (AWS, R2, B2, Wasabi, Leaseweb, DigitalOcean, Hetzner, Scaleway, OVH, iDrive e2, Storj, MinIO, Ceph). Live AWS pricing via Bulk Pricing API with 24h cache. Provider auto-detection from endpoint URL.
+- **Optimization Recommendations** — Lifecycle gap analysis with severity-based recommendations (no expiration, no abort rule, versioning without cleanup). Cold data detection by folder with age distribution. Duplicate file detection via filename + size matching. Tiering savings calculator for multi-class providers.
+- **Multipart Cleanup** — Paginated listing with part sizes, stale/active classification (>24h threshold), bulk abort with safety guards. Active uploads (< 24h) protected from accidental deletion.
+- **Insights Panel** — Consolidated Storage + Optimize tabs in a single modal. Lazy-loaded optimization data. Replaces the old "Dashboard" button.
+- **Storage Class Transitions** — Lifecycle rules now support `transition_days` and `transition_storage_class` for moving data to cheaper storage tiers.
+- **Pricing Module** — Shared pricing engine with region multipliers, minimum storage durations, and provider metadata. Used by both backend and MCP server.
+
+### Changed
+
+- **Settings Page: 24s → 0.3s** — Multipart uploads no longer block initial page load. Part sizes fetched lazily when the Multipart tab is clicked.
+- **Cold Data Queries** — Added `last_modified` index on objects table for indexed cold data scans instead of full table scans.
+- **Storage Dashboard** — Summary cards now show estimated monthly and annual costs. Per-folder cost overlay on bar chart and detail table.
+
+## [3.1.0] - 2026-04-11
+
+### Added
+
+- **S3 Access Key Authentication** — New `AUTH_MODE=s3` option lets users log in with their S3 access key and secret key directly. Validates credentials via `list_buckets()`.
+- **Login Toggle** — Sliding pill toggle on the login page to switch between Password and S3 Keys authentication.
+
 ## [3.0.0] - 2026-04-11
 
 ### Added
