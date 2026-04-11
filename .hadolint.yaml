@@ -1,2 +1,3 @@
 ignored:
   - DL3008  # Pin versions in apt-get install — not applicable, no apt-get in Dockerfile
+  - DL3029  # --platform in FROM is intentional — forces amd64 for frontend build to avoid QEMU segfaults
