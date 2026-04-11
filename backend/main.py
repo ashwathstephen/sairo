@@ -1659,18 +1659,20 @@ def startup():
     except Exception as e:
         log.error("Failed to load S3 endpoints: %s", e)
 
-    # Auto-crawl all existing buckets on startup (all endpoints)
-    for eid in _s3_manager.get_all_ids():
-        try:
-            client = _s3_manager.get_client(eid)
-            resp = client.list_buckets()
-            for b in resp.get("Buckets", []):
-                name = b["Name"]
-                _init_db(name, eid)
-                _queue_crawl(name, eid)
-                log.info("Queued crawl for %s:%s", eid, name)
-        except Exception as e:
-            log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
+    # Auto-crawl all existing buckets on startup (runs in background so uvicorn starts immediately)
+    def _startup_crawl():
+        for eid in _s3_manager.get_all_ids():
+            try:
+                client = _s3_manager.get_client(eid)
+                resp = client.list_buckets()
+                for b in resp.get("Buckets", []):
+                    name = b["Name"]
+                    _init_db(name, eid)
+                    _queue_crawl(name, eid)
+                    log.info("Queued crawl for %s:%s", eid, name)
+            except Exception as e:
+                log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
+    threading.Thread(target=_startup_crawl, daemon=True).start()
 
     # Start auto-recrawl thread
     recrawl_thread = threading.Thread(target=_auto_recrawl, daemon=True)
