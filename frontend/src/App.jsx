@@ -614,7 +614,7 @@ function MainApp() {
           <CrawlStatus bucket={bucket} />
           {indexed && <span className="cache-badge">indexed</span>}
           <button onClick={() => setShowSearch(true)} className="btn-settings" title="Search (/ or ⌘K)" aria-label="Search">&#128269; Search</button>
-          <button onClick={() => setDashboardBucket(bucket)} className="btn-settings" title="Storage Dashboard" aria-label="Storage Dashboard">&#128202; Dashboard</button>
+          <button onClick={() => setDashboardBucket(bucket)} className="btn-settings" title="Storage Dashboard" aria-label="Storage Dashboard">&#128202; Insights</button>
           <button onClick={() => setShowSettings(true)} className="btn-settings" aria-label="Bucket Settings">&#9881; Settings</button>
           <Favorites onNavigate={handleFavoriteNavigate} currentBucket={bucket} currentPrefix={prefix} />
           {isAdmin && <button onClick={() => setShowAuditLog(true)} className="btn-settings">Activity</button>}

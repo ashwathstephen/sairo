@@ -1,15 +1,19 @@
 """
 S3-compatible storage provider pricing tables.
 
-Prices are per GB per month for storage. Egress and API call pricing
-varies significantly and is noted but not used in estimates.
+Pricing sources:
+- AWS: Static defaults (MCP doesn't fetch live — the backend handles that)
+- Others: s3compare.io community dataset (CC BY 4.0), last verified 2026-04-11
+
+If any prices here are outdated, please open an issue or PR at
+https://github.com/objexstorage/objex — community contributions welcome.
 """
 
 # Storage pricing: provider -> storage_class -> price_per_gb_per_month (USD)
 STORAGE_PRICING: dict[str, dict[str, float]] = {
     "aws": {
         "standard": 0.023,
-        "intelligent_tiering": 0.023,  # frequent access tier
+        "intelligent_tiering": 0.023,
         "standard_ia": 0.0125,
         "one_zone_ia": 0.01,
         "glacier_instant": 0.004,
@@ -18,26 +22,39 @@ STORAGE_PRICING: dict[str, dict[str, float]] = {
     },
     "r2": {
         "standard": 0.015,
-        # R2 has no egress fees, no storage classes
     },
     "b2": {
         "standard": 0.006,
-        # First 10GB free, no minimum storage duration
     },
     "wasabi": {
         "standard": 0.0069,
-        # No egress fees, no API fees, 90-day minimum
     },
     "minio": {
         "standard": 0.0,
-        # Self-hosted, cost is infrastructure only
     },
     "ceph": {
         "standard": 0.0,
-        # Self-hosted
     },
     "leaseweb": {
         "standard": 0.012,
+    },
+    "digitalocean": {
+        "standard": 0.02,
+    },
+    "hetzner": {
+        "standard": 0.0052,
+    },
+    "scaleway": {
+        "standard": 0.016,
+    },
+    "ovh": {
+        "standard": 0.011,
+    },
+    "idrive_e2": {
+        "standard": 0.004,
+    },
+    "storj": {
+        "standard": 0.004,
     },
 }
 
@@ -58,17 +75,11 @@ MIN_STORAGE_DURATION: dict[str, dict[str, int]] = {
 
 # Region pricing multipliers (relative to us-east-1 = 1.0)
 REGION_MULTIPLIERS: dict[str, float] = {
-    "us-east-1": 1.0,
-    "us-east-2": 1.0,
-    "us-west-1": 1.1,
-    "us-west-2": 1.0,
-    "eu-west-1": 1.08,
-    "eu-west-2": 1.08,
-    "eu-central-1": 1.08,
-    "ap-southeast-1": 1.1,
-    "ap-northeast-1": 1.14,
-    "ap-south-1": 1.04,
-    "sa-east-1": 1.22,
+    "us-east-1": 1.0, "us-east-2": 1.0, "us-west-1": 1.1, "us-west-2": 1.0,
+    "eu-west-1": 1.08, "eu-west-2": 1.08, "eu-central-1": 1.08,
+    "ap-southeast-1": 1.1, "ap-northeast-1": 1.14, "ap-south-1": 1.04,
+    "sa-east-1": 1.22, "ca-central-1": 1.05, "af-south-1": 1.22,
+    "me-south-1": 1.17,
 }
 
 
@@ -82,7 +93,6 @@ def get_storage_price(
     provider_prices = STORAGE_PRICING.get(provider, STORAGE_PRICING["aws"])
     base_price = provider_prices.get(storage_class, provider_prices.get("standard", 0.023))
 
-    # Apply region multiplier (only for AWS currently)
     if provider == "aws":
         multiplier = REGION_MULTIPLIERS.get(region, 1.0)
         base_price *= multiplier
@@ -101,7 +111,6 @@ def estimate_monthly_cost(total_bytes: int, provider: str, region: str = "us-eas
 
     result = {}
     for storage_class, price_per_gb in provider_prices.items():
-        # Apply region multiplier
         effective_price = price_per_gb
         if provider == "aws":
             multiplier = REGION_MULTIPLIERS.get(region, 1.0)

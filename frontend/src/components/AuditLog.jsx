@@ -14,6 +14,7 @@ const ACTION_CLASSES = {
   copy: "audit-action-create",
   rename: "audit-action-config",
   abort_multipart: "audit-action-delete",
+  abort_all_multipart: "audit-action-delete",
   config_versioning: "audit-action-config",
   config_lifecycle: "audit-action-config",
   config_cors: "audit-action-config",
@@ -84,6 +85,7 @@ export default function AuditLog({ onClose }) {
             <option value="config_acl">Config: ACL</option>
             <option value="config_tagging">Config: Tagging</option>
             <option value="abort_multipart">Abort Multipart</option>
+            <option value="abort_all_multipart">Abort All Multipart</option>
           </select>
           <input
             type="text"

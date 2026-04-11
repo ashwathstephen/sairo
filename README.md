@@ -30,7 +30,8 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 - **Instant Search** — SQLite-indexed search across all objects by filename
 - **File Preview** — Images, text, CSV, JSON, PDF, Parquet/ORC/Avro schemas, and binary hex
 - **Upload & Download** — Multipart upload with progress tracking, drag-and-drop support
-- **Storage Dashboard** — Visual breakdown by prefix with growth trend charts
+- **Storage Dashboard** — Visual breakdown by prefix with growth trend charts and cost estimates
+- **Cost Intelligence** — Per-folder cost breakdown with provider comparison. AWS pricing fetched live; others from community data
 - **Version Management** — Browse, restore, delete, and purge individual object versions
 - **Version Scanner** — Background scan reveals hidden delete markers and ghost objects
 - **Bucket Management** — Versioning, lifecycle rules, CORS, ACLs, policies, tagging, object lock
@@ -150,3 +151,18 @@ Benchmarked on production data (557K objects, 167 TB, NetApp StorageGRID):
 | AI / MCP | FastMCP, 26 tools, Streamable HTTP + stdio transports |
 | CLI | Go 1.24, Cobra, system keyring integration |
 | Container | Multi-stage Docker (node:20 + python:3.12) |
+
+## Pricing Data Sources
+
+Cost estimates in the Storage Dashboard use a hybrid approach:
+
+| Provider | Source | Update Method |
+|----------|--------|---------------|
+| **AWS S3** | [AWS Bulk Pricing API](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/index.json) | Live fetch, cached daily |
+| **All others** | [s3compare.io](https://www.s3compare.io/) (CC BY 4.0) + provider docs | Static defaults, admin-overridable |
+
+**Why not all live?** Only AWS exposes a pricing API. Cloudflare R2, Backblaze B2, Wasabi, Leaseweb, and other S3-compatible providers do not have programmatic pricing endpoints. Their prices are published on marketing pages and change infrequently (<1x/year).
+
+**Community help wanted:** If you know of a provider that now offers a pricing API, or if any of the static prices are outdated, please [open an issue](https://github.com/AshwathStephen/sairo/issues) or submit a PR updating `backend/pricing.py`. We want cost estimates to be accurate and will integrate better data sources as they become available.
+
+Supported providers: AWS S3, Cloudflare R2, Backblaze B2, Wasabi, Leaseweb, DigitalOcean Spaces, Hetzner, Scaleway, OVHcloud, iDrive e2, Storj, MinIO, Ceph.

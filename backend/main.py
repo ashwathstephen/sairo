@@ -35,6 +35,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from pricing import (
+    get_storage_pricing, get_storage_price, estimate_monthly_cost as _estimate_monthly_cost,
+    detect_provider, get_all_providers, calculate_savings, STATIC_PRICING,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sairo")
@@ -637,6 +641,7 @@ def _init_db(bucket, endpoint_id=None):
         pass  # Column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prefix ON objects(prefix)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_depth ON objects(depth)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_last_modified ON objects(last_modified)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS crawl_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -3358,6 +3363,333 @@ def storage_history(bucket: str, prefix: str = "", days: int = 90, user: dict = 
     return {"prefix": prefix or "(all)", "history": [dict(r) for r in rows]}
 
 
+# ── API: Cost Breakdown ──────────────────────────────────────────────────────
+
+def _get_endpoint_provider(endpoint_id: str = None) -> tuple[str, str]:
+    """Return (provider, region) for the current or specified endpoint."""
+    with _get_users_db() as db:
+        if endpoint_id:
+            row = db.execute("SELECT endpoint_url, region FROM s3_endpoints WHERE id=?", (endpoint_id,)).fetchone()
+        else:
+            row = db.execute("SELECT endpoint_url, region FROM s3_endpoints WHERE is_default=1").fetchone()
+    if not row:
+        return "unknown", "us-east-1"
+    provider = detect_provider(row["endpoint_url"])
+    region = row["region"] or "us-east-1"
+    return provider, region
+
+
+@app.get("/api/pricing")
+def list_pricing(user: dict = Depends(get_current_user)):
+    """Return pricing for all known providers with source attribution."""
+    return {"providers": get_all_providers()}
+
+
+@app.get("/api/pricing/{provider}")
+def get_provider_pricing(provider: str, region: str = "us-east-1", user: dict = Depends(get_current_user)):
+    """Return pricing for a specific provider."""
+    prices = get_storage_pricing(provider, region)
+    source = "aws_live_api" if provider.lower() == "aws" else "s3compare.io (CC BY 4.0)"
+    return {"provider": provider, "region": region, "storage_classes": prices, "source": source}
+
+
+@app.get("/api/buckets/{bucket}/cost-breakdown")
+def cost_breakdown(
+    bucket: str,
+    provider: Optional[str] = None,
+    region: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Return per-folder cost estimates for a bucket."""
+    if not _is_index_ready(bucket):
+        raise HTTPException(503, "Index not ready")
+
+    # Auto-detect provider from endpoint if not specified
+    endpoint_id = getattr(getattr(threading.current_thread(), "_local", None), "endpoint_id", None)
+    if not provider or not region:
+        detected_provider, detected_region = _get_endpoint_provider(endpoint_id)
+        provider = provider or detected_provider
+        region = region or detected_region
+
+    price_per_gb = get_storage_price(provider, "standard", region)
+
+    # Get folder breakdown (reuse storage-breakdown logic)
+    with _get_db(bucket) as db:
+        has_stats = False
+        try:
+            stats_count = db.execute("SELECT COUNT(*) FROM folder_stats").fetchone()[0]
+            has_stats = stats_count > 0
+        except Exception:
+            pass
+
+        if has_stats:
+            rows = db.execute(
+                "SELECT prefix, object_count, total_size FROM folder_stats ORDER BY total_size DESC"
+            ).fetchall()
+        else:
+            rows = []
+
+    children = []
+    total_size = 0
+    total_cost = 0
+    for r in rows:
+        size = r["total_size"]
+        gb = size / (1024 ** 3)
+        monthly = round(gb * price_per_gb, 2)
+        total_size += size
+        total_cost += monthly
+        children.append({
+            "prefix": r["prefix"] or "(root files)",
+            "name": (r["prefix"] or "").rstrip("/") or "(files)",
+            "total_size": size,
+            "object_count": r["object_count"],
+            "monthly_cost": monthly,
+            "annual_cost": round(monthly * 12, 2),
+        })
+
+    total_gb = total_size / (1024 ** 3)
+
+    # All storage class options for comparison
+    all_classes = get_storage_pricing(provider, region)
+    class_comparison = {}
+    for cls_name, cls_price in all_classes.items():
+        cls_monthly = round(total_gb * cls_price, 2)
+        class_comparison[cls_name] = {
+            "price_per_gb_month": round(cls_price, 6),
+            "monthly_cost": cls_monthly,
+            "annual_cost": round(cls_monthly * 12, 2),
+        }
+
+    return {
+        "bucket": bucket,
+        "provider": provider,
+        "region": region,
+        "price_per_gb_month": round(price_per_gb, 6),
+        "total_size": total_size,
+        "total_gb": round(total_gb, 2),
+        "monthly_cost": round(total_cost, 2),
+        "annual_cost": round(total_cost * 12, 2),
+        "children": children,
+        "class_comparison": class_comparison,
+        "pricing_source": "aws_live_api" if provider == "aws" else "s3compare.io (CC BY 4.0)",
+    }
+
+
+# ── API: Optimization / Tiering Recommendations ──────────────────────────────
+
+@app.get("/api/buckets/{bucket}/optimization-summary")
+def optimization_summary(
+    bucket: str,
+    provider: Optional[str] = None,
+    region: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Return optimization recommendations: cold data, duplicates, lifecycle gaps, tiering savings."""
+    if not _is_index_ready(bucket):
+        raise HTTPException(503, "Index not ready")
+
+    endpoint_id = getattr(getattr(threading.current_thread(), "_local", None), "endpoint_id", None)
+    if not provider or not region:
+        detected_provider, detected_region = _get_endpoint_provider(endpoint_id)
+        provider = provider or detected_provider
+        region = region or detected_region
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _get_db(bucket) as db:
+        total_row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+        total_objects, total_size = total_row
+
+        if total_objects == 0:
+            return {"bucket": bucket, "total_objects": 0, "total_size": 0, "age_distribution": [],
+                    "cold_data": {}, "duplicates": {}, "lifecycle": {}, "tiering": {}}
+
+        # ── Age distribution by folder ──
+        age_thresholds = [7, 30, 90, 180, 365]
+        age_distribution = []
+        for days in age_thresholds:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            row = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE last_modified < ?", (cutoff,)
+            ).fetchone()
+            age_distribution.append({
+                "older_than_days": days,
+                "object_count": row[0],
+                "total_size": row[1],
+                "pct_objects": round(row[0] / total_objects * 100, 1) if total_objects else 0,
+                "pct_size": round(row[1] / total_size * 100, 1) if total_size else 0,
+            })
+
+        # ── Cold data by top-level folder ──
+        cold_threshold_days = 30
+        cold_cutoff = (datetime.now(timezone.utc) - timedelta(days=cold_threshold_days)).isoformat()
+        cold_folders = db.execute("""
+            SELECT
+                CASE WHEN INSTR(key, '/') > 0 THEN SUBSTR(key, 1, INSTR(key, '/')) ELSE '(root)' END as folder,
+                COUNT(*) as cold_count,
+                COALESCE(SUM(size), 0) as cold_size,
+                MIN(last_modified) as oldest
+            FROM objects
+            WHERE last_modified < ?
+            GROUP BY folder
+            ORDER BY cold_size DESC
+        """, (cold_cutoff,)).fetchall()
+
+        folder_totals = {}
+        for row in db.execute("""
+            SELECT
+                CASE WHEN INSTR(key, '/') > 0 THEN SUBSTR(key, 1, INSTR(key, '/')) ELSE '(root)' END as folder,
+                COUNT(*) as cnt, COALESCE(SUM(size), 0) as sz
+            FROM objects GROUP BY folder
+        """).fetchall():
+            folder_totals[row[0]] = {"count": row[1], "size": row[2]}
+
+        cold_data_folders = []
+        total_cold_size = 0
+        for row in cold_folders:
+            ft = folder_totals.get(row[0], {"count": 1, "size": 1})
+            cold_data_folders.append({
+                "folder": row[0],
+                "cold_objects": row[1],
+                "cold_size": row[2],
+                "total_objects": ft["count"],
+                "total_size": ft["size"],
+                "cold_pct": round(row[2] / ft["size"] * 100, 1) if ft["size"] else 0,
+                "oldest": row[3],
+            })
+            total_cold_size += row[2]
+
+        # ── Duplicate detection ──
+        dupe_rows = db.execute("""
+            SELECT
+                CASE WHEN INSTR(key, '/') > 0
+                     THEN SUBSTR(key, INSTR(key, '/') + 1) ELSE key END as filename,
+                size, COUNT(*) as cnt
+            FROM objects
+            WHERE size > 0
+            GROUP BY filename, size
+            HAVING cnt > 1
+            ORDER BY size * (cnt - 1) DESC
+            LIMIT 20
+        """).fetchall()
+
+        dupe_groups = []
+        total_dupe_waste = 0
+        for row in dupe_rows:
+            waste = row[1] * (row[2] - 1)
+            total_dupe_waste += waste
+            dupe_groups.append({
+                "filename": row[0],
+                "size": row[1],
+                "copies": row[2],
+                "wasted_bytes": waste,
+            })
+
+        # ── Lifecycle gap analysis ──
+        try:
+            lc_resp = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
+            lc_rules = lc_resp.get("Rules", [])
+            has_expiration = any("Expiration" in r for r in lc_rules)
+            has_noncurrent = any("NoncurrentVersionExpiration" in r for r in lc_rules)
+            has_abort = any("AbortIncompleteMultipartUpload" in r for r in lc_rules)
+            has_transition = any("Transition" in r or "Transitions" in r for r in lc_rules)
+        except ClientError:
+            lc_rules = []
+            has_expiration = has_noncurrent = has_abort = has_transition = False
+
+        # Build recommendations
+        recommendations = []
+        if not lc_rules:
+            recommendations.append({
+                "type": "no_lifecycle",
+                "severity": "high",
+                "message": "No lifecycle rules configured. Data will grow indefinitely.",
+                "suggestion": "Add an expiration rule to automatically clean up old data.",
+            })
+        if not has_expiration and total_objects > 1000:
+            recommendations.append({
+                "type": "no_expiration",
+                "severity": "high" if total_size > 100 * 1024**3 else "medium",
+                "message": f"No expiration rule. Bucket has {total_objects:,} objects ({round(total_size/1024**3, 1)} GB) that will never be cleaned up.",
+                "suggestion": "Consider adding an expiration rule based on your data retention requirements.",
+            })
+        if not has_abort:
+            recommendations.append({
+                "type": "no_abort_multipart",
+                "severity": "low",
+                "message": "No rule to auto-abort incomplete multipart uploads.",
+                "suggestion": "Add an AbortIncompleteMultipartUpload rule (e.g., 7 days) to prevent orphaned uploads from wasting space.",
+            })
+        if not has_noncurrent:
+            try:
+                v_resp = s3.get_bucket_versioning(Bucket=bucket)
+                if v_resp.get("Status") == "Enabled":
+                    recommendations.append({
+                        "type": "versioned_no_cleanup",
+                        "severity": "medium",
+                        "message": "Versioning is enabled but no noncurrent version cleanup rule exists.",
+                        "suggestion": "Add a NoncurrentVersionExpiration rule to clean up old versions.",
+                    })
+            except ClientError:
+                pass
+
+        # ── Tiering savings (only for providers with multiple storage classes) ──
+        all_classes = get_storage_pricing(provider, region)
+        tiering = {}
+        if len(all_classes) > 1 and total_cold_size > 0:
+            current_price = get_storage_price(provider, "standard", region)
+            best_savings = 0
+            best_class = None
+            for cls_name, cls_price in all_classes.items():
+                if cls_name == "standard" or cls_name == "intelligent_tiering":
+                    continue
+                savings_info = calculate_savings(total_size, total_cold_size, provider, "standard", cls_name, region)
+                if savings_info["monthly_savings"] > best_savings:
+                    best_savings = savings_info["monthly_savings"]
+                    best_class = cls_name
+                    tiering = {
+                        "recommended_class": cls_name,
+                        "cold_data_size": total_cold_size,
+                        "cold_data_pct": round(total_cold_size / total_size * 100, 1),
+                        **savings_info,
+                    }
+            if best_class:
+                recommendations.append({
+                    "type": "tiering_opportunity",
+                    "severity": "medium",
+                    "message": f"Moving {round(total_cold_size/1024**3, 1)} GB of cold data (>{cold_threshold_days}d) to {best_class.replace('_', ' ')} could save ${best_savings:.2f}/mo.",
+                    "suggestion": f"Add a Transition rule to move objects to {best_class.replace('_', ' ')} after {cold_threshold_days} days.",
+                })
+
+    return {
+        "bucket": bucket,
+        "provider": provider,
+        "region": region,
+        "total_objects": total_objects,
+        "total_size": total_size,
+        "age_distribution": age_distribution,
+        "cold_data": {
+            "threshold_days": cold_threshold_days,
+            "total_cold_size": total_cold_size,
+            "cold_pct": round(total_cold_size / total_size * 100, 1) if total_size else 0,
+            "folders": cold_data_folders,
+        },
+        "duplicates": {
+            "groups": dupe_groups,
+            "total_wasted": total_dupe_waste,
+        },
+        "lifecycle": {
+            "rule_count": len(lc_rules),
+            "has_expiration": has_expiration,
+            "has_noncurrent": has_noncurrent,
+            "has_abort": has_abort,
+            "has_transition": has_transition,
+            "recommendations": recommendations,
+        },
+        "tiering": tiering,
+    }
+
+
 # ── API: Crawl Status ──────────────────────────────────────────────────────
 
 @app.get("/api/buckets/{bucket}/crawl-status")
@@ -4152,6 +4484,9 @@ def get_lifecycle(bucket: str, user: dict = Depends(get_current_user)):
             if "Expiration" in r: rule["expiration_days"] = r["Expiration"].get("Days")
             if "NoncurrentVersionExpiration" in r: rule["noncurrent_days"] = r["NoncurrentVersionExpiration"].get("NoncurrentDays")
             if "AbortIncompleteMultipartUpload" in r: rule["abort_days"] = r["AbortIncompleteMultipartUpload"].get("DaysAfterInitiation")
+            if "Transition" in r:
+                rule["transition_days"] = r["Transition"].get("Days")
+                rule["transition_storage_class"] = r["Transition"].get("StorageClass")
             rules.append(rule)
         return {"rules": rules}
     except ClientError as e:
@@ -4176,6 +4511,8 @@ class LifecycleRule(BaseModel):
     expiration_days: Optional[int] = None
     noncurrent_days: Optional[int] = None
     abort_days: Optional[int] = None
+    transition_days: Optional[int] = None
+    transition_storage_class: Optional[str] = None
 
 class LifecycleRequest(BaseModel):
     rules: list[LifecycleRule]
@@ -4191,6 +4528,8 @@ def put_lifecycle(bucket: str, req: LifecycleRequest, user: dict = Depends(requi
             rule["NoncurrentVersionExpiration"] = {"NoncurrentDays": r.noncurrent_days}
         if r.abort_days is not None:
             rule["AbortIncompleteMultipartUpload"] = {"DaysAfterInitiation": r.abort_days}
+        if r.transition_days is not None and r.transition_storage_class:
+            rule["Transition"] = {"Days": r.transition_days, "StorageClass": r.transition_storage_class}
         rules.append(rule)
     try:
         s3.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
@@ -4406,23 +4745,98 @@ def get_object_legal_hold(bucket: str, key: str, user: dict = Depends(get_curren
 
 # ── Multipart Uploads ────────────────────────────────────────────────────────
 
+def _list_all_multipart_uploads(bucket: str) -> list:
+    """Paginate through all incomplete multipart uploads for a bucket."""
+    all_uploads = []
+    kwargs = {"Bucket": bucket}
+    while True:
+        resp = s3.list_multipart_uploads(**kwargs)
+        all_uploads.extend(resp.get("Uploads", []))
+        if not resp.get("IsTruncated"):
+            break
+        kwargs["KeyMarker"] = resp["NextKeyMarker"]
+        kwargs["UploadIdMarker"] = resp["NextUploadIdMarker"]
+    return all_uploads
+
 @app.get("/api/buckets/{bucket}/multipart-uploads")
-def list_multipart_uploads(bucket: str, user: dict = Depends(get_current_user)):
-    resp = s3.list_multipart_uploads(Bucket=bucket)
-    uploads = [{"key": u["Key"], "upload_id": u["UploadId"], "initiated": u["Initiated"].isoformat()}
-               for u in resp.get("Uploads", [])]
-    return {"uploads": uploads, "count": len(uploads)}
+def list_multipart_uploads(bucket: str, details: bool = False, user: dict = Depends(get_current_user)):
+    raw_uploads = _list_all_multipart_uploads(bucket)
+    now = datetime.now(timezone.utc)
+    uploads = []
+    total_size = 0
+    stale_count = 0
+    stale_size = 0
+    for u in raw_uploads:
+        initiated = u["Initiated"]
+        age_hours = round((now - initiated).total_seconds() / 3600, 1)
+        stale = age_hours >= 24
+        entry = {
+            "key": u["Key"],
+            "upload_id": u["UploadId"],
+            "initiated": initiated.isoformat(),
+            "initiator": u.get("Initiator", {}).get("DisplayName", ""),
+            "age_hours": age_hours,
+            "stale": stale,
+        }
+        if details:
+            part_count = 0
+            size = 0
+            try:
+                parts_resp = s3.list_parts(Bucket=bucket, Key=u["Key"], UploadId=u["UploadId"])
+                parts = parts_resp.get("Parts", [])
+                part_count = len(parts)
+                size = sum(p["Size"] for p in parts)
+            except ClientError:
+                pass
+            entry["part_count"] = part_count
+            entry["size"] = size
+            total_size += size
+            if stale:
+                stale_size += size
+        if stale:
+            stale_count += 1
+        uploads.append(entry)
+    result = {"uploads": uploads, "count": len(uploads), "stale_count": stale_count}
+    if details:
+        result["total_size"] = total_size
+        result["stale_size"] = stale_size
+    return result
 
 
 class AbortUploadRequest(BaseModel):
     key: str
     upload_id: str
+    force: bool = False  # required to abort uploads less than 1 hour old
 
 @app.post("/api/buckets/{bucket}/abort-multipart")
 def abort_multipart(bucket: str, req: AbortUploadRequest, user: dict = Depends(require_admin)):
+    # Safety check: refuse to abort recent uploads unless force=true
+    if not req.force:
+        for u in _list_all_multipart_uploads(bucket):
+            if u["UploadId"] == req.upload_id:
+                age_hours = (datetime.now(timezone.utc) - u["Initiated"]).total_seconds() / 3600
+                if age_hours < 1:
+                    raise HTTPException(400, f"Upload is only {age_hours:.1f}h old and may be in progress. Use force=true to abort.")
+                break
     s3.abort_multipart_upload(Bucket=bucket, Key=req.key, UploadId=req.upload_id)
     _audit("abort_multipart", user["username"], bucket=bucket, details=f"key={req.key}")
     return {"aborted": req.upload_id}
+
+@app.post("/api/buckets/{bucket}/abort-all-multipart")
+def abort_all_multipart(bucket: str, min_age_hours: float = 24, user: dict = Depends(require_admin)):
+    """Abort stale multipart uploads. Only uploads older than min_age_hours (default 24) are aborted."""
+    now = datetime.now(timezone.utc)
+    aborted = []
+    skipped = 0
+    for u in _list_all_multipart_uploads(bucket):
+        age_hours = (now - u["Initiated"]).total_seconds() / 3600
+        if age_hours >= min_age_hours:
+            s3.abort_multipart_upload(Bucket=bucket, Key=u["Key"], UploadId=u["UploadId"])
+            aborted.append(u["UploadId"])
+        else:
+            skipped += 1
+    _audit("abort_all_multipart", user["username"], bucket=bucket, details=f"aborted={len(aborted)} stale uploads, skipped={skipped} active")
+    return {"aborted": aborted, "count": len(aborted), "skipped": skipped}
 
 
 # ── Copy / Rename ────────────────────────────────────────────────────────────
@@ -4607,6 +5021,10 @@ def multipart_compat(user: dict = Depends(get_current_user)):
 @app.post("/api/abort-multipart")
 def abort_multipart_compat(req: AbortUploadRequest, user: dict = Depends(require_admin)):
     return abort_multipart(_require_default_bucket(), req)
+
+@app.post("/api/abort-all-multipart")
+def abort_all_multipart_compat(user: dict = Depends(require_admin)):
+    return abort_all_multipart(_require_default_bucket())
 
 @app.get("/api/bucket-info")
 def bucket_info_compat(user: dict = Depends(get_current_user)):

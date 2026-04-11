@@ -185,6 +185,29 @@ export async function getStorageHistory(bucket, prefix = "", days = 90) {
   return res.json();
 }
 
+export async function getCostBreakdown(bucket, provider = "", region = "") {
+  const params = new URLSearchParams();
+  if (provider) params.set("provider", provider);
+  if (region) params.set("region", region);
+  const res = await apiFetch(`${bucketBase(bucket)}/cost-breakdown?${params}`);
+  if (!res.ok) throw new Error(`Cost breakdown failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getPricing() {
+  const res = await apiFetch("/api/pricing");
+  return res.json();
+}
+
+export async function getOptimizationSummary(bucket, provider = "", region = "") {
+  const params = new URLSearchParams();
+  if (provider) params.set("provider", provider);
+  if (region) params.set("region", region);
+  const res = await apiFetch(`${bucketBase(bucket)}/optimization-summary?${params}`);
+  if (!res.ok) throw new Error(`Optimization summary failed: ${res.status}`);
+  return res.json();
+}
+
 // ── Bucket Config APIs ──────────────────────────────────
 
 export async function getVersioning(bucket) {
@@ -317,8 +340,8 @@ export async function putObjectAcl(bucket, key, acl) {
   return res.json();
 }
 
-export async function getMultipartUploads(bucket) {
-  const res = await apiFetch(`${bucketBase(bucket)}/multipart-uploads`);
+export async function getMultipartUploads(bucket, details = false) {
+  const res = await apiFetch(`${bucketBase(bucket)}/multipart-uploads${details ? "?details=true" : ""}`);
   return res.json();
 }
 
@@ -327,6 +350,13 @@ export async function abortMultipart(bucket, key, uploadId) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key, upload_id: uploadId }),
+  });
+  return res.json();
+}
+
+export async function abortAllMultipart(bucket) {
+  const res = await apiFetch(`${bucketBase(bucket)}/abort-all-multipart`, {
+    method: "POST",
   });
   return res.json();
 }

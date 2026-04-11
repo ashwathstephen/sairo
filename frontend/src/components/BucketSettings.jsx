@@ -6,7 +6,7 @@ import {
   getCors, putCors, deleteCors,
   getBucketPolicy, putBucketPolicy, deleteBucketPolicy,
   getBucketAcl, putBucketAcl, getBucketTagging, putBucketTagging,
-  getMultipartUploads, abortMultipart, getObjectLock,
+  getMultipartUploads, abortMultipart, abortAllMultipart, getObjectLock,
 } from "../api";
 
 export default function BucketSettings({ bucket, onClose, role }) {
@@ -39,10 +39,9 @@ export default function BucketSettings({ bucket, onClose, role }) {
       getBucketPolicy(bucket).catch(() => ({ policy: null })),
       getBucketAcl(bucket).catch(() => ({ owner: {}, grants: [] })),
       getBucketTagging(bucket).catch(() => ({ tags: {} })),
-      getMultipartUploads(bucket),
       getObjectLock(bucket).catch(() => ({ enabled: false, rule: {} })),
       getCrawlStatus(bucket),
-    ]).then(([v, l, c, p, a, t, m, ol, cr]) => {
+    ]).then(([v, l, c, p, a, t, ol, cr]) => {
       setVersioning(v);
       setLifecycle(l);
       setLifecycleRules((l.rules || []).map(r => ({ ...r })));
@@ -52,7 +51,6 @@ export default function BucketSettings({ bucket, onClose, role }) {
       setPolicyText(p.policy ? JSON.stringify(p.policy, null, 2) : "");
       setAcl(a);
       setTags(t);
-      setMultipart(m);
       setObjectLock(ol);
       setCrawl(cr);
       // Detect canned ACL
@@ -67,10 +65,37 @@ export default function BucketSettings({ bucket, onClose, role }) {
     });
   }, [bucket]);
 
+  // Lazy-load multipart data only when tab is clicked
+  const [multipartLoading, setMultipartLoading] = useState(false);
+  useEffect(() => {
+    if (activeTab === "multipart" && !multipart && !multipartLoading) {
+      setMultipartLoading(true);
+      getMultipartUploads(bucket, true).then(m => {
+        setMultipart(m);
+        setMultipartLoading(false);
+      });
+    }
+  }, [activeTab]);
+
+  const [confirmAbortAll, setConfirmAbortAll] = useState(false);
+  const [aborting, setAborting] = useState(false);
+
   const handleAbortUpload = async (key, uploadId) => {
     await abortMultipart(bucket, key, uploadId);
-    const res = await getMultipartUploads(bucket);
+    const res = await getMultipartUploads(bucket, true);
     setMultipart(res);
+  };
+
+  const handleAbortAll = async () => {
+    setAborting(true);
+    try {
+      await abortAllMultipart(bucket);
+      const res = await getMultipartUploads(bucket, true);
+      setMultipart(res);
+    } finally {
+      setAborting(false);
+      setConfirmAbortAll(false);
+    }
   };
 
   const handleRecrawl = async () => {
@@ -466,25 +491,73 @@ export default function BucketSettings({ bucket, onClose, role }) {
 
             {activeTab === "multipart" && (
               <div>
-                <h3>Incomplete Multipart Uploads ({multipart.count})</h3>
+                {multipartLoading && <p className="muted">Loading multipart uploads...</p>}
+                {multipart && <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <h3 style={{ margin: 0 }}>Incomplete Multipart Uploads ({multipart.count})</h3>
+                  {isAdmin && multipart.stale_count > 0 && (
+                    <button className="btn-danger btn-xs" onClick={() => setConfirmAbortAll(true)} disabled={aborting}>
+                      {aborting ? "Aborting..." : `Abort ${multipart.stale_count} Stale`}
+                    </button>
+                  )}
+                </div>
+                {multipart.count > 0 && (
+                  <p className="muted" style={{ margin: "0 0 8px" }}>
+                    {multipart.stale_count > 0
+                      ? <>Stale uploads ({">"}24h): <strong>{multipart.stale_count}</strong> using <strong>{formatSize(multipart.stale_size)}</strong></>
+                      : <>All {multipart.count} uploads are recent — likely in-progress pipeline writes</>
+                    }
+                  </p>
+                )}
                 {multipart.count === 0 ? (
                   <p className="muted">No incomplete multipart uploads</p>
                 ) : (
-                  <table className="info-table">
-                    <thead><tr><th>Key</th><th>Started</th><th>Action</th></tr></thead>
-                    <tbody>
-                      {multipart.uploads.map((u) => (
-                        <tr key={u.upload_id}>
-                          <td className="mono" title={u.key}>{u.key.split("/").pop()}</td>
-                          <td>{new Date(u.initiated).toLocaleString()}</td>
-                          <td>
-                            {isAdmin && <button className="btn-danger btn-xs" onClick={() => handleAbortUpload(u.key, u.upload_id)}>Abort</button>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {multipart.uploads.map((u) => {
+                      const filename = u.key.split("/").pop();
+                      const folder = u.key.slice(0, u.key.length - filename.length);
+                      const age = u.age_hours < 1 ? `${Math.round(u.age_hours * 60)}m ago` : u.age_hours < 48 ? `${Math.round(u.age_hours)}h ago` : `${Math.round(u.age_hours / 24)}d ago`;
+                      return (
+                        <div key={u.upload_id} style={{
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          background: u.stale ? "rgba(239, 68, 68, 0.06)" : "rgba(255,255,255,0.03)",
+                          border: u.stale ? "1px solid rgba(239, 68, 68, 0.2)" : "1px solid rgba(255,255,255,0.06)",
+                        }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="mono" style={{ fontSize: 13, fontWeight: 500, wordBreak: "break-all" }}>{filename}</div>
+                              {folder && <div className="muted" style={{ fontSize: 11, marginTop: 2, wordBreak: "break-all" }}>{folder}</div>}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                              {u.stale
+                                ? <span style={{ color: "var(--danger, #ef4444)", fontSize: 11, fontWeight: 600, padding: "2px 6px", borderRadius: 4, background: "rgba(239, 68, 68, 0.1)" }}>Stale</span>
+                                : <span style={{ color: "var(--success, #22c55e)", fontSize: 11, fontWeight: 600, padding: "2px 6px", borderRadius: 4, background: "rgba(34, 197, 94, 0.1)" }}>Active</span>
+                              }
+                              {isAdmin && u.stale && <button className="btn-danger btn-xs" onClick={() => handleAbortUpload(u.key, u.upload_id)}>Abort</button>}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 12, color: "var(--text-muted, #888)" }}>
+                            <span>{u.size != null ? formatSize(u.size) : "—"}</span>
+                            <span>{u.part_count != null ? `${u.part_count} parts` : "—"}</span>
+                            <span>{age}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
+                {confirmAbortAll && (
+                  <ConfirmDialog
+                    title="Abort Stale Multipart Uploads"
+                    message={`This will abort ${multipart.stale_count} stale upload${multipart.stale_count !== 1 ? "s" : ""} (older than 24h) in "${bucket}", freeing ${formatSize(multipart.stale_size)}. ${multipart.count - multipart.stale_count} active uploads will not be touched. This cannot be undone.`}
+                    confirmLabel={`Abort ${multipart.stale_count} Stale`}
+                    variant="danger"
+                    onConfirm={handleAbortAll}
+                    onCancel={() => setConfirmAbortAll(false)}
+                  />
+                )}
+                </>}
               </div>
             )}
 
