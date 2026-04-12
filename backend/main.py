@@ -68,6 +68,26 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(status_code=429, content={"detail": "Too many requests. Please slow down."})
 
 
+# ── Security Headers Middleware ────────────────────────────────────────────
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' blob: data:; "
+        "connect-src 'self'; "
+        "frame-src blob:;"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 # ── Multi-Endpoint URL Rewriting Middleware ─────────────────────────────────
 
 @app.middleware("http")
@@ -156,7 +176,13 @@ def _check_login_rate(ip: str):
 async def s3_error_handler(request, exc):
     """Convert unhandled S3 ClientError into user-friendly JSON responses."""
     code = exc.response.get("Error", {}).get("Code", "Unknown")
-    msg = exc.response.get("Error", {}).get("Message", str(exc))
+    msg = exc.response.get("Error", {}).get("Message", "")
+    # Sanitize: strip potential internal details (ARNs, account IDs, internal endpoints)
+    import re
+    msg = re.sub(r'arn:[^\s,]+', '[ARN]', msg)
+    msg = re.sub(r'\d{12}', '[ACCOUNT]', msg)
+    if not msg:
+        msg = code
     status_map = {
         "NoSuchKey": 404, "NotFound": 404, "NoSuchBucket": 404,
         "NoSuchUpload": 404, "NoSuchBucketPolicy": 404,
@@ -201,7 +227,16 @@ ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS")
 if not ADMIN_PASS and AUTH_MODE == "local":
     ADMIN_PASS = secrets.token_urlsafe(16)
-    log.warning("ADMIN_PASS not set — generated temporary password: %s", ADMIN_PASS)
+    log.warning("ADMIN_PASS not set — generated temporary password. Retrieve it with: docker logs <container> 2>&1 | grep GENERATED")
+    # Write to file inside container for secure retrieval
+    _pass_file = os.path.join(DB_DIR, ".generated_password")
+    try:
+        with open(_pass_file, "w") as _pf:
+            _pf.write(ADMIN_PASS)
+        os.chmod(_pass_file, 0o600)
+        log.info("GENERATED admin password written to %s", _pass_file)
+    except OSError:
+        pass
 elif not ADMIN_PASS:
     ADMIN_PASS = secrets.token_urlsafe(32)  # Set a strong random password in s3 mode (not displayed)
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
@@ -1988,9 +2023,9 @@ class TwoFactorDisableRequest(BaseModel):
 def twofa_setup(user: dict = Depends(get_current_user)):
     """Generate TOTP secret. Does NOT enable 2FA yet — user must verify a code first."""
     secret = pyotp.random_base32()
-    # Store the pending secret (not yet enabled)
+    # Store the pending secret encrypted at rest
     with _get_users_db() as db:
-        db.execute("UPDATE users SET totp_secret=? WHERE username=?", (secret, user["username"]))
+        db.execute("UPDATE users SET totp_secret=? WHERE username=?", (_encrypt(secret), user["username"]))
         db.commit()
     totp = pyotp.TOTP(secret)
     app_name = os.environ.get("APP_NAME", "Sairo")
@@ -2007,7 +2042,7 @@ def twofa_enable(req: TwoFactorVerifyRequest, user: dict = Depends(get_current_u
         raise HTTPException(400, "Call /api/auth/2fa/setup first")
     if row["totp_enabled"]:
         raise HTTPException(400, "2FA is already enabled")
-    totp = pyotp.TOTP(row["totp_secret"])
+    totp = pyotp.TOTP(_decrypt(row["totp_secret"]))
     if not totp.verify(req.code, valid_window=1):
         raise HTTPException(400, "Invalid TOTP code")
     # Generate 10 recovery codes
@@ -2059,6 +2094,7 @@ def twofa_admin_reset(username: str, user: dict = Depends(require_admin)):
     return {"reset": True, "username": username}
 
 @app.post("/api/auth/2fa/verify")
+@limiter.limit("5/minute")
 def twofa_verify(req: TwoFactorVerifyRequest, request: Request):
     """Verify TOTP code during login (second step). Requires pending 2FA token in cookie."""
     token = request.cookies.get("access_token")
@@ -2076,7 +2112,7 @@ def twofa_verify(req: TwoFactorVerifyRequest, request: Request):
                          (username,)).fetchone()
     if not row or not row["totp_enabled"] or not row["totp_secret"]:
         raise HTTPException(400, "2FA not configured")
-    totp = pyotp.TOTP(row["totp_secret"])
+    totp = pyotp.TOTP(_decrypt(row["totp_secret"]))
     if not totp.verify(req.code, valid_window=1):
         raise HTTPException(401, "Invalid TOTP code")
     # Issue full session token
@@ -2092,6 +2128,7 @@ def twofa_verify(req: TwoFactorVerifyRequest, request: Request):
     return response
 
 @app.post("/api/auth/2fa/recover")
+@limiter.limit("5/minute")
 def twofa_recover(req: TwoFactorVerifyRequest, request: Request):
     """Use a recovery code during login (second step). Each code is one-use."""
     token = request.cookies.get("access_token")
@@ -2292,9 +2329,11 @@ def list_share_links(bucket: str = "", user: dict = Depends(get_current_user)):
 @app.delete("/api/share-links/{link_id}")
 def delete_share_link(link_id: int, user: dict = Depends(get_current_user)):
     with _get_users_db() as db:
-        row = db.execute("SELECT id FROM share_links WHERE id=?", (link_id,)).fetchone()
+        row = db.execute("SELECT id, created_by FROM share_links WHERE id=?", (link_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Share link not found")
+        if user["role"] != "admin" and row["created_by"] != user["username"]:
+            raise HTTPException(403, "You can only delete your own share links")
         db.execute("DELETE FROM share_links WHERE id=?", (link_id,))
         db.commit()
     _audit("delete_share_link", user["username"], details=f"link_id={link_id}")
@@ -2874,7 +2913,7 @@ def system_info(user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/health-detail")
-def health_detail(user: dict = Depends(get_current_user)):
+def health_detail(user: dict = Depends(require_admin)):
     """Comprehensive health check with S3 connectivity, DB status, crawler state, uptime."""
     result = {
         "status": "ok",
@@ -3117,17 +3156,19 @@ def list_all_buckets(user: dict = Depends(get_current_user)):
 # ── API: Buckets ──────────────────────────────────────────────────────────
 
 _bucket_list_cache: dict = {"data": None, "ts": 0}
+_bucket_list_cache_lock = threading.Lock()
 _BUCKET_LIST_TTL = 30  # seconds
 
 @app.get("/api/buckets")
 def list_buckets(user: dict = Depends(get_current_user)):
     now = time.time()
-    if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
-        resp = _bucket_list_cache["data"]
-    else:
-        resp = s3.list_buckets()
-        _bucket_list_cache["data"] = resp
-        _bucket_list_cache["ts"] = now
+    with _bucket_list_cache_lock:
+        if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
+            resp = _bucket_list_cache["data"]
+        else:
+            resp = s3.list_buckets()
+            _bucket_list_cache["data"] = resp
+            _bucket_list_cache["ts"] = now
     # Non-admin: only show buckets with explicit permissions
     allowed = None
     if user["role"] != "admin":
@@ -3516,12 +3557,17 @@ def storage_history(bucket: str, prefix: str = "", days: int = 90, user: dict = 
     days = max(1, min(days, 365))
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _get_db(bucket) as db:
+        # Use the latest snapshot per day (not MAX which picks peak, not latest)
         rows = db.execute(
-            "SELECT DATE(timestamp) as day, MAX(object_count) as object_count, MAX(total_size) as total_size, MAX(timestamp) as timestamp "
-            "FROM storage_history "
-            "WHERE prefix = ? AND timestamp >= ? "
-            "GROUP BY day ORDER BY day ASC",
-            (prefix, cutoff),
+            "SELECT DATE(h.timestamp) as day, h.object_count, h.total_size, h.timestamp "
+            "FROM storage_history h "
+            "INNER JOIN ("
+            "  SELECT DATE(timestamp) as d, MAX(timestamp) as latest "
+            "  FROM storage_history WHERE prefix = ? AND timestamp >= ? GROUP BY d"
+            ") sub ON DATE(h.timestamp) = sub.d AND h.timestamp = sub.latest "
+            "WHERE h.prefix = ? "
+            "ORDER BY day ASC",
+            (prefix, cutoff, prefix),
         ).fetchall()
     return {"prefix": prefix or "(all)", "history": [dict(r) for r in rows]}
 
@@ -4304,6 +4350,7 @@ def delete_folder(bucket: str, req: DeleteFolderRequest, user: dict = Depends(re
 
 MULTIPART_THRESHOLD = 5 * 1024 * 1024  # 5 MB
 MULTIPART_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB per part
+MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", str(5 * 1024 * 1024 * 1024)))  # 5 GB default
 
 
 def _upload_multipart(bucket, key, file_obj, endpoint_id=None):
@@ -4349,14 +4396,21 @@ async def upload_files(bucket: str, request: Request, prefix: str = Form(""), fi
 
     # Read all file contents first (async), then upload to S3 in parallel
     file_data = []
+    total_bytes = 0
     for f in files:
         key = prefix + f.filename
         first_chunk = await f.read(MULTIPART_THRESHOLD + 1)
         if len(first_chunk) <= MULTIPART_THRESHOLD:
+            total_bytes += len(first_chunk)
+            if total_bytes > MAX_UPLOAD_SIZE:
+                raise HTTPException(413, f"Upload exceeds maximum size of {MAX_UPLOAD_SIZE // (1024*1024)}MB")
             file_data.append((key, first_chunk, len(first_chunk), False))
         else:
             remainder = await f.read()
             full_content = first_chunk + remainder
+            total_bytes += len(full_content)
+            if total_bytes > MAX_UPLOAD_SIZE:
+                raise HTTPException(413, f"Upload exceeds maximum size of {MAX_UPLOAD_SIZE // (1024*1024)}MB")
             file_data.append((key, full_content, len(full_content), True))
 
     def _put_one(key, body, size, is_large):
@@ -5132,12 +5186,24 @@ def _require_default_bucket():
         raise HTTPException(400, "No default bucket configured (set S3_BUCKET env var)")
     return _DEFAULT_BUCKET
 
+def _check_compat_bucket_read(user: dict):
+    """Check the user has read access to the default bucket (compat endpoints bypass middleware)."""
+    if user["role"] == "admin":
+        return
+    with _get_users_db() as db:
+        row = db.execute("SELECT permission FROM bucket_permissions WHERE username=? AND bucket=?",
+                         (user["username"], _DEFAULT_BUCKET)).fetchone()
+    if not row:
+        raise HTTPException(403, f"No access to bucket '{_DEFAULT_BUCKET}'")
+
 @app.get("/api/list")
 def list_objects_compat(prefix: str = "", user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return list_objects(_require_default_bucket(), prefix)
 
 @app.get("/api/search")
 def search_compat(q: str = Query(..., min_length=1), prefix: str = "", limit: int = 200, user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return search_objects(_require_default_bucket(), q, prefix, limit)
 
 @app.get("/api/crawl-status")
@@ -5152,14 +5218,17 @@ def trigger_crawl_compat(user: dict = Depends(require_admin)):
 
 @app.get("/api/folder-size")
 def folder_size_compat(prefix: str = "", user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return folder_size(_require_default_bucket(), prefix)
 
 @app.get("/api/storage-breakdown")
 def storage_breakdown_compat(prefix: str = "", user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return storage_breakdown(_require_default_bucket(), prefix)
 
 @app.get("/api/download")
 def download_compat(key: str, user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return download_object(_require_default_bucket(), key)
 
 @app.delete("/api/objects")
@@ -5172,30 +5241,37 @@ async def upload_compat(request: Request, prefix: str = Form(""), files: list[Up
 
 @app.get("/api/object-info")
 def object_info_compat(key: str, user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return object_info(_require_default_bucket(), key)
 
 @app.get("/api/object-versions")
 def object_versions_compat(key: str, user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return object_versions(_require_default_bucket(), key)
 
 @app.get("/api/presigned-url")
 def presigned_url_compat(key: str, expires: int = 3600, user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return get_presigned_url(_require_default_bucket(), key, expires)
 
 @app.get("/api/bucket-versioning")
 def versioning_compat(user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return get_versioning(_require_default_bucket())
 
 @app.get("/api/bucket-lifecycle")
 def lifecycle_compat(user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return get_lifecycle(_require_default_bucket())
 
 @app.get("/api/bucket-cors")
 def cors_compat(user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return get_cors(_require_default_bucket())
 
 @app.get("/api/multipart-uploads")
 def multipart_compat(user: dict = Depends(get_current_user)):
+    _check_compat_bucket_read(user)
     return list_multipart_uploads(_require_default_bucket())
 
 @app.post("/api/abort-multipart")

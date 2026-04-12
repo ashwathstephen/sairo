@@ -152,10 +152,36 @@ test.describe('Bucket Settings', () => {
 
   test('7.13 Multipart tab — shows multipart state', async ({ page }) => {
     await clickTab(page, 'Multipart');
-    // Either shows uploads with Abort buttons or "No incomplete" message
-    const abortBtn = page.locator(`${SEL.modal} button.btn-danger:has-text("Abort")`).first();
+    // Either shows uploads with stale/active classification or "No incomplete" message
+    const staleInfo = page.locator(`${SEL.modal} :has-text("Stale")`).first();
     const emptyMsg = page.locator(`${SEL.modal} :has-text("No incomplete")`).first();
-    await expect(abortBtn.or(emptyMsg)).toBeVisible({ timeout: 5_000 });
+    const loadingMsg = page.locator(`${SEL.modal} .spinner`).first();
+    // Wait for either state to resolve (lazy-loaded)
+    await page.waitForFunction(() => {
+      const modal = document.querySelector('.modal');
+      if (!modal) return false;
+      return modal.textContent?.includes('No incomplete')
+        || modal.textContent?.includes('Stale')
+        || modal.textContent?.includes('upload');
+    }, { timeout: 10_000 });
+    await expect(staleInfo.or(emptyMsg)).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('7.13b Multipart tab — stale uploads show Abort Stale button for admin', async ({ page }) => {
+    await clickTab(page, 'Multipart');
+    // Wait for multipart data to load
+    await page.waitForFunction(() => {
+      const modal = document.querySelector('.modal');
+      if (!modal) return false;
+      return !modal.querySelector('.spinner')
+        || modal.textContent?.includes('No incomplete');
+    }, { timeout: 10_000 });
+
+    // If stale uploads exist, Abort Stale button should be visible
+    const staleBtn = page.locator(`${SEL.modal} button.btn-danger:has-text("Abort")`).first();
+    const emptyMsg = page.locator(`${SEL.modal} :has-text("No incomplete")`).first();
+    // Either stale abort button or no uploads — both are valid
+    await expect(staleBtn.or(emptyMsg)).toBeVisible({ timeout: 5_000 });
   });
 
   test('7.14 Lifecycle tab — save lifecycle rules', async ({ page }) => {

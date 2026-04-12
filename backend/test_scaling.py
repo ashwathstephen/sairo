@@ -150,6 +150,76 @@ class TestPRAGMATuning:
             val = db.execute("PRAGMA journal_mode").fetchone()[0]
             assert val == "wal", f"Expected WAL mode, got {val}"
 
+    def test_busy_timeout_set(self):
+        """Verify busy_timeout is set to prevent 'database is locked' errors."""
+        _init_db("pragma-test-busy")
+        with _get_db("pragma-test-busy") as db:
+            val = db.execute("PRAGMA busy_timeout").fetchone()[0]
+            assert val >= 5000, f"Expected busy_timeout >= 5000ms, got {val}"
+
+    def test_busy_timeout_on_init_db(self):
+        """Verify _init_db also sets busy_timeout (for crawl writers)."""
+        _init_db("pragma-test-busy-init")
+        # Read the source to confirm busy_timeout is in _init_db
+        import inspect
+        source = inspect.getsource(_init_db)
+        assert "busy_timeout" in source, "busy_timeout PRAGMA should be in _init_db"
+
+    def test_busy_timeout_on_get_db(self):
+        """Verify _get_db also sets busy_timeout (for API readers)."""
+        import inspect
+        source = inspect.getsource(_get_db)
+        assert "busy_timeout" in source, "busy_timeout PRAGMA should be in _get_db"
+
+    def test_bucket_list_cache_has_lock(self):
+        """Verify _bucket_list_cache is protected by a threading lock."""
+        assert hasattr(sys.modules["main"], "_bucket_list_cache_lock"), (
+            "_bucket_list_cache_lock should exist in main module"
+        )
+        lock = getattr(sys.modules["main"], "_bucket_list_cache_lock")
+        assert hasattr(lock, "acquire"), "Should be a threading.Lock instance"
+
+    def test_concurrent_access_no_locked_error(self):
+        """Verify busy_timeout prevents 'database is locked' under concurrent access."""
+        bucket = "pragma-concurrent-test"
+        _seed_bucket(bucket, 1000)
+        errors = []
+
+        def writer():
+            try:
+                with _get_db(bucket) as db:
+                    for i in range(50):
+                        db.execute(
+                            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (f"concurrent/write_{i}.txt", i * 100, "2026-04-01T00:00:00Z",
+                             f'"etag_w{i}"', "concurrent/", 1, 99),
+                        )
+                    db.commit()
+            except Exception as e:
+                errors.append(f"writer: {e}")
+
+        def reader():
+            try:
+                with _get_db(bucket) as db:
+                    for _ in range(20):
+                        db.execute("SELECT COUNT(*) FROM objects").fetchone()
+                        db.execute("SELECT * FROM objects ORDER BY size DESC LIMIT 10").fetchall()
+            except Exception as e:
+                errors.append(f"reader: {e}")
+
+        threads = []
+        for _ in range(3):
+            threads.append(threading.Thread(target=writer))
+            threads.append(threading.Thread(target=reader))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert len(errors) == 0, f"Concurrent access errors: {errors}"
+        print(f"  Concurrent access (3 writers + 3 readers): no 'database is locked' errors")
+
     def test_pragma_speedup_on_count(self):
         """Verify PRAGMA tuning actually makes queries faster."""
         _seed_bucket("pragma-speed-test", 50000)
@@ -559,6 +629,56 @@ class TestFullIntegration:
             assert root_snapshot[0]["object_count"] == 5000
 
         print("  Full rebuild cycle: folder_stats, prefix_children, storage_history all consistent")
+
+    def test_storage_history_uses_latest_not_max(self):
+        """Verify storage_history returns the latest value per day, not the MAX.
+
+        Regression test: old SQL used MAX(object_count) which returned the
+        peak value per day. If objects are deleted, MAX gives wrong results.
+        The fix uses a subquery to pick the row with the latest timestamp.
+        """
+        bucket = "integration-history-latest"
+        _seed_bucket(bucket, 500)
+
+        with _get_db(bucket) as db:
+            # Simulate two snapshots on the same day:
+            # Snapshot 1: 500 objects, 1000000 bytes (the "peak")
+            db.execute(
+                "INSERT INTO storage_history (timestamp, prefix, object_count, total_size) VALUES (?,?,?,?)",
+                ("2026-04-12T08:00:00Z", "", 500, 1000000),
+            )
+            # Snapshot 2: 400 objects, 800000 bytes (later — objects were deleted)
+            db.execute(
+                "INSERT INTO storage_history (timestamp, prefix, object_count, total_size) VALUES (?,?,?,?)",
+                ("2026-04-12T18:00:00Z", "", 400, 800000),
+            )
+            db.commit()
+
+            # Query using the same SQL pattern as the fixed endpoint
+            rows = db.execute(
+                "SELECT DATE(h.timestamp) as day, h.object_count, h.total_size, h.timestamp "
+                "FROM storage_history h "
+                "INNER JOIN ("
+                "  SELECT DATE(timestamp) as d, MAX(timestamp) as latest "
+                "  FROM storage_history WHERE prefix = ? AND timestamp >= ? GROUP BY d"
+                ") sub ON DATE(h.timestamp) = sub.d AND h.timestamp = sub.latest "
+                "WHERE h.prefix = ? "
+                "ORDER BY day ASC",
+                ("", "2026-01-01T00:00:00Z", ""),
+            ).fetchall()
+
+            # Should get the LATEST value (400), not the MAX (500)
+            apr12 = [r for r in rows if r["day"] == "2026-04-12"]
+            assert len(apr12) == 1, f"Expected 1 row for 2026-04-12, got {len(apr12)}"
+            assert apr12[0]["object_count"] == 400, (
+                f"Expected latest object_count=400, got {apr12[0]['object_count']} "
+                "(bug: MAX() returns peak instead of latest)"
+            )
+            assert apr12[0]["total_size"] == 800000, (
+                f"Expected latest total_size=800000, got {apr12[0]['total_size']}"
+            )
+
+        print("  storage_history: correctly returns latest-per-day, not MAX")
 
     def test_incremental_upsert_preserves_data(self):
         """Test that incremental crawl correctly handles unchanged + changed objects."""

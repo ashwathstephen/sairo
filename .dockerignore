@@ -35,6 +35,9 @@ charts/
 .DS_Store
 Thumbs.db
 
+# Environment files (may contain secrets)
+.env*
+
 # Data volumes
 /data
 *.db
