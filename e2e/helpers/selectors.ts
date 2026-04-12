@@ -190,7 +190,7 @@ export const SEL = {
   hcGrid: '.hc-grid',
   hcCard: '.hc-card',
 
-  // ── Dashboard ──
+  // ── Dashboard / Insights ──
   dashboardModal: '.dashboard-modal',
   dashboardCard: '.dashboard-card',
   dashboardCardValue: '.dashboard-card-value',
@@ -200,6 +200,20 @@ export const SEL = {
   dashboardTable: '.dashboard-table',
   trendToggleBtn: '.trend-toggle-btn',
   trendChartSvg: '.trend-chart-svg',
+  insightsStorageTab: '.dashboard-modal button:has-text("Storage")',
+  insightsOptimizeTab: '.dashboard-modal button:has-text("Optimize")',
+
+  // ── Optimization ──
+  optimizationSpinner: '.dashboard-modal .spinner',
+  optimizationEmpty: '.dashboard-modal .muted',
+  optimizationSection: '.dashboard-modal h4',
+  severityBadge: '.severity-badge',
+  coldDataTable: '.cold-data-table',
+  accuracyDisclaimer: '.accuracy-disclaimer',
+
+  // ── Update Banner ──
+  updateBanner: '.update-banner',
+  updateDismiss: '.update-banner button',
 
   // ── Version actions ──
   versionBusy: '.version-busy',

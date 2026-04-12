@@ -173,6 +173,7 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
   const [activeTab, setActiveTab] = useState("storage");
   const [optData, setOptData] = useState(null);
   const [optLoading, setOptLoading] = useState(false);
+  const [optError, setOptError] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -187,7 +188,7 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
         getCostBreakdown(bucket).then(c => {
           setCostData(c);
           setSelectedProvider(c.provider);
-        }).catch(() => {});
+        }).catch(() => { /* cost is optional — silent fallback */ });
       })
       .catch(e => { setError(e.message); setLoading(false); });
   }, [bucket]);
@@ -196,10 +197,15 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
   useEffect(() => {
     if (activeTab === "optimize" && !optData && !optLoading) {
       setOptLoading(true);
+      setOptError(null);
       getOptimizationSummary(bucket).then(d => {
         setOptData(d);
         setOptLoading(false);
-      }).catch(() => setOptLoading(false));
+        setOptError(null);
+      }).catch(e => {
+        setOptLoading(false);
+        setOptError(e.message || "Failed to load optimization data");
+      });
     }
   }, [activeTab]);
 
@@ -209,7 +215,9 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
     try {
       const c = await getCostBreakdown(bucket, provider);
       setCostData(c);
-    } catch { }
+    } catch (e) {
+      console.warn("Cost breakdown failed:", e.message);
+    }
     setCostLoading(false);
   };
 
@@ -414,6 +422,10 @@ export default function StorageDashboard({ bucket, onClose, onNavigate }) {
             {activeTab === "optimize" && (
               <div className="dashboard-content">
                 {optLoading && <div className="empty"><div className="spinner" /> Analyzing optimization opportunities...</div>}
+
+                {optError && (
+                  <p className="muted" style={{ color: "var(--danger, #ef4444)" }}>Failed to load: {optError}</p>
+                )}
 
                 {optData && optData.total_objects === 0 && (
                   <p className="muted">This bucket is empty. No optimization recommendations available.</p>

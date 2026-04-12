@@ -45,6 +45,9 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
       else if (hasAuthRead) setObjectAclValue("authenticated-read");
       else setObjectAclValue("private");
       setLoading(false);
+    }).catch(e => {
+      setAlertMessage("Failed to load object info: " + (e.message || "Unknown error"));
+      setLoading(false);
     });
   }, [fileKey, bucket]);
 
@@ -54,8 +57,12 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
   };
 
   const generatePresignedUrl = async (hours) => {
-    const data = await getPresignedUrl(bucket, fileKey, hours * 3600);
-    setPresignedUrl(data.url);
+    try {
+      const data = await getPresignedUrl(bucket, fileKey, hours * 3600);
+      setPresignedUrl(data.url);
+    } catch (e) {
+      setAlertMessage("Failed to generate URL: " + (e.message || "Unknown error"));
+    }
   };
 
   const copyUrl = () => {
@@ -67,22 +74,34 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
   const addTag = async () => {
     if (!newTagKey.trim()) return;
     const updated = { ...tags.tags, [newTagKey.trim()]: newTagValue.trim() };
-    await putObjectTagging(bucket, fileKey, updated);
-    setTags({ tags: updated });
-    setNewTagKey("");
-    setNewTagValue("");
+    try {
+      await putObjectTagging(bucket, fileKey, updated);
+      setTags({ tags: updated });
+      setNewTagKey("");
+      setNewTagValue("");
+    } catch (e) {
+      setAlertMessage("Failed to save tag: " + (e.message || "Unknown error"));
+    }
   };
 
   const removeTag = async (key) => {
     const updated = { ...tags.tags };
     delete updated[key];
-    await putObjectTagging(bucket, fileKey, updated);
-    setTags({ tags: updated });
+    try {
+      await putObjectTagging(bucket, fileKey, updated);
+      setTags({ tags: updated });
+    } catch (e) {
+      setAlertMessage("Failed to remove tag: " + (e.message || "Unknown error"));
+    }
   };
 
   const handleVersionDownload = async (versionId) => {
-    const data = await getVersionPresignedUrl(bucket, fileKey, versionId);
-    window.open(data.url, "_blank");
+    try {
+      const data = await getVersionPresignedUrl(bucket, fileKey, versionId);
+      window.open(data.url, "_blank");
+    } catch (e) {
+      setAlertMessage("Failed to download version: " + (e.message || "Unknown error"));
+    }
   };
 
   const handleVersionRestore = async (versionId) => {

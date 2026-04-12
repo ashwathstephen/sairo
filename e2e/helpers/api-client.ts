@@ -200,4 +200,70 @@ export class ApiClient {
       headers: this.headers(),
     });
   }
+
+  /** Get optimization summary for a bucket. */
+  async getOptimizationSummary(bucket: string, provider = '', region = ''): Promise<any> {
+    const params = new URLSearchParams();
+    if (provider) params.set('provider', provider);
+    if (region) params.set('region', region);
+    const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/optimization-summary?${params}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`Optimization summary failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Get cost breakdown for a bucket. */
+  async getCostBreakdown(bucket: string, provider = '', region = ''): Promise<any> {
+    const params = new URLSearchParams();
+    if (provider) params.set('provider', provider);
+    if (region) params.set('region', region);
+    const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/cost-breakdown?${params}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`Cost breakdown failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Get pricing for all providers. */
+  async getPricing(): Promise<any> {
+    const res = await fetch(`${this.baseURL}/api/pricing`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`Pricing failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Check for version updates. */
+  async checkForUpdate(): Promise<any> {
+    const res = await fetch(`${this.baseURL}/api/version`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  }
+
+  /** Get multipart uploads for a bucket. */
+  async getMultipartUploads(bucket: string, details = false): Promise<any> {
+    const res = await fetch(`${this.baseURL}/api/buckets/${bucket}/multipart-uploads${details ? '?details=true' : ''}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`Multipart uploads failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Get health detail (admin-only). */
+  async getHealthDetail(): Promise<{ status: number; data: any }> {
+    const res = await fetch(`${this.baseURL}/api/health-detail`, {
+      headers: this.headers(),
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  }
+
+  /** Fetch raw response to inspect headers. */
+  async getRawResponse(path: string): Promise<Response> {
+    return fetch(`${this.baseURL}${path}`, {
+      headers: this.headers(),
+    });
+  }
 }

@@ -174,17 +174,30 @@ async def lifespan(server: FastMCP):
         except Exception as e:
             logger.warning(f"Auth failed: {e}. Tools requiring auth will fail.", extra={"tool": "server"})
 
-    # If no token or auth failed, create a default admin session for local dev
+    # If no token or auth failed, only allow admin fallback in explicit dev mode
     if session is None:
-        logger.warning(
-            "No SAIRO_API_TOKEN set — running with default admin session (local dev mode)",
-            extra={"tool": "server"},
-        )
-        session = UserSession(
-            username="mcp-local",
-            role="admin",
-            token="",
-        )
+        dev_mode = os.environ.get("MCP_DEV_MODE", "false").lower() == "true"
+        if dev_mode:
+            logger.warning(
+                "MCP_DEV_MODE=true — running with default admin session (local dev only)",
+                extra={"tool": "server"},
+            )
+            session = UserSession(
+                username="mcp-local",
+                role="admin",
+                token="",
+            )
+        else:
+            logger.error(
+                "No SAIRO_API_TOKEN set and MCP_DEV_MODE is not enabled. "
+                "Set SAIRO_API_TOKEN for production or MCP_DEV_MODE=true for local dev.",
+                extra={"tool": "server"},
+            )
+            session = UserSession(
+                username="mcp-anonymous",
+                role="viewer",
+                token="",
+            )
 
     try:
         yield {
@@ -254,8 +267,14 @@ async def readyz(request):
 
 @mcp.custom_route("/metrics", methods=["GET"])
 async def metrics_endpoint(request):
-    """Prometheus-style metrics."""
+    """Prometheus-style metrics. Requires SAIRO_API_TOKEN or MCP_DEV_MODE."""
     from starlette.responses import JSONResponse
+    token = os.environ.get("SAIRO_API_TOKEN", "")
+    dev_mode = os.environ.get("MCP_DEV_MODE", "false").lower() == "true"
+    if token and not dev_mode:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header != f"Bearer {token}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
     return JSONResponse(metrics.get_summary())
 
 

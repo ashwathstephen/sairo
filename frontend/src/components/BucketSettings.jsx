@@ -62,6 +62,9 @@ export default function BucketSettings({ bucket, onClose, role }) {
       else if (hasAuthRead) setBucketAclValue("authenticated-read");
       else setBucketAclValue("private");
       setLoading(false);
+    }).catch(e => {
+      setAlertMessage("Failed to load bucket settings: " + (e.message || "Unknown error"));
+      setLoading(false);
     });
   }, [bucket]);
 
@@ -73,6 +76,9 @@ export default function BucketSettings({ bucket, onClose, role }) {
       getMultipartUploads(bucket, true).then(m => {
         setMultipart(m);
         setMultipartLoading(false);
+      }).catch(e => {
+        setMultipartLoading(false);
+        setAlertMessage("Failed to load multipart uploads: " + (e.message || "Unknown error"));
       });
     }
   }, [activeTab]);
@@ -81,9 +87,13 @@ export default function BucketSettings({ bucket, onClose, role }) {
   const [aborting, setAborting] = useState(false);
 
   const handleAbortUpload = async (key, uploadId) => {
-    await abortMultipart(bucket, key, uploadId);
-    const res = await getMultipartUploads(bucket, true);
-    setMultipart(res);
+    try {
+      await abortMultipart(bucket, key, uploadId);
+      const res = await getMultipartUploads(bucket, true);
+      setMultipart(res);
+    } catch (e) {
+      setAlertMessage("Failed to abort upload: " + (e.message || "Unknown error"));
+    }
   };
 
   const handleAbortAll = async () => {
@@ -92,6 +102,8 @@ export default function BucketSettings({ bucket, onClose, role }) {
       await abortAllMultipart(bucket);
       const res = await getMultipartUploads(bucket, true);
       setMultipart(res);
+    } catch (e) {
+      setAlertMessage("Failed to abort uploads: " + (e.message || "Unknown error"));
     } finally {
       setAborting(false);
       setConfirmAbortAll(false);
@@ -99,8 +111,12 @@ export default function BucketSettings({ bucket, onClose, role }) {
   };
 
   const handleRecrawl = async () => {
-    await triggerCrawl(bucket);
-    setCrawl(await getCrawlStatus(bucket));
+    try {
+      await triggerCrawl(bucket);
+      setCrawl(await getCrawlStatus(bucket));
+    } catch (e) {
+      setAlertMessage("Failed to trigger re-index: " + (e.message || "Unknown error"));
+    }
   };
 
   const handleSavePolicy = async () => {
@@ -114,9 +130,13 @@ export default function BucketSettings({ bucket, onClose, role }) {
   };
 
   const handleDeletePolicy = async () => {
-    await deleteBucketPolicy(bucket);
-    setPolicy({ policy: null });
-    setPolicyText("");
+    try {
+      await deleteBucketPolicy(bucket);
+      setPolicy({ policy: null });
+      setPolicyText("");
+    } catch (e) {
+      setAlertMessage("Failed to delete policy: " + (e.message || "Unknown error"));
+    }
   };
 
   const handleSaveCors = async () => {
@@ -130,25 +150,37 @@ export default function BucketSettings({ bucket, onClose, role }) {
   };
 
   const handleDeleteCors = async () => {
-    await deleteCors(bucket);
-    setCors({ cors_rules: [] });
-    setCorsText("[]");
+    try {
+      await deleteCors(bucket);
+      setCors({ cors_rules: [] });
+      setCorsText("[]");
+    } catch (e) {
+      setAlertMessage("Failed to delete CORS: " + (e.message || "Unknown error"));
+    }
   };
 
   const addTag = async () => {
     if (!newTagKey.trim()) return;
     const updated = { ...tags.tags, [newTagKey.trim()]: newTagValue.trim() };
-    await putBucketTagging(bucket, updated);
-    setTags({ tags: updated });
-    setNewTagKey("");
-    setNewTagValue("");
+    try {
+      await putBucketTagging(bucket, updated);
+      setTags({ tags: updated });
+      setNewTagKey("");
+      setNewTagValue("");
+    } catch (e) {
+      setAlertMessage("Failed to save tag: " + (e.message || "Unknown error"));
+    }
   };
 
   const removeTag = async (key) => {
     const updated = { ...tags.tags };
     delete updated[key];
-    await putBucketTagging(bucket, updated);
-    setTags({ tags: updated });
+    try {
+      await putBucketTagging(bucket, updated);
+      setTags({ tags: updated });
+    } catch (e) {
+      setAlertMessage("Failed to remove tag: " + (e.message || "Unknown error"));
+    }
   };
 
   const updateLifecycleRule = (index, field, value) => {
