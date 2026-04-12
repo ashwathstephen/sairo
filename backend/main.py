@@ -3114,9 +3114,18 @@ def list_all_buckets(user: dict = Depends(get_current_user)):
 
 # ── API: Buckets ──────────────────────────────────────────────────────────
 
+_bucket_list_cache: dict = {"data": None, "ts": 0}
+_BUCKET_LIST_TTL = 30  # seconds
+
 @app.get("/api/buckets")
 def list_buckets(user: dict = Depends(get_current_user)):
-    resp = s3.list_buckets()
+    now = time.time()
+    if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
+        resp = _bucket_list_cache["data"]
+    else:
+        resp = s3.list_buckets()
+        _bucket_list_cache["data"] = resp
+        _bucket_list_cache["ts"] = now
     # Non-admin: only show buckets with explicit permissions
     allowed = None
     if user["role"] != "admin":
