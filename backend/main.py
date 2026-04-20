@@ -1103,6 +1103,10 @@ def _incremental_upsert(db, batch, gen):
             changed_rows)
 
 
+class _CrawlDone(Exception):
+    """Sentinel to exit the simple-crawl path into the finally block."""
+    pass
+
 def _run_crawl(bucket, endpoint_id=None):
     """Prefix-parallel crawl — discovers top-level prefixes, crawls each independently."""
     eid = endpoint_id or "default"
@@ -1128,6 +1132,7 @@ def _run_crawl(bucket, endpoint_id=None):
         _disable_fts_triggers(db)
 
     crawl_start = time.monotonic()
+    crawl_ok = False
     try:
         # Get known top-level prefixes from existing index
         known_prefixes = set()
@@ -1238,17 +1243,14 @@ def _run_crawl(bucket, endpoint_id=None):
                     "UPDATE crawl_status SET status='complete', last_crawl_end=?, total_objects=?, total_size=? WHERE id=1",
                     (time.strftime("%Y-%m-%dT%H:%M:%SZ"), row[0], row[1]))
                 db.commit()
-            # Re-enable FTS triggers (instant) and rebuild index in background
+            # Re-enable FTS triggers (instant)
             with _get_db(bucket, eid) as db:
                 _enable_fts_triggers(db)
-            _rebuild_fts_async(bucket, eid)
             elapsed = time.monotonic() - crawl_start
             log.info("[%s:%s] Crawl complete: %s objects, %.1f GB in %.1fs",
                      eid, bucket, f"{row[0]:,}", row[1] / (1024**3), elapsed)
-            _record_storage_snapshot(bucket, eid)
-            _rebuild_folder_stats(bucket, eid)
-            _rebuild_prefix_children(bucket, eid)
-            return
+            # Skip prefix-parallel path — jump to finally + post-crawl rebuilds
+            raise _CrawlDone()
 
         # Prefix-parallel crawl
         incremental = existing_count > 0
@@ -1337,15 +1339,15 @@ def _run_crawl(bucket, endpoint_id=None):
         if failed_prefixes:
             msg += f", {len(failed_prefixes)} prefixes failed"
         log.info(msg)
-        # Re-enable FTS triggers (instant) and rebuild index in background
+        # Re-enable FTS triggers (instant)
         with _get_db(bucket, eid) as db:
             _enable_fts_triggers(db)
-        _rebuild_fts_async(bucket, eid)
-        _record_storage_snapshot(bucket, eid)
-        _rebuild_folder_stats(bucket, eid)
-        _rebuild_prefix_children(bucket, eid)
+        crawl_ok = True
 
+    except _CrawlDone:
+        crawl_ok = True
     except BaseException as e:
+        crawl_ok = False
         log.error("[%s:%s] Crawl error: %s\n%s", eid, bucket, e, traceback.format_exc())
         try:
             with _get_db(bucket, eid) as db:
@@ -1355,8 +1357,21 @@ def _run_crawl(bucket, endpoint_id=None):
         except Exception as inner_e:
             log.warning("Failed to write crawl error status for %s: %s", bucket, inner_e)
     finally:
+        # Release crawl lock BEFORE post-crawl rebuilds so the bucket can be
+        # re-queued even if rebuilds hang or crash on very large buckets.
         with _crawl_lock:
             _crawling[crawl_key] = False
+
+    # Post-crawl rebuilds run OUTSIDE the crawl lock — only on success to avoid
+    # corrupting folder stats / storage history with partial crawl data.
+    if crawl_ok:
+        try:
+            _rebuild_fts_async(bucket, eid)
+            _record_storage_snapshot(bucket, eid)
+            _rebuild_folder_stats(bucket, eid)
+            _rebuild_prefix_children(bucket, eid)
+        except Exception as rebuild_e:
+            log.warning("[%s:%s] Post-crawl rebuild error (non-fatal): %s", eid, bucket, rebuild_e)
 
 
 _version_scanning = {}  # bucket -> bool
