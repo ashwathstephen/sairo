@@ -949,6 +949,7 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
+_rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}   # bucket -> bool (currently running)
 _queued = set()  # buckets waiting in the thread pool queue
 _crawl_lock = threading.Lock()
@@ -1362,16 +1363,19 @@ def _run_crawl(bucket, endpoint_id=None):
         with _crawl_lock:
             _crawling[crawl_key] = False
 
-    # Post-crawl rebuilds run OUTSIDE the crawl lock — only on success to avoid
-    # corrupting folder stats / storage history with partial crawl data.
+    # Post-crawl rebuilds run on a SEPARATE thread pool so they don't consume
+    # crawl pool capacity. This prevents large-bucket rebuilds from starving
+    # the crawl pool and blocking recrawls for other buckets.
     if crawl_ok:
-        try:
-            _rebuild_fts_async(bucket, eid)
-            _record_storage_snapshot(bucket, eid)
-            _rebuild_folder_stats(bucket, eid)
-            _rebuild_prefix_children(bucket, eid)
-        except Exception as rebuild_e:
-            log.warning("[%s:%s] Post-crawl rebuild error (non-fatal): %s", eid, bucket, rebuild_e)
+        def _do_rebuilds():
+            try:
+                _rebuild_fts_async(bucket, eid)
+                _record_storage_snapshot(bucket, eid)
+                _rebuild_folder_stats(bucket, eid)
+                _rebuild_prefix_children(bucket, eid)
+            except Exception as rebuild_e:
+                log.warning("[%s:%s] Post-crawl rebuild error (non-fatal): %s", eid, bucket, rebuild_e)
+        _rebuild_pool.submit(_do_rebuilds)
 
 
 _version_scanning = {}  # bucket -> bool
@@ -4681,6 +4685,119 @@ def get_presigned_url(bucket: str, key: str, expires: int = 3600, user: dict = D
     expires = min(max(60, expires), 604800)  # clamp 1 min to 7 days
     url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
     return {"url": url, "expires_in": expires}
+
+
+# ── Direct Upload (presigned PUT) ───────────────────────────────────────────
+
+class PresignedUploadRequest(BaseModel):
+    keys: list[str]
+    prefix: str = ""
+
+@app.post("/api/buckets/{bucket}/presigned-upload")
+def presigned_upload(bucket: str, req: PresignedUploadRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Generate presigned PUT URLs for direct browser-to-S3 uploads. No file data passes through Sairo."""
+    if user["role"] != "admin":
+        bp = getattr(request.state, "bucket_permission", None)
+        if bp != "write":
+            raise HTTPException(403, "Write access required")
+    if not req.keys or len(req.keys) > 100:
+        raise HTTPException(400, "Provide 1-100 keys")
+
+    expires = 3600  # 1 hour
+    eid = _current_endpoint_id()
+    client = _s3_manager.get_client(eid)
+
+    # Ensure CORS allows PUT from the browser
+    try:
+        _ensure_upload_cors(bucket, request, client)
+    except Exception as e:
+        log.warning("Failed to ensure CORS for presigned upload on %s: %s", bucket, e)
+
+    urls = []
+    for raw_key in req.keys:
+        key = req.prefix + raw_key if req.prefix else raw_key
+        url = client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=expires,
+        )
+        urls.append({"key": key, "url": url})
+    return {"urls": urls, "expires_in": expires}
+
+
+def _ensure_upload_cors(bucket: str, request: Request, client):
+    """Ensure the bucket has CORS rules allowing PUT from the requesting origin."""
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return
+    try:
+        resp = client.get_bucket_cors(Bucket=bucket)
+        rules = resp.get("CORSRules", [])
+        # Check if PUT is already allowed from this origin
+        for rule in rules:
+            origins = rule.get("AllowedOrigins", [])
+            methods = rule.get("AllowedMethods", [])
+            if ("*" in origins or origin in origins) and "PUT" in methods:
+                return  # already configured
+    except ClientError as e:
+        if "NoSuchCORSConfiguration" not in str(e):
+            raise
+        rules = []
+
+    # Add a CORS rule for direct uploads
+    rules.append({
+        "AllowedOrigins": [origin],
+        "AllowedMethods": ["PUT", "GET", "HEAD"],
+        "AllowedHeaders": ["*"],
+        "ExposeHeaders": ["ETag"],
+        "MaxAgeSeconds": 86400,
+    })
+    client.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": rules})
+    log.info("Added upload CORS rule for origin=%s on bucket=%s", origin, bucket)
+
+
+class NotifyUploadRequest(BaseModel):
+    uploads: list[dict]  # [{"key": "...", "size": 123}, ...]
+
+@app.post("/api/buckets/{bucket}/notify-upload")
+def notify_upload(bucket: str, req: NotifyUploadRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Update the index after a direct-to-S3 upload. Lightweight — no file data, just metadata."""
+    if user["role"] != "admin":
+        bp = getattr(request.state, "bucket_permission", None)
+        if bp != "write":
+            raise HTTPException(403, "Write access required")
+
+    eid = _current_endpoint_id()
+    if not os.path.exists(_db_path(bucket, eid)):
+        return {"indexed": 0}
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    indexed = 0
+    with _get_db(bucket, eid) as db:
+        for u in req.uploads:
+            key = u.get("key", "")
+            size = u.get("size", 0)
+            if not key:
+                continue
+            old = db.execute("SELECT size FROM objects WHERE key=?", (key,)).fetchone()
+            db.execute(
+                "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth) VALUES (?,?,?,?,?,?)",
+                (key, size, now, "", _key_prefix(key), _key_depth(key)))
+            if old:
+                _adjust_folder_stats(db, key, size - old[0], 0)
+            else:
+                _adjust_folder_stats(db, key, size, 1)
+            indexed += 1
+        db.commit()
+
+    if indexed > 0:
+        _update_crawl_counters(bucket, eid)
+        summary = _summarize_keys([u["key"] for u in req.uploads if u.get("key")])
+        details = f"count={indexed}, direct_upload=true"
+        if summary:
+            details += f", keys={summary}"
+        _audit("upload", user["username"], bucket=bucket, details=details)
+    return {"indexed": indexed}
 
 
 # ── Bucket Configuration ────────────────────────────────────────────────────
