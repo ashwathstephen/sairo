@@ -3276,34 +3276,23 @@ def _list_from_index(bucket, prefix):
             except Exception:
                 pass
         else:
-            # Subfolder: use pre-computed prefix_children (instant), fallback to DISTINCT scan
+            # Subfolder: always compute from objects table (DISTINCT scan) to avoid stale cache.
+            # prefix_children is only reliably maintained for level 1 (parent="").
             t_q = time.monotonic()
-            pc_rows = db.execute(
-                "SELECT child_prefix, child_name FROM prefix_children WHERE parent_prefix = ?",
-                (prefix,)).fetchall()
-            if pc_rows:
-                for child_prefix, child_name in pc_rows:
-                    if child_name and child_prefix not in seen:
-                        seen.add(child_prefix)
-                        folders.append({"prefix": child_prefix, "name": child_name})
-                log.info("[perf] _list_from_index prefix_children: %.3fs (%d rows) prefix=%s",
-                         time.monotonic() - t_q, len(pc_rows), prefix[:60])
-            else:
-                # Fallback: compute children in SQL (first boot or table not yet populated)
-                prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
-                rows = db.execute(
-                    "SELECT DISTINCT substr(prefix, 1, ? + instr(substr(prefix, ?+1), '/')) "
-                    "FROM objects WHERE prefix >= ? AND prefix < ? "
-                    "AND instr(substr(prefix, ?+1), '/') > 0",
-                    (prefix_len, prefix_len, prefix, prefix_end, prefix_len)).fetchall()
-                log.info("[perf] _list_from_index DISTINCT fallback: %.3fs (%d rows) prefix=%s",
-                         time.monotonic() - t_q, len(rows), prefix[:60])
-                for (child,) in rows:
-                    if child and child not in seen:
-                        seen.add(child)
-                        name = child[prefix_len:].rstrip("/")
-                        if name:
-                            folders.append({"prefix": child, "name": name})
+            prefix_end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+            rows = db.execute(
+                "SELECT DISTINCT substr(prefix, 1, ? + instr(substr(prefix, ?+1), '/')) "
+                "FROM objects WHERE prefix >= ? AND prefix < ? "
+                "AND instr(substr(prefix, ?+1), '/') > 0",
+                (prefix_len, prefix_len, prefix, prefix_end, prefix_len)).fetchall()
+            log.info("[perf] _list_from_index DISTINCT: %.3fs (%d rows) prefix=%s",
+                     time.monotonic() - t_q, len(rows), prefix[:60])
+            for (child,) in rows:
+                if child and child not in seen:
+                    seen.add(child)
+                    name = child[prefix_len:].rstrip("/")
+                    if name:
+                        folders.append({"prefix": child, "name": name})
 
         folders.sort(key=lambda f: f["name"])
         t_files = time.monotonic()
@@ -3512,49 +3501,36 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
                           "object_count": total_count, "children": children}
                 return result
 
-    # Fast path: use pre-computed prefix_children for sub-prefix breakdown
+    # Sub-prefix breakdown: always compute from objects table for accuracy.
+    # prefix_children cache is only reliable for level 1 (parent="").
     t_sb = time.monotonic()
     prefix_len = len(prefix)
     with _get_db(bucket) as db:
-        pc_rows = db.execute(
-            "SELECT child_prefix, child_name, object_count, total_size FROM prefix_children WHERE parent_prefix = ? ORDER BY total_size DESC",
-            (prefix,)).fetchall()
-        if pc_rows:
-            children = [{"prefix": r[0], "name": r[1], "object_count": r[2], "total_size": r[3]} for r in pc_rows]
-            root_row = db.execute(
-                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM objects WHERE prefix = ?",
-                (prefix,)).fetchone()
-            if root_row and root_row[0] > 0:
-                children.append({"prefix": "(root files)", "name": "(files)", "object_count": root_row[0], "total_size": root_row[1]})
-            log.info("[perf] storage_breakdown prefix_children: %.3fs (%d children) prefix=%s",
-                     time.monotonic() - t_sb, len(children), prefix[:60])
-        else:
-            # Fallback: full GROUP BY query for sub-prefix or when prefix_children not yet populated
-            like_pattern = (prefix + "%") if prefix else "%"
-            rows = db.execute("""
-                SELECT substr(key, 1, ? + instr(substr(key, ? + 1), '/')) as child_prefix,
-                       COUNT(*) as count, SUM(size) as total_size
-                FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') > 0
-                GROUP BY child_prefix ORDER BY total_size DESC
-            """, (prefix_len, prefix_len, like_pattern, prefix_len)).fetchall()
-            root_row = db.execute("""
-                SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
-                FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
-            """, (like_pattern, prefix_len)).fetchone()
-            log.info("[perf] storage_breakdown slow path: %.3fs (%d children) prefix=%s",
-                     time.monotonic() - t_sb, len(rows), prefix[:60])
-            children = [
-                {"prefix": r["child_prefix"], "name": r["child_prefix"][prefix_len:].rstrip("/"),
-                 "object_count": r["count"], "total_size": r["total_size"]}
-                for r in rows if r["child_prefix"] and r["child_prefix"] != prefix
-            ]
-            if root_row and root_row["count"] > 0:
-                children.append({
-                    "prefix": prefix or "(root files)",
-                    "name": "(files)",
-                    "object_count": root_row["count"],
-                    "total_size": root_row["total_size"],
-                })
+        like_pattern = (prefix + "%") if prefix else "%"
+        rows = db.execute("""
+            SELECT substr(key, 1, ? + instr(substr(key, ? + 1), '/')) as child_prefix,
+                   COUNT(*) as count, SUM(size) as total_size
+            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') > 0
+            GROUP BY child_prefix ORDER BY total_size DESC
+        """, (prefix_len, prefix_len, like_pattern, prefix_len)).fetchall()
+        root_row = db.execute("""
+            SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
+            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
+        """, (like_pattern, prefix_len)).fetchone()
+        log.info("[perf] storage_breakdown: %.3fs (%d children) prefix=%s",
+                 time.monotonic() - t_sb, len(rows), prefix[:60])
+        children = [
+            {"prefix": r["child_prefix"], "name": r["child_prefix"][prefix_len:].rstrip("/"),
+             "object_count": r["count"], "total_size": r["total_size"]}
+            for r in rows if r["child_prefix"] and r["child_prefix"] != prefix
+        ]
+        if root_row and root_row["count"] > 0:
+            children.append({
+                "prefix": prefix or "(root files)",
+                "name": "(files)",
+                "object_count": root_row["count"],
+                "total_size": root_row["total_size"],
+            })
     total_size = sum(c["total_size"] for c in children)
     total_count = sum(c["object_count"] for c in children)
     result = {"prefix": prefix or "(root)", "total_size": total_size,
