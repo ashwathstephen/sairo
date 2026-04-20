@@ -950,8 +950,9 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
-_crawling = {}   # crawl_key -> bool (currently running)
+_crawling = {}       # crawl_key -> timestamp when crawl started
 _crawl_lock = threading.Lock()
+_CRAWL_MAX_DURATION = 7200  # 2 hours — if a crawl exceeds this, force-release the lock
 
 
 def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=10000):
@@ -1356,7 +1357,7 @@ def _run_crawl(bucket, endpoint_id=None):
         # Release crawl lock BEFORE post-crawl rebuilds so the bucket can be
         # re-queued even if rebuilds hang or crash on very large buckets.
         with _crawl_lock:
-            _crawling[crawl_key] = False
+            _crawling.pop(crawl_key, None)
 
     # Post-crawl rebuilds run on a SEPARATE thread pool so they don't consume
     # crawl pool capacity. This prevents large-bucket rebuilds from starving
@@ -1496,7 +1497,7 @@ def _run_purge(task_id, bucket, keys, target_prefix, username, endpoint_id=None)
     finally:
         # Release crawl lock so recrawl can proceed
         with _crawl_lock:
-            _crawling[crawl_key] = False
+            _crawling.pop(crawl_key, None)
 
 
 def _purge_cleanup_index(bucket, target_prefix, keys, endpoint_id=None):
@@ -1658,10 +1659,17 @@ def _queue_crawl(bucket, endpoint_id=None):
     """Queue a crawl for a bucket if it is not already running."""
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
+    now = time.time()
     with _crawl_lock:
-        if _crawling.get(crawl_key):
-            return False
-        _crawling[crawl_key] = True  # Mark as running immediately to prevent double-queue
+        started_at = _crawling.get(crawl_key)
+        if started_at:
+            # Force-release stale locks (OOM kill, thread death, etc.)
+            if now - started_at > _CRAWL_MAX_DURATION:
+                log.warning("Force-releasing stale crawl lock for %s (started %.0f min ago)", crawl_key, (now - started_at) / 60)
+                del _crawling[crawl_key]
+            else:
+                return False
+        _crawling[crawl_key] = now  # Store timestamp, not bool
     _crawl_pool.submit(_run_crawl, bucket, eid)
     return True
 
@@ -2997,7 +3005,7 @@ def health_detail(user: dict = Depends(require_admin)):
                 except Exception:
                     pass
             with _crawl_lock:
-                bucket_info["crawling"] = _crawling.get(name, False)
+                bucket_info["crawling"] = name in _crawling
             result["buckets"].append(bucket_info)
     except Exception:
         pass
