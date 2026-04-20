@@ -6,4 +6,5 @@ paths = [
   "website/src/content/docs/guides/aws-s3\\.mdx",
   "website/src/content/docs/installation/configuration\\.mdx",
   "website/src/content/docs/reference/environment-variables\\.mdx",
+  "e2e/tests/.*\\.spec\\.ts",
 ]
