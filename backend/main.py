@@ -950,8 +950,7 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
-_crawling = {}   # bucket -> bool (currently running)
-_queued = set()  # buckets waiting in the thread pool queue
+_crawling = {}   # crawl_key -> bool (currently running)
 _crawl_lock = threading.Lock()
 
 
@@ -1112,11 +1111,7 @@ def _run_crawl(bucket, endpoint_id=None):
     """Prefix-parallel crawl — discovers top-level prefixes, crawls each independently."""
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
-    with _crawl_lock:
-        _queued.discard(crawl_key)
-        if _crawling.get(crawl_key):
-            return
-        _crawling[crawl_key] = True
+    # _crawling[crawl_key] is already True (set by _queue_crawl)
 
     # Set thread-local so _db_path picks up the right endpoint
     _s3_context.endpoint_id = eid
@@ -1660,13 +1655,13 @@ RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))  # seconds, de
 
 
 def _queue_crawl(bucket, endpoint_id=None):
-    """Queue a crawl for a bucket if it is not already running or queued."""
+    """Queue a crawl for a bucket if it is not already running."""
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
     with _crawl_lock:
-        if _crawling.get(crawl_key) or crawl_key in _queued:
+        if _crawling.get(crawl_key):
             return False
-        _queued.add(crawl_key)
+        _crawling[crawl_key] = True  # Mark as running immediately to prevent double-queue
     _crawl_pool.submit(_run_crawl, bucket, eid)
     return True
 
@@ -3003,7 +2998,6 @@ def health_detail(user: dict = Depends(require_admin)):
                     pass
             with _crawl_lock:
                 bucket_info["crawling"] = _crawling.get(name, False)
-                bucket_info["queued"] = name in _queued
             result["buckets"].append(bucket_info)
     except Exception:
         pass
