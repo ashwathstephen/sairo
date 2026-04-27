@@ -174,26 +174,87 @@ def _get_aws_pricing(region: str = "us-east-1") -> dict[str, float]:
 
 # ── Provider detection from endpoint URL ─────────────────────────────────────
 _URL_TO_PROVIDER = [
+    # AWS S3
     ("amazonaws.com", "aws"),
+    ("s3.dualstack", "aws"),
+    # Cloudflare R2
     ("r2.cloudflarestorage.com", "r2"),
+    # Backblaze B2
     ("backblazeb2.com", "b2"),
+    ("backblaze.com", "b2"),
+    # Wasabi
     ("wasabisys.com", "wasabi"),
+    ("wasabi.com", "wasabi"),
+    # DigitalOcean Spaces
     ("digitaloceanspaces.com", "digitalocean"),
+    # Leaseweb (StorageGRID)
     ("object-storage.io", "leaseweb"),
+    ("objectstorage.leaseweb", "leaseweb"),
+    # Hetzner
     ("storage.hetzner.com", "hetzner"),
+    ("your-objectstorage.com", "hetzner"),
+    # Scaleway
     ("scw.cloud", "scaleway"),
+    ("scaleway.com", "scaleway"),
+    # OVHcloud
     ("storage.cloud.ovh.net", "ovh"),
+    ("ovh.net", "ovh"),
+    ("ovh.io", "ovh"),
+    # iDrive e2
     ("idrivee2", "idrive_e2"),
+    ("idrive.com", "idrive_e2"),
+    # Storj
     ("storj.io", "storj"),
+    ("gateway.storjshare.io", "storj"),
+    # Google Cloud Storage (S3-compatible interop)
+    ("storage.googleapis.com", "gcs"),
+    # Azure Blob (S3-compatible gateway)
+    ("blob.core.windows.net", "azure"),
+    # IBM Cloud Object Storage
+    ("cloud-object-storage.appdomain.cloud", "ibm"),
+    ("cloud.ibm.com", "ibm"),
+    # Oracle Cloud
+    ("oraclecloud.com", "oracle"),
+    # Vultr
+    ("vultrobjects.com", "vultr"),
+    # Linode / Akamai
+    ("linodeobjects.com", "linode"),
+    # Tigris
+    ("fly.storage.tigris.dev", "tigris"),
+    ("tigris.dev", "tigris"),
+    # NetApp StorageGRID (common deployments)
+    ("storagegrid", "storagegrid"),
+    # Self-hosted patterns
+    ("minio", "minio"),
+    ("localhost", "self_hosted"),
+    ("127.0.0.1", "self_hosted"),
 ]
+
+# Private/local IP ranges that suggest self-hosted MinIO/Ceph
+import re as _re
+_PRIVATE_IP_RE = _re.compile(
+    r"://("
+    r"10\.\d+\.\d+\.\d+|"            # 10.0.0.0/8
+    r"192\.168\.\d+\.\d+|"           # 192.168.0.0/16
+    r"172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|"  # 172.16.0.0/12
+    r"\[?::1\]?|"                    # IPv6 localhost
+    r"\[?fc[0-9a-f]{2}:|"            # IPv6 unique local
+    r"\[?fe80:"                      # IPv6 link-local
+    r")"
+)
 
 
 def detect_provider(endpoint_url: str) -> str:
     """Infer storage provider from S3 endpoint URL."""
+    if not endpoint_url:
+        return "unknown"
     url_lower = endpoint_url.lower()
     for pattern, provider in _URL_TO_PROVIDER:
         if pattern in url_lower:
             return provider
+    # Private/local IPs almost always mean self-hosted MinIO or Ceph
+    if _PRIVATE_IP_RE.search(url_lower):
+        return "self_hosted"
     return "unknown"
 
 
