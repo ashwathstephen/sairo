@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can resolve the PR commit range
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.0.0

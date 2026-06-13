@@ -198,7 +198,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.2.0"
+SAIRO_VERSION = "3.3.0"
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
@@ -663,11 +663,14 @@ def _db_path(bucket, endpoint_id=None):
 def _init_db(bucket, endpoint_id=None):
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
+    conn.execute("PRAGMA page_size = 8192")          # larger pages → shallower B-trees (new DBs only)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")   # wait up to 5s for locks
+    conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size = -64000")   # 64MB page cache (default 2MB)
-    conn.execute("PRAGMA temp_store = MEMORY")    # temp tables in RAM
+    conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
+    conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
+    conn.execute("PRAGMA temp_store = MEMORY")       # temp tables in RAM
+    conn.execute("PRAGMA wal_autocheckpoint = 2000") # checkpoint ~every 16MB of WAL
     conn.execute("""
         CREATE TABLE IF NOT EXISTS objects (
             key TEXT PRIMARY KEY,
@@ -684,7 +687,24 @@ def _init_db(bucket, endpoint_id=None):
         conn.execute("ALTER TABLE objects ADD COLUMN crawl_gen INTEGER DEFAULT 0")
     except Exception:
         pass  # Column already exists
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_prefix ON objects(prefix)")
+    # Covering index: serves WHERE prefix=? and prefix-range scans, supplies
+    # key/size/last_modified without heap lookups, and is pre-sorted by key so
+    # ORDER BY key needs no temp B-tree. Supersedes the old idx_prefix(prefix).
+    # Detect an upgrade-in-place from an older build: a pre-existing DB that still
+    # has the legacy idx_prefix and not yet the covering index. Logged once per
+    # bucket so operators can see the one-time migration happen on first startup.
+    _upgrading = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_prefix'").fetchone()) and not bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_prefix_cover'").fetchone())
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prefix_cover ON objects(prefix, key, size, last_modified)")
+    conn.execute("DROP INDEX IF EXISTS idx_prefix")
+    if _upgrading:
+        try:
+            _n = conn.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+        except Exception:
+            _n = 0
+        log.info("[%s] Index migrated from older build: built covering idx_prefix_cover over %s objects, "
+                 "dropped legacy idx_prefix (existing index reused, no re-crawl needed)", bucket, f"{_n:,}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_depth ON objects(depth)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_last_modified ON objects(last_modified)")
     conn.execute("""
@@ -701,6 +721,12 @@ def _init_db(bucket, endpoint_id=None):
     # Migration: add current_crawl_gen column to existing databases
     try:
         conn.execute("ALTER TABLE crawl_status ADD COLUMN current_crawl_gen INTEGER DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
+    # Migration: persist last full-crawl duration so the scheduler can classify a
+    # bucket (small vs large) immediately after a restart, without re-crawling it.
+    try:
+        conn.execute("ALTER TABLE crawl_status ADD COLUMN crawl_duration REAL DEFAULT 0")
     except Exception:
         pass  # Column already exists
     conn.execute("""
@@ -792,6 +818,7 @@ def _get_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
+    conn.execute("PRAGMA synchronous = NORMAL")      # safe under WAL; fewer fsyncs on the crawl write path
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
     conn.execute("PRAGMA temp_store = MEMORY")       # temp tables in RAM
@@ -808,6 +835,16 @@ def _key_prefix(key):
 
 def _key_depth(key):
     return key.count("/")
+
+
+def _prefix_upper(prefix):
+    """Smallest string strictly greater than every string starting with `prefix`.
+
+    Lets `col >= prefix AND col < _prefix_upper(prefix)` replace the non-sargable
+    `col LIKE prefix || '%'`, so the query uses an index range scan instead of a
+    full table scan. `prefix` is non-empty (callers handle the root case).
+    """
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
 
 def _update_crawl_counters(bucket, endpoint_id=None):
@@ -951,6 +988,7 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}       # crawl_key -> timestamp when crawl started
+_rebuilding = set()  # crawl_keys whose post-crawl rebuild is in progress (blocks a colliding recrawl)
 _crawl_lock = threading.Lock()
 _CRAWL_MAX_DURATION = 7200  # 2 hours — if a crawl exceeds this, force-release the lock
 
@@ -1066,6 +1104,25 @@ def _rebuild_fts_async(bucket, endpoint_id=None):
     thread.start()
 
 
+def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
+    """Decide whether the (O(all-rows)) FTS trigram rebuild is actually needed.
+
+    FTS indexes only the object key, so it is stale only when keys were added or
+    removed. Rebuild when keys changed this crawl, or — as a self-heal — when the
+    FTS index is empty while objects exist (e.g. a prior rebuild failed)."""
+    if keys_changed:
+        return True
+    try:
+        with _get_db(bucket, endpoint_id) as db:
+            obj = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+            if obj == 0:
+                return False
+            fts = db.execute("SELECT COUNT(*) FROM objects_fts").fetchone()[0]
+            return fts == 0
+    except Exception:
+        return True  # if we can't tell, rebuild to be safe
+
+
 def _incremental_upsert(db, batch, gen):
     """Incremental recrawl: only INSERT/REPLACE objects that are new or changed.
     For unchanged objects (same key+size+etag), just bump crawl_gen.
@@ -1125,11 +1182,14 @@ def _run_crawl(bucket, endpoint_id=None):
                     (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
         db.commit()
         crawl_gen = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()[0]
+        initial_count = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
         # Disable FTS triggers during bulk crawl for performance
         _disable_fts_triggers(db)
 
     crawl_start = time.monotonic()
     crawl_ok = False
+    fts_needs_rebuild = True  # safe default; refined below once we know what changed
+    stale_count = 0
     try:
         # Get known top-level prefixes from existing index
         known_prefixes = set()
@@ -1330,6 +1390,11 @@ def _run_crawl(bucket, endpoint_id=None):
                 "UPDATE crawl_status SET status='complete', last_crawl_end=?, total_objects=?, total_size=? WHERE id=1",
                 (time.strftime("%Y-%m-%dT%H:%M:%SZ"), total_objects, total_size))
             db.commit()
+            # FTS indexes the key only, so it is stale only when keys were ADDED or
+            # DELETED — not when size/etag changed. Skip the O(all-rows) trigram
+            # rebuild entirely when no keys changed this crawl (the common recrawl case).
+            added = total_objects - initial_count + stale_count
+            fts_needs_rebuild = (added > 0) or (stale_count > 0)
 
         elapsed = time.monotonic() - crawl_start
         msg = f"[{eid}:{bucket}] Crawl complete: {total_objects:,} objects, {total_size / (1024**3):.1f} GB in {elapsed:.1f}s"
@@ -1355,22 +1420,52 @@ def _run_crawl(bucket, endpoint_id=None):
             log.warning("Failed to write crawl error status for %s: %s", bucket, inner_e)
     finally:
         # Release crawl lock BEFORE post-crawl rebuilds so the bucket can be
-        # re-queued even if rebuilds hang or crash on very large buckets.
+        # re-queued even if rebuilds hang or crash on very large buckets. But mark
+        # the bucket as "rebuilding" so a recrawl can't start mid-rebuild and
+        # collide on the single SQLite writer (which previously aborted the
+        # rebuild with "database is locked", leaving folder_stats empty).
         with _crawl_lock:
             _crawling.pop(crawl_key, None)
+            if crawl_ok:
+                _rebuilding.add(crawl_key)
+                # Record full-crawl timing so the scheduler can decide between a
+                # cheap full recrawl (small buckets) and fast delta crawls (large).
+                m = _crawl_meta.setdefault(crawl_key, {})
+                m["last_full"] = time.time()
+                m["duration"] = time.monotonic() - crawl_start
+                try:
+                    with _get_db(bucket, eid) as _db:
+                        _db.execute("UPDATE crawl_status SET crawl_duration=? WHERE id=1", (m["duration"],))
+                        _db.commit()
+                except Exception:
+                    pass
 
     # Post-crawl rebuilds run on a SEPARATE thread pool so they don't consume
     # crawl pool capacity. This prevents large-bucket rebuilds from starving
-    # the crawl pool and blocking recrawls for other buckets.
+    # the crawl pool and blocking recrawls for other buckets. Each step runs
+    # independently so a transient failure in one doesn't skip the others.
     if crawl_ok:
         def _do_rebuilds():
             try:
-                _rebuild_fts_async(bucket, eid)
-                _record_storage_snapshot(bucket, eid)
-                _rebuild_folder_stats(bucket, eid)
-                _rebuild_prefix_children(bucket, eid)
-            except Exception as rebuild_e:
-                log.warning("[%s:%s] Post-crawl rebuild error (non-fatal): %s", eid, bucket, rebuild_e)
+                # Run the fast metadata rebuilds FIRST and grab the writer quickly.
+                # The FTS trigram rebuild can hold the single SQLite writer for tens
+                # of seconds on a large bucket; if it ran first (in its background
+                # thread) these would block past busy_timeout and fail with
+                # "database is locked", leaving folder_stats/prefix_children empty.
+                for step in (_record_storage_snapshot, _rebuild_folder_stats, _rebuild_prefix_children):
+                    try:
+                        step(bucket, eid)
+                    except Exception as step_e:
+                        log.warning("[%s:%s] Post-crawl %s failed (non-fatal): %s",
+                                    eid, bucket, step.__name__, step_e)
+                # FTS rebuild LAST, and only when keys actually changed.
+                if _fts_should_rebuild(bucket, eid, fts_needs_rebuild):
+                    _rebuild_fts_async(bucket, eid)
+                else:
+                    log.info("[%s:%s] FTS rebuild skipped — no key changes this crawl", eid, bucket)
+            finally:
+                with _crawl_lock:
+                    _rebuilding.discard(crawl_key)
         _rebuild_pool.submit(_do_rebuilds)
 
 
@@ -1652,7 +1747,178 @@ def _is_index_ready(bucket):
         return row["status"] == "complete" or (row["total_objects"] or 0) > 0
 
 
-RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))  # seconds, default 2 minutes
+RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
+FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
+LARGE_BUCKET_SECONDS = int(os.environ.get("LARGE_BUCKET_SECONDS", "60"))  # if a full crawl took longer than this, keep fresh via delta crawls
+DELTA_SAMPLE = int(os.environ.get("DELTA_SAMPLE", "3000"))                # how many recent objects to sample to locate hot prefixes
+DELTA_MAX_TARGETS = int(os.environ.get("DELTA_MAX_TARGETS", "40"))        # cap on hot prefixes re-listed per delta crawl
+
+# crawl_key -> {"last_full": ts, "duration": sec, "last_delta": ts}
+_crawl_meta = {}
+
+
+def _parent_prefix(prefix):
+    """Immediate parent of a prefix: 'a/b/c/' -> 'a/b/'; 'a/' -> ''."""
+    s = prefix.rstrip("/")
+    i = s.rfind("/")
+    return s[:i + 1] if i >= 0 else ""
+
+
+def _minimal_prefixes(prefixes):
+    """Drop any prefix that is already covered by a shorter prefix in the set,
+    so we never re-list the same subtree twice in one delta crawl."""
+    kept = []
+    for p in sorted(prefixes, key=len):
+        if not any(p != k and p.startswith(k) for k in kept):
+            kept.append(p)
+    return kept
+
+
+def _hot_target_prefixes(bucket, endpoint_id, sample=None, max_targets=None):
+    """The narrow prefixes where the most recently-modified objects live (uses
+    idx_last_modified). These are exactly where new data is appended for
+    time-partitioned data, so re-listing just these is fast. Brand-new sibling
+    partitions are discovered separately in _delta_crawl via a cheap delimiter
+    scan — we deliberately do NOT broaden to parents here, since a hot prefix's
+    parent can be the entire dataset (e.g. sampling-GUID/metadata/ -> sampling-GUID/)."""
+    sample = sample or DELTA_SAMPLE
+    max_targets = max_targets or DELTA_MAX_TARGETS
+    with _get_db(bucket, endpoint_id) as db:
+        rows = db.execute(
+            "SELECT DISTINCT prefix FROM (SELECT prefix, last_modified FROM objects "
+            "WHERE prefix != '' ORDER BY last_modified DESC LIMIT ?)", (sample,)).fetchall()
+    return _minimal_prefixes({p for (p,) in rows})[:max_targets]
+
+
+def _delta_list_prefix(client, bucket, prefix):
+    """Recursively list every object under `prefix` (no delimiter). Returns raw S3 objects."""
+    objs = []
+    token = None
+    while True:
+        params = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            params["ContinuationToken"] = token
+        resp = client.list_objects_v2(**params)
+        for o in resp.get("Contents", []):
+            if o["Key"] != prefix:
+                objs.append(o)
+        if not resp.get("IsTruncated", False):
+            break
+        token = resp.get("NextContinuationToken")
+    return objs
+
+
+def _delta_crawl(bucket, endpoint_id):
+    """Fast incremental crawl: re-list ONLY the narrow hot prefixes (where new data
+    lands) plus any brand-new sibling partitions, in PARALLEL, and incremental-upsert.
+    FTS triggers stay enabled so search updates per row (no full trigram rebuild).
+    Avoids re-listing the whole bucket. Returns #new/changed objects."""
+    eid = endpoint_id or "default"
+    client = _s3_manager.get_client(eid)
+    hot = _hot_target_prefixes(bucket, eid)
+    if not hot:
+        return 0
+
+    # Surface delta activity to the UI (status + last_crawl_start). The index stays
+    # queryable throughout because _is_index_ready treats any bucket with
+    # total_objects>0 as ready. The caller resets status/last_crawl_end when done.
+    with _get_db(bucket, eid) as db:
+        db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=? WHERE id=1",
+                   (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        db.commit()
+
+    # Discover brand-new sibling partitions (e.g. a freshly-created hour folder):
+    # delimiter-list each hot prefix's parent and include any child prefix that has
+    # no objects in the index yet. One cheap request per distinct parent.
+    targets = set(hot)
+    parents = {_parent_prefix(p) for p in hot if _parent_prefix(p)}
+    with _get_db(bucket, eid) as db:
+        for par in parents:
+            try:
+                resp = client.list_objects_v2(Bucket=bucket, Prefix=par, Delimiter="/", MaxKeys=1000)
+                for cp in resp.get("CommonPrefixes", []):
+                    child = cp["Prefix"]
+                    seen = db.execute("SELECT 1 FROM objects WHERE prefix >= ? AND prefix < ? LIMIT 1",
+                                      (child, _prefix_upper(child))).fetchone()
+                    if not seen:
+                        targets.add(child)
+            except Exception:
+                pass
+        row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+        gen = (row[0] if row else 0) or 0
+    targets = _minimal_prefixes(targets)
+
+    # List all targets in parallel (the hot set is small; this keeps a delta fast
+    # even when several partitions are active).
+    all_objs = []
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
+        for objs in ex.map(lambda tp: _delta_list_prefix(client, bucket, tp), targets):
+            all_objs.extend(objs)
+
+    changed = 0
+    with _get_db(bucket, eid) as db:
+        for i in range(0, len(all_objs), 5000):
+            chunk = all_objs[i:i + 5000]
+            keys = [o["Key"] for o in chunk]
+            ph = ",".join("?" * len(keys))
+            have = {r[0]: (r[1], r[2]) for r in
+                    db.execute(f"SELECT key,size,etag FROM objects WHERE key IN ({ph})", keys)}
+            batch = []
+            for o in chunk:
+                k = o["Key"]; sz = o["Size"]; et = o.get("ETag", "").strip('"')
+                prev = have.get(k)
+                if not prev or prev[0] != sz or prev[1] != et:
+                    changed += 1
+                batch.append((k, sz, o["LastModified"].isoformat(), et,
+                              _key_prefix(k), _key_depth(k), gen))
+            db.executemany(
+                "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) "
+                "VALUES (?,?,?,?,?,?,?)", batch)
+        db.commit()
+
+    if changed:
+        # cheap metadata refreshes; FTS already maintained incrementally by triggers
+        for step in (_update_crawl_counters, _rebuild_folder_stats, _rebuild_prefix_children, _record_storage_snapshot):
+            try:
+                step(bucket, eid)
+            except Exception as e:
+                log.warning("[%s:%s] delta post-step %s failed: %s", eid, bucket, getattr(step, "__name__", step), e)
+    return changed
+
+
+def _queue_delta_crawl(bucket, endpoint_id=None):
+    """Submit a delta crawl if the bucket isn't mid full-crawl or mid-rebuild."""
+    eid = endpoint_id or "default"
+    crawl_key = f"{eid}:{bucket}"
+    with _crawl_lock:
+        if crawl_key in _rebuilding or crawl_key in _crawling:
+            return False
+        _crawling[crawl_key] = time.time()  # reuse crawl lock to block colliding full crawls
+
+    def _run():
+        t0 = time.monotonic()
+        try:
+            _s3_context.endpoint_id = eid
+            n = _delta_crawl(bucket, eid)
+            with _crawl_lock:
+                _crawl_meta.setdefault(crawl_key, {})["last_delta"] = time.time()
+            log.info("[%s:%s] Delta crawl: %d new/changed in %.1fs", eid, bucket, n, time.monotonic() - t0)
+        except Exception as e:
+            log.warning("[%s:%s] Delta crawl error: %s", eid, bucket, e)
+        finally:
+            with _crawl_lock:
+                _crawling.pop(crawl_key, None)
+            # Always return status to 'complete' and stamp last_crawl_end so the UI
+            # reflects that the index was just refreshed (even on a no-change delta).
+            try:
+                with _get_db(bucket, eid) as db:
+                    db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=? WHERE id=1",
+                               (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+                    db.commit()
+            except Exception:
+                pass
+    _crawl_pool.submit(_run)
+    return True
 
 
 def _queue_crawl(bucket, endpoint_id=None):
@@ -1661,6 +1927,11 @@ def _queue_crawl(bucket, endpoint_id=None):
     crawl_key = f"{eid}:{bucket}"
     now = time.time()
     with _crawl_lock:
+        # Don't start a crawl while this bucket's post-crawl rebuild is still
+        # running — they would contend on the single SQLite writer and the
+        # rebuild would lose, leaving folder_stats/prefix_children empty.
+        if crawl_key in _rebuilding:
+            return False
         started_at = _crawling.get(crawl_key)
         if started_at:
             # Force-release stale locks (OOM kill, thread death, etc.)
@@ -1675,18 +1946,41 @@ def _queue_crawl(bucket, endpoint_id=None):
 
 
 def _auto_recrawl():
-    """Periodically re-crawl all buckets across all endpoints to pick up new objects."""
+    """Adaptive freshness scheduler. Each cycle, per bucket:
+      • never fully crawled yet      → full crawl
+      • full crawl due (cold reconcile, every FULL_CRAWL_INTERVAL) → full crawl
+      • large bucket (slow full crawl) → DELTA crawl (re-list only hot prefixes) → fresh data fast
+      • small bucket (fast full crawl) → full recrawl every interval (already cheap & fresh)
+    This keeps high-volume buckets fresh within ~one interval without re-listing
+    the whole bucket every cycle, and avoids crawl/rebuild lock collisions."""
     while True:
         try:
             time.sleep(RECRAWL_INTERVAL)
+            now = time.time()
             for eid in _s3_manager.get_all_ids():
                 try:
                     client = _s3_manager.get_client(eid)
                     resp = client.list_buckets()
                     for b in resp.get("Buckets", []):
                         name = b["Name"]
-                        if _queue_crawl(name, eid):
-                            log.info("Auto-recrawl queued for %s:%s", eid, name)
+                        key = f"{eid}:{name}"
+                        meta = _crawl_meta.get(key)
+                        if not meta or "last_full" not in meta:
+                            if _queue_crawl(name, eid):
+                                log.info("Full crawl queued for %s (initial)", key)
+                            continue
+                        if (now - meta["last_full"]) > FULL_CRAWL_INTERVAL:
+                            if _queue_crawl(name, eid):
+                                log.info("Full recrawl queued for %s (cold reconcile)", key)
+                        elif meta.get("duration", 0) > LARGE_BUCKET_SECONDS:
+                            # Delta every tick — the loop's RECRAWL_INTERVAL sleep paces
+                            # it, and _queue_delta_crawl skips if the previous delta is
+                            # still running, so there is no overlap and no skipped ticks.
+                            if _queue_delta_crawl(name, eid):
+                                log.info("Delta crawl queued for %s (fresh data)", key)
+                        else:
+                            if (now - meta["last_full"]) >= RECRAWL_INTERVAL:
+                                _queue_crawl(name, eid)
                 except Exception as e:
                     log.error("Auto-recrawl error (endpoint=%s): %s", eid, e)
         except Exception as outer_e:
@@ -1727,8 +2021,31 @@ def startup():
                 for b in resp.get("Buckets", []):
                     name = b["Name"]
                     _init_db(name, eid)
-                    _queue_crawl(name, eid)
-                    log.info("Queued crawl for %s:%s", eid, name)
+                    # If this bucket already has a complete index from a previous run,
+                    # seed the scheduler's in-memory state from it instead of doing a
+                    # full re-crawl on every restart. The scheduler then keeps it fresh
+                    # via fast delta crawls (large buckets) or cheap full recrawls (small).
+                    seeded = False
+                    try:
+                        with _get_db(name, eid) as db:
+                            row = db.execute("SELECT status, total_objects, crawl_duration "
+                                             "FROM crawl_status WHERE id=1").fetchone()
+                        if row and row["status"] == "complete" and (row["total_objects"] or 0) > 0:
+                            # Use the persisted full-crawl duration if we have it; until a
+                            # full crawl records one, estimate large-ness from object count
+                            # so big buckets go straight to fast deltas (not a full recrawl).
+                            dur = row["crawl_duration"] or 0.0
+                            if not dur and (row["total_objects"] or 0) > 50000:
+                                dur = LARGE_BUCKET_SECONDS + 1
+                            _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
+                            seeded = True
+                            log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
+                                     eid, name, f"{row['total_objects']:,}")
+                    except Exception:
+                        pass
+                    if not seeded:
+                        _queue_crawl(name, eid)
+                        log.info("Queued crawl for %s:%s", eid, name)
             except Exception as e:
                 log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
     threading.Thread(target=_startup_crawl, daemon=True).start()
@@ -3250,15 +3567,23 @@ def delete_bucket(bucket: str, user: dict = Depends(require_admin)):
 
 # ── API: Listing ────────────────────────────────────────────────────────────
 
-def _list_from_index(bucket, prefix):
+def _list_from_index(bucket, prefix, cursor=None, limit=None):
+    """Return (folders, files, next_cursor) for `prefix` from the index.
+
+    When `limit` is set, returns one keyset page of files (key > cursor) plus a
+    `next_cursor` (None when exhausted). Folders are returned only on the first
+    page (cursor empty). When `limit` is falsy, returns every file (legacy mode).
+    """
     prefix_len = len(prefix)
     t0 = time.monotonic()
+    next_cursor = None
+    first_page = not cursor  # folders are delivered only on the first page
 
     with _get_db(bucket) as db:
         seen = set()
         folders = []
 
-        if not prefix:
+        if first_page and not prefix:
             # Root level: use discovered_prefixes (instant) instead of scanning all objects
             try:
                 dp_rows = db.execute("SELECT prefix FROM discovered_prefixes").fetchall()
@@ -3281,7 +3606,7 @@ def _list_from_index(bucket, prefix):
                             folders.append({"prefix": fp, "name": name})
             except Exception:
                 pass
-        else:
+        elif first_page:
             # Subfolder: always compute from objects table (DISTINCT scan) to avoid stale cache.
             # prefix_children is only reliably maintained for level 1 (parent="").
             t_q = time.monotonic()
@@ -3303,10 +3628,20 @@ def _list_from_index(bucket, prefix):
         folders.sort(key=lambda f: f["name"])
         t_files = time.monotonic()
 
-        file_rows = db.execute("""
-            SELECT key, size, last_modified FROM objects
-            WHERE prefix = ? ORDER BY key
-        """, (prefix,)).fetchall()
+        # Keyset pagination (O(page)) when limit is set; otherwise the legacy
+        # full-folder fetch. Both ride the covering index — already ordered by key,
+        # so no temp B-tree and no heap lookups.
+        if limit and limit > 0:
+            file_rows = db.execute(
+                "SELECT key, size, last_modified FROM objects "
+                "WHERE prefix = ? AND key > ? ORDER BY key LIMIT ?",
+                (prefix, cursor or "", limit)).fetchall()
+            if len(file_rows) == limit:
+                next_cursor = file_rows[-1]["key"]
+        else:
+            file_rows = db.execute(
+                "SELECT key, size, last_modified FROM objects WHERE prefix = ? ORDER BY key",
+                (prefix,)).fetchall()
 
         files = [
             {"key": r["key"], "name": r["key"][prefix_len:], "size": r["size"], "last_modified": r["last_modified"]}
@@ -3317,7 +3652,7 @@ def _list_from_index(bucket, prefix):
 
     log.info("[perf] _list_from_index total: %.3fs (%d folders, %d files) prefix=%s",
              time.monotonic() - t0, len(folders), len(files), prefix[:60])
-    return folders, files
+    return folders, files, next_cursor
 
 
 def _list_from_s3_streaming(bucket, prefix, endpoint_id=None):
@@ -3346,14 +3681,19 @@ def _list_from_s3_streaming(bucket, prefix, endpoint_id=None):
 
 
 @app.get("/api/buckets/{bucket}/list")
-def list_objects(bucket: str, prefix: str = "", fresh: bool = False, user: dict = Depends(get_current_user)):
+def list_objects(bucket: str, prefix: str = "", fresh: bool = False,
+                 cursor: str = "", limit: int = 0, user: dict = Depends(get_current_user)):
     """List objects at a prefix. Uses index when available (instant), falls back to S3 streaming.
-    Pass fresh=true to force a direct S3 listing bypassing the index."""
+    Pass fresh=true to force a direct S3 listing bypassing the index.
+    Pass limit>0 (with optional cursor) for keyset pagination: returns one page of
+    files plus `next_cursor`; folders are included only on the first page (empty cursor).
+    Omit limit for the legacy whole-folder response (next_cursor=null, done=true)."""
     eid = _current_endpoint_id()
     if _is_index_ready(bucket) and not fresh:
-        folders, files = _list_from_index(bucket, prefix)
+        folders, files, next_cursor = _list_from_index(bucket, prefix, cursor=cursor or None, limit=limit)
         def gen():
-            yield json.dumps({"folders": folders, "files": files, "done": True,
+            yield json.dumps({"folders": folders, "files": files,
+                              "done": next_cursor is None, "next_cursor": next_cursor,
                               "total_folders": len(folders), "total_files": len(files), "indexed": True}) + "\n"
         return StreamingResponse(gen(), media_type="application/x-ndjson")
     return StreamingResponse(_list_from_s3_streaming(bucket, prefix, endpoint_id=eid), media_type="application/x-ndjson")
@@ -3460,8 +3800,13 @@ def folder_size(bucket: str, prefix: str = "", user: dict = Depends(get_current_
         raise HTTPException(503, "Index not ready")
     with _get_db(bucket) as db:
         if prefix:
-            row = db.execute("SELECT COUNT(*) as count, COALESCE(SUM(size),0) as total_size FROM objects WHERE key LIKE ?",
-                             (prefix + "%",)).fetchone()
+            # Range scan on the covering index (prefix,key,size) — index-only, no
+            # heap fetch, no full scan. Equivalent to key LIKE prefix||'%' because
+            # every object under `prefix` has an immediate-parent prefix under it.
+            row = db.execute(
+                "SELECT COUNT(*) as count, COALESCE(SUM(size),0) as total_size "
+                "FROM objects WHERE prefix >= ? AND prefix < ?",
+                (prefix, _prefix_upper(prefix))).fetchone()
         else:
             # Fast path: use pre-computed totals from crawl_status
             row = db.execute("SELECT total_objects as count, total_size as total_size FROM crawl_status WHERE id=1").fetchone()
@@ -3512,17 +3857,25 @@ def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_cu
     t_sb = time.monotonic()
     prefix_len = len(prefix)
     with _get_db(bucket) as db:
-        like_pattern = (prefix + "%") if prefix else "%"
-        rows = db.execute("""
+        # Restrict to the prefix's subtree via a covered range scan on `prefix`
+        # (index-only) instead of a non-sargable `key LIKE prefix||'%'` full scan.
+        # Rows arrive ordered by (prefix,key), so the GROUP BY streams (no temp B-tree).
+        if prefix:
+            range_sql = "prefix >= ? AND prefix < ?"
+            range_params = (prefix, _prefix_upper(prefix))
+        else:
+            range_sql = "1=1"
+            range_params = ()
+        rows = db.execute(f"""
             SELECT substr(key, 1, ? + instr(substr(key, ? + 1), '/')) as child_prefix,
                    COUNT(*) as count, SUM(size) as total_size
-            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') > 0
+            FROM objects WHERE {range_sql} AND instr(substr(key, ? + 1), '/') > 0
             GROUP BY child_prefix ORDER BY total_size DESC
-        """, (prefix_len, prefix_len, like_pattern, prefix_len)).fetchall()
-        root_row = db.execute("""
+        """, (prefix_len, prefix_len, *range_params, prefix_len)).fetchall()
+        root_row = db.execute(f"""
             SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
-            FROM objects WHERE key LIKE ? AND instr(substr(key, ? + 1), '/') = 0
-        """, (like_pattern, prefix_len)).fetchone()
+            FROM objects WHERE {range_sql} AND instr(substr(key, ? + 1), '/') = 0
+        """, (*range_params, prefix_len)).fetchone()
         log.info("[perf] storage_breakdown: %.3fs (%d children) prefix=%s",
                  time.monotonic() - t_sb, len(rows), prefix[:60])
         children = [

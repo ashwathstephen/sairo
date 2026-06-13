@@ -27,7 +27,11 @@ import TwoFactorSetup from "./components/TwoFactorSetup";
 import EndpointManager from "./components/EndpointManager";
 import ToastContainer, { toast } from "./components/Toast";
 import { checkAuth, logout, refreshSession } from "./auth";
-import { streamList, deleteObjects, deleteFolder, createFolder, bulkCopy, bulkMove, listDeletedVersions, purgeVersions, purgePrefix, getBranding, setCurrentEndpoint, checkForUpdate } from "./api";
+import { streamList, deleteObjects, deleteFolder, createFolder, bulkCopy, bulkMove, listDeletedVersions, purgeVersions, purgePrefix, getBranding, setCurrentEndpoint, checkForUpdate, getCrawlStatus } from "./api";
+
+// Folder listings are fetched in keyset pages of this size so the first page
+// paints instantly and no single response is huge, regardless of folder size.
+const LIST_PAGE_SIZE = 1000;
 
 // Share link route: /share/{token}
 function getShareToken() {
@@ -131,6 +135,9 @@ function MainApp() {
   const dragCounter = useRef(0);
   const abortRef = useRef(null);
   const refreshRef = useRef(null);
+  const crawlFpRef = useRef(null);     // crawl-status fingerprint — gates the 30s silent refresh
+  const silentAbortRef = useRef(null); // in-flight silent-refresh stream, so we can abort it
+  const currentViewRef = useRef({ bucket: "", prefix: "" }); // guards stale refreshes from clobbering state
 
   const isAdmin = user && user.role === "admin";
   const canWrite = isAdmin || bucketPermission === "write";
@@ -218,6 +225,8 @@ function MainApp() {
 
   const load = useCallback((b, pfx) => {
     if (abortRef.current) abortRef.current.abort();
+    if (silentAbortRef.current) silentAbortRef.current.abort();  // cancel any stale background refresh
+    currentViewRef.current = { bucket: b, prefix: pfx };
     setFolders([]);
     setFiles([]);
     setSelected(new Set());
@@ -226,11 +235,14 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
+    crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
+    let firstPage = true;
     abortRef.current = streamList(b, pfx, (page) => {
       if (page.folders.length > 0) setFolders((prev) => [...prev, ...page.folders]);
       if (page.files.length > 0) setFiles((prev) => [...prev, ...page.files]);
       if (page.indexed) setIndexed(true);
+      if (firstPage) { setLoading(false); firstPage = false; }  // paint as soon as page 1 lands
       if (page.done) { setLoading(false); setDone(true); }
     }, (err) => {
       setLoading(false);
@@ -241,7 +253,7 @@ function MainApp() {
       } else {
         toast(`Failed to load: ${err.message}`, "error");
       }
-    });
+    }, { limit: LIST_PAGE_SIZE });
   }, []);
 
   useEffect(() => {
@@ -257,19 +269,32 @@ function MainApp() {
   }, []);
 
   const silentRefresh = useCallback((b, pfx) => {
-    let newFolders = [];
-    let newFiles = [];
-    const controller = streamList(b, pfx, (page) => {
-      if (page.folders.length > 0) newFolders = [...newFolders, ...page.folders];
-      if (page.files.length > 0) newFiles = [...newFiles, ...page.files];
-      if (page.indexed) setIndexed(true);
-      if (page.done) {
-        setFolders(newFolders);
-        setFiles(newFiles);
-        setDone(true);
-      }
-    });
-    return controller;
+    // Cheap (~ms) crawl-status check first: only re-fetch the folder when the index
+    // actually changed since the last load. Avoids re-downloading an unchanged folder
+    // every 30s — the previous behavior re-streamed the whole listing each tick.
+    getCrawlStatus(b).then((status) => {
+      const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
+      if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
+      crawlFpRef.current = fp;
+      let newFolders = [];
+      let newFiles = [];
+      if (silentAbortRef.current) silentAbortRef.current.abort();  // supersede any prior in-flight refresh
+      silentAbortRef.current = streamList(b, pfx, (page) => {
+        if (page.folders.length > 0) newFolders = [...newFolders, ...page.folders];
+        if (page.files.length > 0) newFiles = [...newFiles, ...page.files];
+        if (page.indexed) setIndexed(true);
+        if (page.done) {
+          // Only apply if the user is still viewing this exact folder — never let a
+          // late refresh of a previous folder clobber the current view.
+          const v = currentViewRef.current;
+          if (v.bucket === b && v.prefix === pfx) {
+            setFolders(newFolders);
+            setFiles(newFiles);
+            setDone(true);
+          }
+        }
+      }, null, { limit: LIST_PAGE_SIZE });
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -283,6 +308,7 @@ function MainApp() {
 
     return () => {
       if (abortRef.current) abortRef.current.abort();
+      if (silentAbortRef.current) silentAbortRef.current.abort();
       if (refreshRef.current) clearInterval(refreshRef.current);
     };
   }, [bucket, prefix, endpointId, load, silentRefresh, user]);

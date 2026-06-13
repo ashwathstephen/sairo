@@ -70,39 +70,60 @@ function bucketBase(bucket) {
   return `${endpointBase()}/buckets/${encodeURIComponent(bucket)}`;
 }
 
-export function streamList(bucket, prefix, onPage, onError) {
+// streamList(bucket, prefix, onPage, onError, { limit })
+//   limit > 0  → keyset pagination: fetch one page of `limit` files at a time and
+//                follow next_cursor until exhausted. onPage fires per page, so the
+//                first page paints instantly and no single response is huge. Folders
+//                arrive only on the first page (empty cursor).
+//   limit == 0 → legacy single request that returns the whole folder at once.
+export function streamList(bucket, prefix, onPage, onError, opts = {}) {
   const controller = new AbortController();
-  const params = new URLSearchParams({ prefix });
+  const limit = opts.limit || 0;
 
-  apiFetch(`${bucketBase(bucket)}/list?${params}`, { signal: controller.signal })
-    .then(async (res) => {
-      if (!res.ok) throw new Error(`List failed: ${res.status}`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+  async function fetchPage(cursor) {
+    const params = new URLSearchParams({ prefix });
+    if (limit > 0) {
+      params.set("limit", String(limit));
+      if (cursor) params.set("cursor", cursor);
+    }
+    const res = await apiFetch(`${bucketBase(bucket)}/list?${params}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`List failed: ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let lastPage = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.trim()) { lastPage = JSON.parse(line); onPage(lastPage); }
+      }
+    }
+    if (buffer.trim()) { lastPage = JSON.parse(buffer); onPage(lastPage); }
+    return lastPage;
+  }
 
+  (async () => {
+    try {
+      let cursor = "";
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (line.trim()) {
-            onPage(JSON.parse(line));
-          }
+        const page = await fetchPage(cursor);
+        if (limit > 0 && page && page.next_cursor) {
+          cursor = page.next_cursor;
+        } else {
+          break;
         }
       }
-      if (buffer.trim()) {
-        onPage(JSON.parse(buffer));
-      }
-    })
-    .catch((err) => {
+    } catch (err) {
       if (err.name !== "AbortError") {
         console.error("Stream error:", err);
         if (onError) onError(err);
       }
-    });
+    }
+  })();
 
   return controller;
 }
@@ -514,6 +535,26 @@ export async function getVersionPresignedUrl(bucket, key, versionId, expires = 3
 
 export function getUploadUrl(bucket) {
   return `${bucketBase(bucket)}/upload`;
+}
+
+export async function getPresignedUploadUrls(bucket, keys, prefix = "") {
+  const res = await apiFetch(`${bucketBase(bucket)}/presigned-upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keys, prefix }),
+  });
+  if (!res.ok) throw new Error(`Presigned upload failed: ${res.status}`);
+  return res.json();
+}
+
+export async function notifyUpload(bucket, uploads) {
+  const res = await apiFetch(`${bucketBase(bucket)}/notify-upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uploads }),
+  });
+  if (!res.ok) throw new Error(`Notify upload failed: ${res.status}`);
+  return res.json();
 }
 
 export function uploadFileWithProgress(bucket, prefix, file, onProgress) {
