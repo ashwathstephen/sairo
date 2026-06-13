@@ -198,7 +198,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.3.1"
+SAIRO_VERSION = "3.4.0"
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
