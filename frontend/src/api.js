@@ -557,6 +557,47 @@ export async function notifyUpload(bucket, uploads) {
   return res.json();
 }
 
+// ── Multipart direct upload (browser → S3, parallel, resumable) ──
+export async function multipartInitiate(bucket, key, prefix = "", contentType = "") {
+  const res = await apiFetch(`${bucketBase(bucket)}/multipart/initiate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, prefix, content_type: contentType }),
+  });
+  if (!res.ok) throw new Error(`Multipart initiate failed: ${res.status}`);
+  return res.json(); // { key, upload_id }
+}
+
+export async function multipartSign(bucket, key, uploadId, partNumbers) {
+  const res = await apiFetch(`${bucketBase(bucket)}/multipart/sign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, upload_id: uploadId, part_numbers: partNumbers }),
+  });
+  if (!res.ok) throw new Error(`Multipart sign failed: ${res.status}`);
+  return res.json(); // { urls: [{ part_number, url }] }
+}
+
+export async function multipartComplete(bucket, key, uploadId, parts) {
+  const res = await apiFetch(`${bucketBase(bucket)}/multipart/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, upload_id: uploadId, parts }),
+  });
+  if (!res.ok) throw new Error(`Multipart complete failed: ${res.status}`);
+  return res.json();
+}
+
+export async function multipartAbort(bucket, key, uploadId) {
+  try {
+    await apiFetch(`${bucketBase(bucket)}/multipart/abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, upload_id: uploadId }),
+    });
+  } catch { /* best-effort cleanup */ }
+}
+
 export function uploadFileWithProgress(bucket, prefix, file, onProgress) {
   const xhr = new XMLHttpRequest();
   const form = new FormData();
