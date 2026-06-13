@@ -2,6 +2,24 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.3.1] - 2026-06-14
+
+Freshness-reliability patch for the adaptive delta crawler on large, actively-written buckets. Validated end-to-end against live production object storage (per-partition index counts compared to S3 ground truth).
+
+### Fixed
+
+- **New partitions are no longer missed** — delta discovery now fully paginates each level's child folders, so a freshly-created partition (e.g. a new hourly folder) is picked up even when it sorts beyond the first 1000 siblings. Previously a brand-new hour could stay invisible until the next full reconcile.
+- **Discovery spans every dataset** — the delta crawler walks all top-level datasets breadth-first (listing each level in parallel) instead of only the parents of the most-recently-modified objects, so new data in a dataset that isn't the globally newest is still indexed promptly.
+- **Correct newest-partition selection** — partition levels are ordered with a natural-sort key, so non-zero-padded names (`day=2` … `day=10`, `hour=9` … `hour=10`) select the true newest partition rather than the lexicographically-largest one.
+- **Partition-vs-branch classification by fan-out** — levels with many children are treated as time partitions (follow the newest few); levels with few children are descriptive branches (follow all), so numerically-named branches are no longer mistaken for partitions and skipped.
+- **No perpetual "indexing" state** — a cooldown is enforced after each delta crawl completes, so deltas on high-latency storage no longer queue back-to-back and a bucket settles to "complete" between cycles.
+- **Restart no longer triggers redundant full re-crawls** — startup seeds the scheduler from the objects table rather than requiring `status = complete`, so a restart during a crawl resumes via fast deltas instead of re-listing the whole bucket.
+- **Index stays "ready" during crawl transitions** — readiness falls back to the presence of indexed objects when crawl-status counters are transiently zero, preventing queries from falling back to slow live S3 listing mid-crawl.
+
+### Changed
+
+- **S3 connection pool sized for parallel listing** — the client pool defaults to 32 connections (env `S3_MAX_POOL_CONNECTIONS`) so parallel delta/crawl list calls don't serialize on a 10-connection pool. New delta tunables: `DELTA_BRANCH_FANOUT`, `DELTA_NEWEST_K`, `DELTA_MAX_DEPTH`, `DELTA_LIST_CONCURRENCY`, `DELTA_MAX_NODES`.
+
 ## [3.3.0] - 2026-06-13
 
 Performance & freshness release: validated end-to-end against a 1M-object / 241 TB production bucket.

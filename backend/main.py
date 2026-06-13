@@ -198,7 +198,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.3.0"
+SAIRO_VERSION = "3.3.1"
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
@@ -276,6 +276,7 @@ _S3_CONFIG = Config(
     connect_timeout=10,
     read_timeout=120,
     retries={"max_attempts": 3, "mode": "adaptive"},
+    max_pool_connections=int(os.environ.get("S3_MAX_POOL_CONNECTIONS", "32")),  # parallel crawl/delta list calls
 )
 
 # ── Multi-Endpoint S3 Client Manager ──────────────────────────────────────
@@ -1741,10 +1742,16 @@ def _is_index_ready(bucket):
         return False
     with _get_db(bucket) as db:
         row = db.execute("SELECT status, total_objects FROM crawl_status WHERE id=1").fetchone()
-        if not row:
+        if row and (row["status"] == "complete" or (row["total_objects"] or 0) > 0):
+            return True
+        # Source of truth is the objects table. crawl_status counters can be
+        # transiently 0/NULL during a crawl transition — never let that make a
+        # populated index look "not ready" (which would fall queries back to slow
+        # S3 listing). If any object is indexed, the index is usable.
+        try:
+            return db.execute("SELECT 1 FROM objects LIMIT 1").fetchone() is not None
+        except Exception:
             return False
-        # Index is usable if we have data (even during recrawl) or status is complete
-        return row["status"] == "complete" or (row["total_objects"] or 0) > 0
 
 
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
@@ -1808,6 +1815,80 @@ def _delta_list_prefix(client, bucket, prefix):
     return objs
 
 
+DELTA_BRANCH_FANOUT = int(os.environ.get("DELTA_BRANCH_FANOUT", "8"))   # descriptive levels with <= this many children → follow all
+DELTA_NEWEST_K = int(os.environ.get("DELTA_NEWEST_K", "2"))             # partition levels → newest K only (current + just-rolled)
+DELTA_MAX_DEPTH = int(os.environ.get("DELTA_MAX_DEPTH", "12"))          # safety cap on walk depth
+DELTA_LIST_CONCURRENCY = int(os.environ.get("DELTA_LIST_CONCURRENCY", "16"))  # parallel S3 list calls per level
+DELTA_MAX_NODES = int(os.environ.get("DELTA_MAX_NODES", "2000"))        # safety cap on folders visited per delta
+
+
+def _natural_key(prefix):
+    """Natural sort key so the NEWEST partition is picked correctly even for
+    non-zero-padded numeric names: day=2 < day=10, hour=9 < hour=10 (a plain
+    lexicographic sort would order '10' before '2' and '9'). Numbers sort before
+    text and compare numerically; the (0,int)/(1,str) tags avoid int-vs-str errors
+    when siblings have slightly different shapes."""
+    s = prefix.rstrip("/")
+    return [(0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", s) if t]
+
+
+def _list_children(client, bucket, prefix):
+    """Immediate child 'folders' of prefix (delimiter list, fully paginated)."""
+    out, token = [], None
+    while True:
+        params = {"Bucket": bucket, "Prefix": prefix, "Delimiter": "/", "MaxKeys": 1000}
+        if token:
+            params["ContinuationToken"] = token
+        resp = client.list_objects_v2(**params)
+        out.extend(cp["Prefix"] for cp in resp.get("CommonPrefixes", []))
+        if not resp.get("IsTruncated", False):
+            break
+        token = resp.get("NextContinuationToken")
+    return out
+
+
+def _discover_delta_targets(client, bucket, endpoint_id, tops):
+    """Find where new data is, across ALL datasets, without re-listing the bucket.
+    Breadth-first from the top-level datasets: each level's folders are listed in
+    PARALLEL (hiding the per-call S3 latency), while the fast local index checks run
+    on this thread. At each level: digit-named / very-wide levels are time PARTITIONS
+    (follow only the newest K = current + just-rolled); descriptive levels are
+    BRANCHES (data/, metadata/, aggregation types) → follow all. Collect leaf
+    partitions (re-listed for appended files) + any partition not yet indexed (a
+    brand-new hour folder — even when it sits beyond the first 1000 siblings and in a
+    dataset that isn't the globally most-recently-modified one)."""
+    if not tops:
+        return set()
+    targets, frontier, visited = set(), list(tops), 0
+    with _get_db(bucket, endpoint_id) as db, \
+         ThreadPoolExecutor(max_workers=DELTA_LIST_CONCURRENCY) as ex:
+        depth = 0
+        while frontier and depth < DELTA_MAX_DEPTH and visited < DELTA_MAX_NODES:
+            depth += 1
+            visited += len(frontier)
+            listed = list(ex.map(lambda p: (p, _list_children(client, bucket, p)), frontier))
+            nxt = []
+            for cur, children in listed:
+                if not children:
+                    targets.add(cur)  # leaf: objects live directly under cur
+                    continue
+                # Few children → descriptive branches (data/, metadata/, model names,
+                # a handful of partitions): follow ALL (cheap, never skips a sibling).
+                # Many children → time/sequence partitions: follow only the newest K,
+                # using a natural sort so non-zero-padded names pick the true newest.
+                if len(children) > DELTA_BRANCH_FANOUT:
+                    chosen = sorted(children, key=_natural_key)[-DELTA_NEWEST_K:]
+                else:
+                    chosen = children
+                for c in chosen:
+                    if not db.execute("SELECT 1 FROM objects WHERE prefix >= ? AND prefix < ? LIMIT 1",
+                                      (c, _prefix_upper(c))).fetchone():
+                        targets.add(c)    # brand-new partition (e.g. a fresh hour folder)
+                    nxt.append(c)
+            frontier = nxt
+    return targets
+
+
 def _delta_crawl(bucket, endpoint_id):
     """Fast incremental crawl: re-list ONLY the narrow hot prefixes (where new data
     lands) plus any brand-new sibling partitions, in PARALLEL, and incremental-upsert.
@@ -1827,26 +1908,21 @@ def _delta_crawl(bucket, endpoint_id):
                    (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
         db.commit()
 
-    # Discover brand-new sibling partitions (e.g. a freshly-created hour folder):
-    # delimiter-list each hot prefix's parent and include any child prefix that has
-    # no objects in the index yet. One cheap request per distinct parent.
-    targets = set(hot)
-    parents = {_parent_prefix(p) for p in hot if _parent_prefix(p)}
+    # Find where new data is via a bounded tree walk across ALL top-level datasets
+    # (folder_stats holds them). This catches a fresh hour folder even when it sits
+    # beyond the first 1000 siblings AND in a dataset that isn't the globally
+    # most-recently-modified one. Union with the index-derived hot prefixes (which
+    # also catch backfills into a not-newest partition).
     with _get_db(bucket, eid) as db:
-        for par in parents:
-            try:
-                resp = client.list_objects_v2(Bucket=bucket, Prefix=par, Delimiter="/", MaxKeys=1000)
-                for cp in resp.get("CommonPrefixes", []):
-                    child = cp["Prefix"]
-                    seen = db.execute("SELECT 1 FROM objects WHERE prefix >= ? AND prefix < ? LIMIT 1",
-                                      (child, _prefix_upper(child))).fetchone()
-                    if not seen:
-                        targets.add(child)
-            except Exception:
-                pass
+        tops = [r[0] for r in db.execute("SELECT prefix FROM folder_stats WHERE prefix != ''").fetchall() if r[0]]
         row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
         gen = (row[0] if row else 0) or 0
-    targets = _minimal_prefixes(targets)
+    try:
+        discovered = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
+    except Exception as e:
+        log.warning("[%s:%s] delta target discovery failed: %s", eid, bucket, e)
+        discovered = set()
+    targets = _minimal_prefixes(set(hot) | discovered)
 
     # List all targets in parallel (the hot set is small; this keeps a delta fast
     # even when several partitions are active).
@@ -1973,11 +2049,14 @@ def _auto_recrawl():
                             if _queue_crawl(name, eid):
                                 log.info("Full recrawl queued for %s (cold reconcile)", key)
                         elif meta.get("duration", 0) > LARGE_BUCKET_SECONDS:
-                            # Delta every tick — the loop's RECRAWL_INTERVAL sleep paces
-                            # it, and _queue_delta_crawl skips if the previous delta is
-                            # still running, so there is no overlap and no skipped ticks.
-                            if _queue_delta_crawl(name, eid):
-                                log.info("Delta crawl queued for %s (fresh data)", key)
+                            # Large bucket → keep fresh via delta crawls, but leave a
+                            # cooldown of RECRAWL_INTERVAL AFTER each delta ends so it
+                            # doesn't run back-to-back (the delta itself can take a while
+                            # on a high-latency S3). last_delta is stamped when a delta
+                            # finishes; _queue_delta_crawl also skips if one is running.
+                            if (now - meta.get("last_delta", 0)) >= RECRAWL_INTERVAL:
+                                if _queue_delta_crawl(name, eid):
+                                    log.info("Delta crawl queued for %s (fresh data)", key)
                         else:
                             if (now - meta["last_full"]) >= RECRAWL_INTERVAL:
                                 _queue_crawl(name, eid)
@@ -2021,26 +2100,27 @@ def startup():
                 for b in resp.get("Buckets", []):
                     name = b["Name"]
                     _init_db(name, eid)
-                    # If this bucket already has a complete index from a previous run,
-                    # seed the scheduler's in-memory state from it instead of doing a
-                    # full re-crawl on every restart. The scheduler then keeps it fresh
-                    # via fast delta crawls (large buckets) or cheap full recrawls (small).
+                    # If this bucket already has an index from a previous run, seed the
+                    # scheduler from it instead of doing a full re-crawl on every restart.
+                    # Key off the OBJECTS TABLE, not crawl_status='complete' — a restart
+                    # mid-crawl leaves status='crawling', and requiring 'complete' would
+                    # then trigger a redundant (multi-minute) full re-crawl. The scheduler
+                    # keeps it fresh via fast delta crawls and a periodic full reconcile.
                     seeded = False
                     try:
                         with _get_db(name, eid) as db:
-                            row = db.execute("SELECT status, total_objects, crawl_duration "
-                                             "FROM crawl_status WHERE id=1").fetchone()
-                        if row and row["status"] == "complete" and (row["total_objects"] or 0) > 0:
-                            # Use the persisted full-crawl duration if we have it; until a
-                            # full crawl records one, estimate large-ness from object count
-                            # so big buckets go straight to fast deltas (not a full recrawl).
-                            dur = row["crawl_duration"] or 0.0
-                            if not dur and (row["total_objects"] or 0) > 50000:
+                            row = db.execute("SELECT total_objects, crawl_duration FROM crawl_status WHERE id=1").fetchone()
+                            total = (row["total_objects"] if row else 0) or 0
+                            if total == 0:  # counters can lag an interrupted crawl — trust the table
+                                total = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+                            dur = (row["crawl_duration"] if row else 0) or 0.0
+                        if total > 0:
+                            if not dur and total > 50000:  # estimate large-ness until a full crawl records a duration
                                 dur = LARGE_BUCKET_SECONDS + 1
                             _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
                             seeded = True
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
-                                     eid, name, f"{row['total_objects']:,}")
+                                     eid, name, f"{total:,}")
                     except Exception:
                         pass
                     if not seeded:
