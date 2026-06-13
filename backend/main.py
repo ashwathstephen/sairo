@@ -4778,9 +4778,8 @@ def delete_folder(bucket: str, req: DeleteFolderRequest, user: dict = Depends(re
     return {"deleted": total_deleted, "errors": total_errors, "prefix": pfx}
 
 
-MULTIPART_THRESHOLD = 5 * 1024 * 1024  # 5 MB
-MULTIPART_CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB per part
-MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", str(5 * 1024 * 1024 * 1024)))  # 5 GB default
+MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", str(5 * 1024 * 1024 * 1024)))  # 5 GB default (proxy fallback only)
+UPLOAD_PROXY_CONCURRENCY = int(os.environ.get("UPLOAD_PROXY_CONCURRENCY", "3"))  # files streamed in parallel through the proxy
 
 
 @app.post("/api/buckets/{bucket}/upload")
@@ -4790,17 +4789,19 @@ async def upload_files(bucket: str, request: Request, prefix: str = Form(""), fi
     if user["role"] != "admin":
         bp = getattr(request.state, "bucket_permission", None)
         if bp != "write":
-            raise HTTPException(403, "Admin access required")
+            raise HTTPException(403, "Write access required")
     eid = _current_endpoint_id()
     client = _s3_manager.get_client(eid)
 
     # Stream each upload straight to S3 from its (disk-backed) spooled temp file —
-    # never buffer whole files in memory. This is the proxy fallback; the default
-    # path is direct browser→S3 (multipart for large files). boto3 upload_fileobj
-    # does multipart for large objects, reading the source in bounded chunks, so
-    # a 5 GB upload uses MBs of RAM, not GBs (fixes the OOM / pod restart at scale).
-    # Small chunks + bounded concurrency keep peak memory at ~chunksize*max_concurrency
-    # PER FILE (≈32 MB), independent of file size — this is what prevents the OOM.
+    # never buffer a whole file in memory. This is the PROXY FALLBACK; the default
+    # path is direct browser→S3 (presigned multipart for large files, zero bytes
+    # through the server). boto3 upload_fileobj does multipart for large objects,
+    # reading the source in bounded chunks, so peak RAM is INDEPENDENT of file size
+    # (measured ≈100 MB for a single in-flight file regardless of whether it is
+    # 500 MB or 50 GB — vs the old read-into-memory path that scaled 1:1 and OOM'd).
+    # Total proxy memory is therefore bounded by ≈100 MB × UPLOAD_PROXY_CONCURRENCY,
+    # not by file size — which is what fixes the OOM / pod restart at scale.
     from boto3.s3.transfer import TransferConfig
     transfer_cfg = TransferConfig(multipart_threshold=8 * 1024 * 1024,
                                   multipart_chunksize=8 * 1024 * 1024,
@@ -4824,7 +4825,7 @@ async def upload_files(bucket: str, request: Request, prefix: str = Form(""), fi
     # Upload to S3 concurrently (each file streams from its own spooled temp file)
     import concurrent.futures
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(file_data))) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(UPLOAD_PROXY_CONCURRENCY, len(file_data)))) as pool:
         futures = [pool.submit(_put_one, key, fileobj, size) for key, fileobj, size in file_data]
         for fut in concurrent.futures.as_completed(futures):
             key, file_size = fut.result()
@@ -5140,12 +5141,22 @@ def _ensure_upload_cors(bucket: str, request: Request, client):
     try:
         resp = client.get_bucket_cors(Bucket=bucket)
         rules = resp.get("CORSRules", [])
-        # Check if PUT is already allowed from this origin
+        # A rule only suffices if it allows PUT from this origin AND exposes ETag —
+        # the browser MUST read the ETag response header on each multipart part PUT
+        # (xhr.getResponseHeader("ETag")), which CORS gates via ExposeHeaders. A
+        # pre-existing PUT rule that omits ETag would otherwise silently break every
+        # multipart upload, so upgrade it in place instead of short-circuiting.
         for rule in rules:
             origins = rule.get("AllowedOrigins", [])
             methods = rule.get("AllowedMethods", [])
             if ("*" in origins or origin in origins) and "PUT" in methods:
-                return  # already configured
+                exposed = [h.lower() for h in rule.get("ExposeHeaders", [])]
+                if "etag" in exposed or "*" in exposed:
+                    return  # already fully configured
+                rule["ExposeHeaders"] = rule.get("ExposeHeaders", []) + ["ETag"]
+                client.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": rules})
+                log.info("Upgraded CORS rule to expose ETag for origin=%s on bucket=%s", origin, bucket)
+                return
     except ClientError as e:
         if "NoSuchCORSConfiguration" not in str(e):
             raise
@@ -5173,6 +5184,9 @@ def _require_bucket_write(user, request):
         raise HTTPException(403, "Write access required")
 
 
+MULTIPART_URL_EXPIRY = int(os.environ.get("MULTIPART_URL_EXPIRY", "3600"))  # presigned part-URL TTL (frontend signs just-in-time)
+
+
 class MultipartInitiateRequest(BaseModel):
     key: str
     prefix: str = ""
@@ -5197,6 +5211,7 @@ class MultipartUploadAbortRequest(BaseModel):
 
 
 @app.post("/api/buckets/{bucket}/multipart/initiate")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def multipart_initiate(bucket: str, req: MultipartInitiateRequest, request: Request, user: dict = Depends(get_current_user)):
     """Start a multipart upload; returns its UploadId. The browser uploads parts directly to S3."""
     _require_bucket_write(user, request)
@@ -5211,47 +5226,60 @@ def multipart_initiate(bucket: str, req: MultipartInitiateRequest, request: Requ
     if req.content_type:
         params["ContentType"] = req.content_type
     resp = client.create_multipart_upload(**params)
+    _audit("multipart_initiate", user["username"], bucket=bucket, details=key)
     return {"key": key, "upload_id": resp["UploadId"]}
 
 
 @app.post("/api/buckets/{bucket}/multipart/sign")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def multipart_sign(bucket: str, req: MultipartSignRequest, request: Request, user: dict = Depends(get_current_user)):
-    """Return presigned URLs to PUT a batch of parts directly to S3."""
+    """Return presigned URLs to PUT a batch of parts directly to S3. The frontend
+    signs parts just-in-time (right before each PUT) so a URL never expires mid-flight
+    on a long upload, and re-signs on a 403."""
     _require_bucket_write(user, request)
     if not req.part_numbers or len(req.part_numbers) > 1000:
         raise HTTPException(400, "Provide 1-1000 part numbers")
+    if any(pn < 1 or pn > 10000 for pn in req.part_numbers):
+        raise HTTPException(400, "Part numbers must be between 1 and 10000 (S3 limit)")
     eid = _current_endpoint_id()
     client = _s3_manager.get_client(eid)
-    expires = 3600
     urls = [
         {"part_number": pn,
          "url": client.generate_presigned_url(
              "upload_part",
              Params={"Bucket": bucket, "Key": req.key, "UploadId": req.upload_id, "PartNumber": pn},
-             ExpiresIn=expires)}
+             ExpiresIn=MULTIPART_URL_EXPIRY)}
         for pn in req.part_numbers
     ]
-    return {"urls": urls, "expires_in": expires}
+    return {"urls": urls, "expires_in": MULTIPART_URL_EXPIRY}
 
 
 @app.post("/api/buckets/{bucket}/multipart/complete")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def multipart_complete(bucket: str, req: MultipartCompleteRequest, request: Request, user: dict = Depends(get_current_user)):
     """Complete a multipart upload from the uploaded parts' ETags."""
     _require_bucket_write(user, request)
     if not req.parts:
         raise HTTPException(400, "No parts provided")
+    try:
+        parts = sorted(
+            ({"PartNumber": int(p["PartNumber"]), "ETag": str(p["ETag"])} for p in req.parts),
+            key=lambda p: p["PartNumber"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "Each part must have an integer PartNumber and an ETag")
+    if any(p["PartNumber"] < 1 or p["PartNumber"] > 10000 or not p["ETag"] for p in parts):
+        raise HTTPException(400, "Invalid part: PartNumber must be 1-10000 and ETag non-empty")
     eid = _current_endpoint_id()
     client = _s3_manager.get_client(eid)
-    parts = sorted(
-        ({"PartNumber": int(p["PartNumber"]), "ETag": p["ETag"]} for p in req.parts),
-        key=lambda p: p["PartNumber"])
     resp = client.complete_multipart_upload(
         Bucket=bucket, Key=req.key, UploadId=req.upload_id,
         MultipartUpload={"Parts": parts})
+    _audit("multipart_complete", user["username"], bucket=bucket, details=f"{req.key} ({len(parts)} parts)")
     return {"key": req.key, "etag": (resp.get("ETag") or "").strip('"')}
 
 
 @app.post("/api/buckets/{bucket}/multipart/abort")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def multipart_abort_direct(bucket: str, req: MultipartUploadAbortRequest, request: Request, user: dict = Depends(get_current_user)):
     """Abort an in-progress multipart upload (cleanup on cancel/failure)."""
     _require_bucket_write(user, request)
@@ -5261,6 +5289,7 @@ def multipart_abort_direct(bucket: str, req: MultipartUploadAbortRequest, reques
         client.abort_multipart_upload(Bucket=bucket, Key=req.key, UploadId=req.upload_id)
     except Exception as e:
         log.warning("Failed to abort multipart upload %s on %s: %s", req.upload_id, bucket, e)
+    _audit("multipart_abort", user["username"], bucket=bucket, details=req.key)
     return {"aborted": True}
 
 

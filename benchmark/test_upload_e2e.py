@@ -76,22 +76,29 @@ def run():
     part_size = 16 * 1024 * 1024
     nparts = (len(big) + part_size - 1) // part_size
     nums = list(range(1, nparts + 1))
-    signed = client.post(f"/api/buckets/{BUCKET}/multipart/sign",
-                        json={"key": key2, "upload_id": upload_id, "part_numbers": nums}, cookies=cookies).json()
-    url_by_part = {u["part_number"]: u["url"] for u in signed["urls"]}
+    # Mirror the production frontend: sign each part JUST BEFORE its PUT (just-in-time),
+    # one part per sign call, so a presigned URL can never expire mid-upload.
     parts = []
+    resign_ok = True
     for pn in nums:
+        signed = client.post(f"/api/buckets/{BUCKET}/multipart/sign",
+                             json={"key": key2, "upload_id": upload_id, "part_numbers": [pn]}, cookies=cookies).json()
+        url = signed["urls"][0]["url"]
         chunk = big[(pn - 1) * part_size: pn * part_size]
-        st, etag = put_url(url_by_part[pn], chunk)
+        st, etag = put_url(url, chunk)
         parts.append({"PartNumber": pn, "ETag": etag})
+    # re-signing an already-uploaded part must still return a usable URL (the on-403 retry path)
+    resign = client.post(f"/api/buckets/{BUCKET}/multipart/sign",
+                         json={"key": key2, "upload_id": upload_id, "part_numbers": [1]}, cookies=cookies)
+    resign_ok = resign.status_code == 200 and resign.json()["urls"][0]["url"].startswith("http")
     comp = client.post(f"/api/buckets/{BUCKET}/multipart/complete",
                        json={"key": key2, "upload_id": upload_id, "parts": parts}, cookies=cookies)
     client.post(f"/api/buckets/{BUCKET}/notify-upload",
                 json={"uploads": [{"key": key2, "size": len(big)}]}, cookies=cookies)
     got_md5, got_size = s3_object_md5(s3, key2)
-    check("multipart direct upload (120MB, 8 parts)",
-          comp.status_code == 200 and got_md5 == md5(big) and got_size == len(big),
-          f"parts={nparts}, size={got_size}, md5 match={got_md5 == md5(big)}")
+    check("multipart direct upload (120MB, 8 parts, per-part JIT signing)",
+          comp.status_code == 200 and got_md5 == md5(big) and got_size == len(big) and resign_ok,
+          f"parts={nparts}, size={got_size}, md5 match={got_md5 == md5(big)}, resign_ok={resign_ok}")
 
     # ── 2b. multipart ABORT cleanup ──
     init2 = client.post(f"/api/buckets/{BUCKET}/multipart/initiate",

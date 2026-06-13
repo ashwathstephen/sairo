@@ -36,6 +36,12 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
     }
   }, []);
 
+  // If the modal unmounts mid-upload (navigation, logout, route change), abort the
+  // in-flight transfers — this also fires each worker's abort path, which calls
+  // multipartAbort() to clean up the partial multipart upload on S3 rather than
+  // leaving detached XHRs and orphaned (billed) parts behind.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const addFiles = (newFiles) => {
     setFileStates(prev => [
       ...prev,
@@ -87,15 +93,21 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
 
     // PUT a body to a presigned URL with progress; resolves with the xhr (for ETag).
     const putWithProgress = (url, body, onLoaded) => new Promise((resolve, reject) => {
+      if (abortController.signal.aborted) { reject(Object.assign(new Error("Aborted"), { name: "AbortError" })); return; }
       const xhr = new XMLHttpRequest();
+      const onAbort = () => xhr.abort();
+      // Remove the signal listener on every terminal path — otherwise a many-part
+      // upload accretes thousands of listeners (each retaining its XHR) on the
+      // session-long AbortController.
+      const done = (fn) => { abortController.signal.removeEventListener("abort", onAbort); fn(); };
       xhr.upload.addEventListener("progress", (e) => { if (e.lengthComputable) onLoaded(e.loaded); });
-      xhr.addEventListener("load", () => {
+      xhr.addEventListener("load", () => done(() => {
         if (xhr.status >= 200 && xhr.status < 300) resolve(xhr);
-        else reject(new Error(`S3 upload failed: ${xhr.status}`));
-      });
-      xhr.addEventListener("error", () => reject(new Error("Network error")));
-      xhr.addEventListener("abort", () => { const er = new Error("Aborted"); er.name = "AbortError"; reject(er); });
-      abortController.signal.addEventListener("abort", () => xhr.abort());
+        else reject(Object.assign(new Error(`S3 upload failed: ${xhr.status}`), { status: xhr.status }));
+      }));
+      xhr.addEventListener("error", () => done(() => reject(new Error("Network error"))));
+      xhr.addEventListener("abort", () => done(() => reject(Object.assign(new Error("Aborted"), { name: "AbortError" }))));
+      abortController.signal.addEventListener("abort", onAbort);
       xhr.open("PUT", url);
       xhr.send(body);
     });
@@ -123,15 +135,6 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
 
       const { key, upload_id: uploadId } = await multipartInitiate(bucket, file.name, prefix, file.type || "");
       try {
-        // Presign all parts (batched: the sign endpoint accepts up to 1000 at a time).
-        const urlByPart = {};
-        for (let start = 1; start <= numParts; start += 1000) {
-          const nums = [];
-          for (let p = start; p < start + 1000 && p <= numParts; p++) nums.push(p);
-          const { urls } = await multipartSign(bucket, key, uploadId, nums);
-          for (const u of urls) urlByPart[u.part_number] = u.url;
-        }
-
         const loadedPerPart = new Array(numParts + 1).fill(0);
         const refreshProgress = () => {
           const loaded = loadedPerPart.reduce((a, b) => a + b, 0);
@@ -151,13 +154,20 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
             let attempt = 0;
             for (;;) {
               try {
-                const xhr = await putWithProgress(urlByPart[part], blob, (loaded) => { loadedPerPart[part] = loaded; refreshProgress(); });
+                // Sign the part JUST BEFORE uploading it (and again on every retry) so a
+                // presigned URL can never expire before use — a large/slow upload can run
+                // for hours, far past any single URL's TTL. Re-signing also recovers from a
+                // 403 (expired/clock-skew) instead of hammering a dead URL.
+                const { urls } = await multipartSign(bucket, key, uploadId, [part]);
+                const xhr = await putWithProgress(urls[0].url, blob, (loaded) => { loadedPerPart[part] = loaded; refreshProgress(); });
                 const etag = xhr.getResponseHeader("ETag");
-                if (!etag) throw new Error("Missing ETag on part (check S3 CORS ExposeHeaders)");
+                // No ETag means the bucket's CORS doesn't expose it — retrying won't help
+                // (it's a config problem, not transient), so fail fast with a clear message.
+                if (!etag) throw Object.assign(new Error("Bucket CORS must expose the ETag header for multipart upload"), { fatal: true });
                 etags[part] = etag;
                 break;
               } catch (e) {
-                if (e.name === "AbortError") throw e;
+                if (e.name === "AbortError" || e.fatal) throw e;
                 if (++attempt > PART_RETRIES) throw e;
                 loadedPerPart[part] = 0; refreshProgress();
                 await new Promise(r => setTimeout(r, 500 * attempt));  // backoff, then retry this part
@@ -377,7 +387,9 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
         )}
 
         <div className="modal-actions">
-          <button onClick={onClose} disabled={uploading}>Cancel</button>
+          <button onClick={uploading ? () => abortRef.current?.abort() : onClose}>
+            {uploading ? "Stop" : "Cancel"}
+          </button>
           <button
             onClick={handleUpload}
             disabled={uploading || pendingCount === 0}
