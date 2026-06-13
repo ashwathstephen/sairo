@@ -2,6 +2,30 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.3.0] - 2026-06-13
+
+Performance & freshness release: validated end-to-end against a 1M-object / 241 TB production bucket.
+
+### Added
+
+- **Keyset pagination for listings** — `/api/buckets/{bucket}/list` accepts `cursor` + `limit` and returns `next_cursor`. The UI fetches folders in pages and paints the first page immediately, so million-object folders open instantly instead of streaming the whole listing. Listing a 1M-file folder's first page dropped from ~1.4 s / 122 MB to ~73 ms / 0.12 MB. (Omitting `limit` keeps the legacy whole-folder response, so existing API/CLI clients are unaffected.)
+- **Adaptive crawl scheduler** — large buckets are kept fresh with fast incremental **delta crawls** (re-listing only the prefixes where new data lands, in parallel) every interval, plus a periodic full reconcile; small buckets keep doing cheap full recrawls. A 1M-object bucket now picks up new objects in ~30 s instead of a ~7-minute full re-list. New tunables: `FULL_CRAWL_INTERVAL`, `LARGE_BUCKET_SECONDS`, `DELTA_SAMPLE`, `DELTA_MAX_TARGETS`.
+- **Direct (presigned-PUT) uploads** — files upload straight to object storage via presigned URLs by default, with proxy upload as fallback. Removes the in-memory buffering path for large files.
+- **Restart resumes from the existing index** — on startup, already-indexed buckets seed the scheduler from their crawl state instead of triggering a full re-crawl of every bucket.
+
+### Changed
+
+- **Covering index** — `objects` now uses a covering index `(prefix, key, size, last_modified)`, so folder listings and breakdowns are index-only (no temp B-tree sort, no row lookups). Replaces the prior `prefix`-only index; migrated automatically in place on first start (existing index reused, no re-crawl).
+- **Storage breakdown & folder-size** use covered prefix-range scans instead of `LIKE` full-table scans — 1.5–2.2x faster on large subtrees; top-level breakdown ~2.5 ms.
+- **FTS index rebuild** runs only when object keys were added or removed, skipping the expensive trigram rebuild on no-change recrawls.
+- **SQLite tuning** — larger page size for new databases, memory-mapped I/O on all connections, `synchronous=NORMAL` on the write path, WAL autocheckpoint.
+
+### Fixed
+
+- **Empty folder stats after large-bucket crawls** — the post-crawl FTS rebuild could hold the SQLite writer long enough to starve the folder-stats/prefix-children rebuild, leaving top-level breakdown falling back to a ~1 s full scan. Rebuilds are now ordered and serialized so this can't happen (top-level breakdown returns in ~2.5 ms).
+- **Stale folder shown after navigation** — a background refresh could overwrite the current folder's contents with a previous folder's data; refreshes are now aborted on navigation and guarded against the current view.
+- Background refresh now updates crawl status and the last-crawl timestamp, so the UI reflects when the index was last refreshed.
+
 ## [3.2.0] - 2026-04-11
 
 ### Added

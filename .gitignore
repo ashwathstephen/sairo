@@ -53,3 +53,7 @@ cookies.txt
 .pytest_cache/
 test-results/
 auth-state.json
+
+# Benchmark run artifacts (may contain real bucket names / sizes) — keep scripts, not run outputs
+benchmark/results/prod-*.json
+benchmark/results/qlbench-*.json
