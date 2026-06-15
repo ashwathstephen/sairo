@@ -2,6 +2,26 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.4.0] - 2026-06-15
+
+Direct browser→S3 uploads for files of any size — closes the proxy-upload OOM / size-ceiling problem (issue #6). Validated end-to-end against MinIO (all paths, md5-verified) and in a real browser, with measured memory bounds.
+
+### Added
+
+- **Multipart direct upload** — files larger than 100 MB are split into parts that the browser PUTs **directly to S3** in parallel (no bytes through the server), with no single-PUT 5 GB ceiling (up to S3's 5 TB object limit). New endpoints: `multipart/initiate`, `multipart/sign`, `multipart/complete`, `multipart/abort`. Smaller files continue to use a single presigned PUT.
+- **Just-in-time part signing** — each part's presigned URL is signed immediately before it is uploaded (and re-signed on retry), so a long-running multi-GB upload can never fail partway through from an expired URL. Per-part retries with backoff; the in-progress multipart upload is aborted on cancel/failure so no orphaned parts are left on S3.
+- **Stop button** — an in-progress upload can be stopped from the modal, and navigating away mid-upload aborts the transfer (and its S3 multipart upload) instead of leaving it dangling.
+
+### Changed
+
+- **Proxy upload is now memory-bounded** — the fallback path (files routed through the server) streams each file straight to S3 instead of buffering it in memory. Peak RAM is independent of file size (measured ≈100 MB for a single in-flight file whether it is 500 MB or 50 GB, vs the old path that scaled 1:1 and OOM-restarted the pod). Total proxy memory is bounded by `UPLOAD_PROXY_CONCURRENCY` (default 3) × ≈100 MB.
+- **CORS for direct upload now guarantees ETag exposure** — a bucket whose existing PUT CORS rule omits `ExposeHeaders: ETag` is upgraded in place, since the browser must read each part's ETag to complete a multipart upload.
+- **Direct uploads now work under the Content-Security-Policy** — `connect-src` includes the configured S3 endpoint origin(s) so the browser can PUT directly to the (cross-origin) S3 endpoint. Previously `connect-src 'self'` silently blocked every direct upload (with no proxy fallback, since the same-origin signing request still succeeded).
+
+### Fixed
+
+- Multipart endpoints validate their inputs (part numbers 1–10000, well-formed parts) and return `400` instead of `500` on malformed requests; they are rate-limited and audit-logged. New tunables: `UPLOAD_PROXY_CONCURRENCY`, `MULTIPART_URL_EXPIRY`.
+
 ## [3.3.1] - 2026-06-14
 
 Freshness-reliability patch for the adaptive delta crawler on large, actively-written buckets. Validated end-to-end against live production object storage (per-partition index counts compared to S3 ground truth).

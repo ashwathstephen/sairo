@@ -1,7 +1,18 @@
 import React, { useState, useRef, useEffect } from "react";
-import { formatSize, getPresignedUploadUrls, notifyUpload, getUploadUrl } from "../api";
+import { formatSize, getPresignedUploadUrls, notifyUpload, getUploadUrl,
+  multipartInitiate, multipartSign, multipartComplete, multipartAbort } from "../api";
 
-const CONCURRENCY = 4;
+const CONCURRENCY = 4;                           // files uploaded in parallel
+const MULTIPART_THRESHOLD = 100 * 1024 * 1024;   // files larger than this use multipart
+const PART_SIZE_MIN = 16 * 1024 * 1024;          // 16 MB base part size
+const PART_CONCURRENCY = 4;                      // parts uploaded in parallel within one file
+const PART_RETRIES = 3;                          // per-part retry attempts (resumable within session)
+
+function computePartSize(fileSize) {
+  let size = PART_SIZE_MIN;
+  while (Math.ceil(fileSize / size) > 10000) size *= 2;  // S3 allows at most 10,000 parts
+  return size;
+}
 
 function formatEta(seconds) {
   if (seconds < 60) return `${Math.ceil(seconds)}s`;
@@ -25,6 +36,12 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
     }
   }, []);
 
+  // If the modal unmounts mid-upload (navigation, logout, route change), abort the
+  // in-flight transfers — this also fires each worker's abort path, which calls
+  // multipartAbort() to clean up the partial multipart upload on S3 rather than
+  // leaving detached XHRs and orphaned (billed) parts behind.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const addFiles = (newFiles) => {
     setFileStates(prev => [
       ...prev,
@@ -42,7 +59,9 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
     setFileStates(prev => prev.filter((_, i) => i !== idx));
   };
 
-  // ── Direct upload via presigned PUT URLs (no file data through Sairo) ──
+  // ── Direct upload (no file data through Sairo) ──
+  // Small files: single presigned PUT. Large files: parallel, resumable multipart
+  // (parts PUT directly to S3) — no proxy buffering, no size ceiling, no pod OOM.
   const handleDirectUpload = async () => {
     setUploading(true);
     let completed = 0;
@@ -54,89 +73,138 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
       .map((fs, i) => ({ fs, i }))
       .filter(({ fs }) => fs.status !== "complete" && fs.status !== "error");
 
-    // Get presigned PUT URLs for all files
-    let urlMap;
+    const setFs = (i, patch) =>
+      setFileStates(prev => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+
+    // Presigned single-PUT URLs for the small files (batched).
+    const smallKeys = pending.filter(({ fs }) => fs.file.size <= MULTIPART_THRESHOLD).map(({ fs }) => fs.file.name);
+    const urlMap = {};
     try {
-      const keys = pending.map(({ fs }) => fs.file.name);
-      const resp = await getPresignedUploadUrls(bucket, keys, prefix);
-      urlMap = {};
-      for (const entry of resp.urls) {
-        urlMap[entry.key] = entry.url;
+      if (smallKeys.length) {
+        const resp = await getPresignedUploadUrls(bucket, smallKeys, prefix);
+        for (const entry of resp.urls) urlMap[entry.key] = entry.url;
       }
     } catch (err) {
-      // Presigned upload not available — fall back to proxy upload
+      // Presigned upload not available — fall back to proxy upload.
       setDirectMode(false);
       setUploading(false);
       return;
     }
 
-    const uploadOne = async ({ fs, i }) => {
-      if (abortController.signal.aborted) return;
+    // PUT a body to a presigned URL with progress; resolves with the xhr (for ETag).
+    const putWithProgress = (url, body, onLoaded) => new Promise((resolve, reject) => {
+      if (abortController.signal.aborted) { reject(Object.assign(new Error("Aborted"), { name: "AbortError" })); return; }
+      const xhr = new XMLHttpRequest();
+      const onAbort = () => xhr.abort();
+      // Remove the signal listener on every terminal path — otherwise a many-part
+      // upload accretes thousands of listeners (each retaining its XHR) on the
+      // session-long AbortController.
+      const done = (fn) => { abortController.signal.removeEventListener("abort", onAbort); fn(); };
+      xhr.upload.addEventListener("progress", (e) => { if (e.lengthComputable) onLoaded(e.loaded); });
+      xhr.addEventListener("load", () => done(() => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr);
+        else reject(Object.assign(new Error(`S3 upload failed: ${xhr.status}`), { status: xhr.status }));
+      }));
+      xhr.addEventListener("error", () => done(() => reject(new Error("Network error"))));
+      xhr.addEventListener("abort", () => done(() => reject(Object.assign(new Error("Aborted"), { name: "AbortError" }))));
+      abortController.signal.addEventListener("abort", onAbort);
+      xhr.open("PUT", url);
+      xhr.send(body);
+    });
 
+    const uploadSingle = async ({ fs, i }) => {
       const key = prefix + fs.file.name;
       const url = urlMap[key];
-      if (!url) return;
-
+      if (!url) throw new Error("No presigned URL");
       taskStartTimes.current[i] = Date.now();
-      setFileStates(prev => prev.map((s, idx) =>
-        idx === i ? { ...s, status: "uploading", progress: 0, eta: null } : s
-      ));
+      setFs(i, { status: "uploading", progress: 0, eta: null });
+      await putWithProgress(url, fs.file, (loaded) => {
+        const elapsed = (Date.now() - taskStartTimes.current[i]) / 1000;
+        const bps = elapsed > 0.5 ? loaded / elapsed : 0;
+        setFs(i, { progress: (loaded / fs.file.size) * 100, eta: bps > 0 ? (fs.file.size - loaded) / bps : null });
+      });
+      await notifyUpload(bucket, [{ key, size: fs.file.size }]).catch(() => {});
+    };
 
+    const uploadMultipartFile = async ({ fs, i }) => {
+      const file = fs.file;
+      const partSize = computePartSize(file.size);
+      const numParts = Math.ceil(file.size / partSize);
+      taskStartTimes.current[i] = Date.now();
+      setFs(i, { status: "uploading", progress: 0, eta: null });
+
+      const { key, upload_id: uploadId } = await multipartInitiate(bucket, file.name, prefix, file.type || "");
       try {
-        await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.upload.addEventListener("progress", (e) => {
-            if (e.lengthComputable) {
-              const pct = (e.loaded / e.total) * 100;
-              const elapsed = (Date.now() - taskStartTimes.current[i]) / 1000;
-              const bytesPerSec = elapsed > 0.5 ? e.loaded / elapsed : 0;
-              const eta = bytesPerSec > 0 ? (e.total - e.loaded) / bytesPerSec : null;
-              setFileStates(prev => prev.map((s, idx) =>
-                idx === i ? { ...s, progress: pct, eta } : s
-              ));
+        const loadedPerPart = new Array(numParts + 1).fill(0);
+        const refreshProgress = () => {
+          const loaded = loadedPerPart.reduce((a, b) => a + b, 0);
+          const elapsed = (Date.now() - taskStartTimes.current[i]) / 1000;
+          const bps = elapsed > 0.5 ? loaded / elapsed : 0;
+          setFs(i, { progress: (loaded / file.size) * 100, eta: bps > 0 ? (file.size - loaded) / bps : null });
+        };
+
+        const etags = new Array(numParts + 1);
+        let nextPart = 1;
+        const worker = async () => {
+          while (nextPart <= numParts) {
+            if (abortController.signal.aborted) throw Object.assign(new Error("Aborted"), { name: "AbortError" });
+            const part = nextPart++;
+            const startByte = (part - 1) * partSize;
+            const blob = file.slice(startByte, Math.min(startByte + partSize, file.size));
+            let attempt = 0;
+            for (;;) {
+              try {
+                // Sign the part JUST BEFORE uploading it (and again on every retry) so a
+                // presigned URL can never expire before use — a large/slow upload can run
+                // for hours, far past any single URL's TTL. Re-signing also recovers from a
+                // 403 (expired/clock-skew) instead of hammering a dead URL.
+                const { urls } = await multipartSign(bucket, key, uploadId, [part]);
+                const xhr = await putWithProgress(urls[0].url, blob, (loaded) => { loadedPerPart[part] = loaded; refreshProgress(); });
+                const etag = xhr.getResponseHeader("ETag");
+                // No ETag means the bucket's CORS doesn't expose it — retrying won't help
+                // (it's a config problem, not transient), so fail fast with a clear message.
+                if (!etag) throw Object.assign(new Error("Bucket CORS must expose the ETag header for multipart upload"), { fatal: true });
+                etags[part] = etag;
+                break;
+              } catch (e) {
+                if (e.name === "AbortError" || e.fatal) throw e;
+                if (++attempt > PART_RETRIES) throw e;
+                loadedPerPart[part] = 0; refreshProgress();
+                await new Promise(r => setTimeout(r, 500 * attempt));  // backoff, then retry this part
+              }
             }
-          });
-          xhr.addEventListener("load", () => {
-            if (xhr.status >= 200 && xhr.status < 300) resolve();
-            else reject(new Error(`S3 upload failed: ${xhr.status}`));
-          });
-          xhr.addEventListener("error", () => reject(new Error("Network error")));
-          xhr.addEventListener("abort", () => {
-            const err = new Error("Aborted");
-            err.name = "AbortError";
-            reject(err);
-          });
-          abortController.signal.addEventListener("abort", () => xhr.abort());
-          xhr.open("PUT", url);
-          xhr.send(fs.file);
-        });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, numParts) }, () => worker()));
 
-        completed++;
-        setFileStates(prev => prev.map((s, idx) =>
-          idx === i ? { ...s, status: "complete", progress: 100, eta: null } : s
-        ));
-
-        // Notify Sairo to update index
-        try {
-          await notifyUpload(bucket, [{ key, size: fs.file.size }]);
-        } catch { /* index will update on next crawl */ }
-
-      } catch (err) {
-        if (err.name === "AbortError") return;
-        errors++;
-        setFileStates(prev => prev.map((s, idx) =>
-          idx === i ? { ...s, status: "error", progress: 0, eta: null } : s
-        ));
+        const parts = [];
+        for (let p = 1; p <= numParts; p++) parts.push({ PartNumber: p, ETag: etags[p] });
+        await multipartComplete(bucket, key, uploadId, parts);
+        await notifyUpload(bucket, [{ key, size: file.size }]).catch(() => {});
+      } catch (e) {
+        await multipartAbort(bucket, key, uploadId);  // clean up the partial upload on S3
+        throw e;
       }
     };
 
-    // Run with concurrency limit
+    const uploadOne = async ({ fs, i }) => {
+      if (abortController.signal.aborted) return;
+      try {
+        if (fs.file.size > MULTIPART_THRESHOLD) await uploadMultipartFile({ fs, i });
+        else await uploadSingle({ fs, i });
+        completed++;
+        setFs(i, { status: "complete", progress: 100, eta: null });
+      } catch (err) {
+        if (err.name === "AbortError") return;
+        errors++;
+        setFs(i, { status: "error", progress: 0, eta: null });
+      }
+    };
+
+    // File-level concurrency.
     let cursor = 0;
     const runNext = async () => {
-      while (cursor < pending.length) {
-        const item = pending[cursor++];
-        await uploadOne(item);
-      }
+      while (cursor < pending.length) await uploadOne(pending[cursor++]);
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, () => runNext()));
 
@@ -319,7 +387,9 @@ export default function UploadModal({ bucket, prefix, initialFiles, onClose, onU
         )}
 
         <div className="modal-actions">
-          <button onClick={onClose} disabled={uploading}>Cancel</button>
+          <button onClick={uploading ? () => abortRef.current?.abort() : onClose}>
+            {uploading ? "Stop" : "Cancel"}
+          </button>
           <button
             onClick={handleUpload}
             disabled={uploading || pendingCount === 0}
