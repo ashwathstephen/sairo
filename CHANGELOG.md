@@ -2,9 +2,9 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
-## [3.4.0] - 2026-06-14
+## [3.4.0] - 2026-06-15
 
-Direct browser→S3 uploads for files of any size — closes the proxy-upload OOM / size-ceiling problem (issue #6). Validated end-to-end against MinIO (all paths, md5-verified) with measured memory bounds.
+Direct browser→S3 uploads for files of any size — closes the proxy-upload OOM / size-ceiling problem (issue #6). Validated end-to-end against MinIO (all paths, md5-verified) and in a real browser, with measured memory bounds.
 
 ### Added
 
@@ -16,6 +16,7 @@ Direct browser→S3 uploads for files of any size — closes the proxy-upload OO
 
 - **Proxy upload is now memory-bounded** — the fallback path (files routed through the server) streams each file straight to S3 instead of buffering it in memory. Peak RAM is independent of file size (measured ≈100 MB for a single in-flight file whether it is 500 MB or 50 GB, vs the old path that scaled 1:1 and OOM-restarted the pod). Total proxy memory is bounded by `UPLOAD_PROXY_CONCURRENCY` (default 3) × ≈100 MB.
 - **CORS for direct upload now guarantees ETag exposure** — a bucket whose existing PUT CORS rule omits `ExposeHeaders: ETag` is upgraded in place, since the browser must read each part's ETag to complete a multipart upload.
+- **Direct uploads now work under the Content-Security-Policy** — `connect-src` includes the configured S3 endpoint origin(s) so the browser can PUT directly to the (cross-origin) S3 endpoint. Previously `connect-src 'self'` silently blocked every direct upload (with no proxy fallback, since the same-origin signing request still succeeded).
 
 ### Fixed
 

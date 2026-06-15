@@ -70,16 +70,37 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 # ── Security Headers Middleware ────────────────────────────────────────────
 
+def _csp_connect_origins():
+    """Origins the browser is allowed to XHR to, beyond 'self' — every configured S3
+    endpoint. Direct (presigned) uploads PUT straight from the browser to the S3
+    endpoint, which is a DIFFERENT origin than Sairo; without these the CSP
+    'connect-src' silently blocks the upload (and there's no proxy fallback because
+    the same-origin signing request still succeeds). Includes a wildcard subdomain so
+    virtual-host-style presigned URLs (bucket.endpoint) are allowed too."""
+    from urllib.parse import urlparse
+    origins = set()
+    try:
+        for info in list(_s3_manager._endpoints.values()):
+            p = urlparse(info.get("endpoint_url") or "")
+            if p.scheme and p.netloc:
+                origins.add(f"{p.scheme}://{p.netloc}")
+                origins.add(f"{p.scheme}://*.{p.netloc}")
+    except Exception:
+        pass
+    return " ".join(sorted(origins))
+
+
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
+    connect_src = ("connect-src 'self' " + _csp_connect_origins()).rstrip()
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' blob: data:; "
-        "connect-src 'self'; "
+        f"{connect_src}; "
         "frame-src blob:;"
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
