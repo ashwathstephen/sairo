@@ -109,34 +109,64 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 
-# ── Multi-Endpoint URL Rewriting Middleware ─────────────────────────────────
+# ── S3-key session helpers (AUTH_MODE=s3) ──────────────────────────────────
 
-@app.middleware("http")
-async def endpoint_routing_middleware(request: Request, call_next):
-    """Rewrite /api/e/{endpoint_id}/... → /api/... and set endpoint context for S3 client proxy."""
-    path = request.url.path
-    endpoint_id = "default"
-    if path.startswith("/api/e/"):
-        parts = path.split("/")
-        # parts: ['', 'api', 'e', endpoint_id, ...]
-        if len(parts) >= 5:
-            endpoint_id = parts[3]
-            # Rewrite URL: remove /e/{endpoint_id} segment
-            new_path = "/api/" + "/".join(parts[4:])
-            request.scope["path"] = new_path
-    request.state.endpoint_id = endpoint_id
-    # Set context variable — propagates to sync handlers via Starlette's run_in_threadpool
-    token = _endpoint_ctx.set(endpoint_id)
+def _extract_s3_session(request: Request):
+    """For AUTH_MODE=s3 cookie sessions, decode the JWT and return the user's
+    {ak, sk, eid} (decrypted). Returns None otherwise (password mode, API tokens,
+    no/invalid cookie). API-token (Bearer) sessions intentionally keep server creds."""
+    if AUTH_MODE != "s3":
+        return None
+    token = request.cookies.get("access_token")
+    if not token:
+        return None
     try:
-        return await call_next(request)
-    finally:
-        _endpoint_ctx.reset(token)
+        p = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        return None
+    ak_enc = p.get("s3ak")
+    if not ak_enc:
+        return None
+    ak = _decrypt(ak_enc)
+    if not ak:
+        return None
+    return {"ak": ak, "sk": _decrypt(p.get("s3sk", "")), "eid": p.get("eid", "default")}
+
+
+_bucket_access_cache: dict = {}  # (ak_hash, eid, bucket) -> (ts, bool)
+_bucket_access_lock = threading.Lock()
+_BUCKET_ACCESS_TTL = 60
+
+
+def _s3_user_can_access(creds: dict, endpoint_id: str, bucket: str) -> bool:
+    """True if the user's S3 keys can reach this bucket (provider IAM is the source of
+    truth). head_bucket result cached briefly so it isn't called on every request."""
+    ak_hash = hashlib.sha256(creds["ak"].encode()).hexdigest()[:16]
+    key = (ak_hash, endpoint_id, bucket)
+    now = time.time()
+    with _bucket_access_lock:
+        hit = _bucket_access_cache.get(key)
+        if hit and now - hit[0] < _BUCKET_ACCESS_TTL:
+            return hit[1]
+    try:
+        _s3_manager.get_client(endpoint_id).head_bucket(Bucket=bucket)  # uses user creds (ctx set)
+        ok = True
+    except Exception:
+        ok = False
+    with _bucket_access_lock:
+        if len(_bucket_access_cache) > 2000:
+            _bucket_access_cache.clear()
+        _bucket_access_cache[key] = (now, ok)
+    return ok
+
 
 # ── Bucket Permission Middleware ────────────────────────────────────────────
+# Registered BEFORE endpoint_routing_middleware (below) so it ends up INNER: it runs
+# after the path is rewritten and after the S3-key user's creds are in context.
 
 @app.middleware("http")
 async def bucket_permission_middleware(request: Request, call_next):
-    """Check per-bucket permissions for all /api/buckets/{bucket}/... routes."""
+    """Per-bucket access control for /api/buckets/{bucket}/... routes."""
     path = request.scope.get("path", request.url.path)
     if not path.startswith("/api/buckets/"):
         return await call_next(request)
@@ -144,16 +174,25 @@ async def bucket_permission_middleware(request: Request, call_next):
     if len(parts) < 4:
         return await call_next(request)
     bucket = parts[3]
-    # Try to get user — if auth fails, let endpoint handle 401
     try:
         user = get_current_user(request)
     except HTTPException:
+        return await call_next(request)
+    # AUTH_MODE=s3: the user acts with their own keys. Object listings are served from
+    # the LOCAL index (built with server creds), so we must independently confirm the
+    # user's keys can actually reach this bucket — otherwise the index would be an
+    # access bypass. The provider's IAM (cached head_bucket) is the source of truth.
+    creds = _user_creds_ctx.get(None)
+    if creds and creds.get("ak"):
+        if not _s3_user_can_access(creds, request.state.endpoint_id, bucket):
+            return JSONResponse(status_code=403, content={"detail": "No access to this bucket"})
+        request.state.bucket_permission = "write"  # actual op authority enforced by S3 IAM
         return await call_next(request)
     # Admin bypasses everything
     if user["role"] == "admin":
         request.state.bucket_permission = "admin"
         return await call_next(request)
-    # Non-admin: lookup bucket permission
+    # Non-admin (password mode): lookup bucket permission
     with _get_users_db() as db:
         row = db.execute(
             "SELECT permission FROM bucket_permissions WHERE username=? AND bucket=?",
@@ -167,6 +206,42 @@ async def bucket_permission_middleware(request: Request, call_next):
     if request.method != "GET" and permission != "write":
         return JSONResponse(status_code=403, content={"detail": "Write access required"})
     return await call_next(request)
+
+
+# ── Multi-Endpoint URL Rewriting + S3-key session Middleware ────────────────
+# Registered LAST → OUTERMOST: runs first on the way in, so the path is rewritten and
+# the S3-key user's credentials/endpoint are bound into context BEFORE the permission
+# middleware and route handler execute.
+
+@app.middleware("http")
+async def endpoint_routing_middleware(request: Request, call_next):
+    """Rewrite /api/e/{endpoint_id}/... → /api/..., set endpoint context, and (in
+    AUTH_MODE=s3) bind the request to the logged-in user's endpoint + credentials."""
+    path = request.url.path
+    endpoint_id = "default"
+    if path.startswith("/api/e/"):
+        parts = path.split("/")
+        # parts: ['', 'api', 'e', endpoint_id, ...]
+        if len(parts) >= 5:
+            endpoint_id = parts[3]
+            request.scope["path"] = "/api/" + "/".join(parts[4:])
+    # S3-key session: carry the user's own keys + bind to the endpoint they logged into
+    # (ignore the routing endpoint, so an S3-key user can't reach another endpoint).
+    user_creds = None
+    scope_path = request.scope.get("path", path)
+    if scope_path.startswith("/api/"):
+        sess = _extract_s3_session(request)
+        if sess:
+            user_creds = {"ak": sess["ak"], "sk": sess["sk"]}
+            endpoint_id = sess["eid"]
+    request.state.endpoint_id = endpoint_id
+    t_e = _endpoint_ctx.set(endpoint_id)
+    t_u = _user_creds_ctx.set(user_creds)
+    try:
+        return await call_next(request)
+    finally:
+        _endpoint_ctx.reset(t_e)
+        _user_creds_ctx.reset(t_u)
 
 
 # ── Login Rate Limiter ──────────────────────────────────────────────────────
@@ -219,7 +294,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.4.0"
+SAIRO_VERSION = "3.4.1"
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
@@ -308,6 +383,7 @@ class S3ClientManager:
         self._clients: dict = {}
         self._lock = threading.Lock()
         self._endpoints: dict = {}  # endpoint_id -> {endpoint_url, access_key, secret_key, region, path_style}
+        self._user_clients: dict = {}  # (endpoint_id, access_key_hash) -> client (AUTH_MODE=s3, per-user creds)
 
     def register(self, endpoint_id: str, endpoint_url: str, access_key: str, secret_key: str,
                  region: str = "", path_style: bool = False):
@@ -317,33 +393,62 @@ class S3ClientManager:
                 "secret_key": secret_key, "region": region, "path_style": path_style,
             }
             self._clients.pop(endpoint_id, None)  # Invalidate cached client
+            for k in [k for k in self._user_clients if k[0] == endpoint_id]:
+                self._user_clients.pop(k, None)
+
+    def _build_client(self, info: dict, access_key: str, secret_key: str):
+        cfg = _S3_CONFIG
+        if info.get("path_style"):
+            cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
+        kwargs = {
+            "endpoint_url": info["endpoint_url"],
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+            "config": cfg,
+        }
+        if info["region"]:
+            kwargs["region_name"] = info["region"]
+        return boto3.client("s3", **kwargs)
 
     def get_client(self, endpoint_id: str = "default"):
+        # AUTH_MODE=s3: when a request carries the user's own S3 keys, every S3 call
+        # uses THOSE keys (provider IAM scopes the result) against the endpoint's
+        # connection params. Background threads / password sessions have no creds in
+        # context → fall through to the shared server client below.
+        creds = _user_creds_ctx.get(None)
+        if creds and creds.get("ak"):
+            return self._get_user_client(endpoint_id, creds["ak"], creds["sk"])
         with self._lock:
             if endpoint_id in self._clients:
                 return self._clients[endpoint_id]
             info = self._endpoints.get(endpoint_id)
             if not info:
                 raise HTTPException(404, f"S3 endpoint '{endpoint_id}' not found")
-            cfg = _S3_CONFIG
-            if info.get("path_style"):
-                cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
-            kwargs = {
-                "endpoint_url": info["endpoint_url"],
-                "aws_access_key_id": info["access_key"],
-                "aws_secret_access_key": info["secret_key"],
-                "config": cfg,
-            }
-            if info["region"]:
-                kwargs["region_name"] = info["region"]
-            client = boto3.client("s3", **kwargs)
+            client = self._build_client(info, info["access_key"], info["secret_key"])
             self._clients[endpoint_id] = client
+            return client
+
+    def _get_user_client(self, endpoint_id: str, access_key: str, secret_key: str):
+        info = self._endpoints.get(endpoint_id) or self._endpoints.get("default")
+        if not info:
+            raise HTTPException(404, f"S3 endpoint '{endpoint_id}' not found")
+        ak_hash = hashlib.sha256(access_key.encode()).hexdigest()[:16]
+        key = (endpoint_id, ak_hash)
+        with self._lock:
+            client = self._user_clients.get(key)
+            if client is None:
+                if len(self._user_clients) > 256:  # bound the cache; drop oldest insert
+                    self._user_clients.pop(next(iter(self._user_clients)), None)
+                client = self._build_client(info, access_key, secret_key)
+                self._user_clients[key] = client
             return client
 
     def invalidate(self, endpoint_id: str):
         with self._lock:
             self._clients.pop(endpoint_id, None)
             self._endpoints.pop(endpoint_id, None)
+            for k in [k for k in self._user_clients if k[0] == endpoint_id]:
+                self._user_clients.pop(k, None)
 
     def get_endpoint_info(self, endpoint_id: str):
         return self._endpoints.get(endpoint_id)
@@ -359,6 +464,12 @@ _s3_manager.register("default", S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, _S3_R
 
 # Context variable for current endpoint — propagates across async/sync boundaries in Starlette
 _endpoint_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("_endpoint_ctx", default="default")
+
+# Per-request S3 credentials for AUTH_MODE=s3 — when set, every S3 client built for
+# this request uses the LOGGED-IN USER's keys instead of the server's endpoint creds,
+# so the provider's IAM scopes exactly what the user can see/do. None for password-mode
+# sessions, API tokens, and background (crawl) threads → those keep using server creds.
+_user_creds_ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("_user_creds_ctx", default=None)
 
 # Keep thread-local as fallback for background threads that set it explicitly
 _s3_context = threading.local()
@@ -2272,6 +2383,7 @@ class LoginRequest(BaseModel):
 class LoginS3Request(BaseModel):
     access_key: str
     secret_key: str
+    endpoint_id: str = "default"  # which configured endpoint to authenticate against
 
 class CreateUserRequest(BaseModel):
     username: str
@@ -2326,28 +2438,25 @@ def auth_login_s3(req: LoginS3Request, request: Request):
     _check_login_rate(request.client.host)
     if not req.access_key or not req.secret_key:
         raise HTTPException(400, "Access key and secret key are required")
-    # Test the S3 credentials
+    # Validate the USER's keys against the chosen endpoint's connection params, then
+    # keep them (encrypted) in the session token so every later S3 call is made AS the
+    # user — the provider's IAM then scopes exactly what they can see and do.
+    eid = req.endpoint_id or "default"
+    info = _s3_manager.get_endpoint_info(eid) or _s3_manager.get_endpoint_info("default")
+    if not info:
+        raise HTTPException(400, "No S3 endpoint configured")
     try:
-        cfg = _S3_CONFIG
-        if _S3_PATH_STYLE:
-            cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
-        test_client = boto3.client(
-            "s3",
-            endpoint_url=S3_ENDPOINT,
-            aws_access_key_id=req.access_key,
-            aws_secret_access_key=req.secret_key,
-            region_name=_S3_REGION or None,
-            config=cfg,
-        )
+        test_client = _s3_manager._build_client(info, req.access_key, req.secret_key)
         test_client.list_buckets()
     except Exception as e:
         log.warning("S3 auth failed for access_key=%s: %s", req.access_key[:6] + "...", e)
         raise HTTPException(401, "Invalid S3 credentials")
-    # Credentials valid — issue a session as admin
-    # Use a sanitized version of the access key as the username
+    # Credentials valid — issue a session as admin. Use a sanitized version of the
+    # access key as the username; carry the user's keys encrypted in the JWT.
     username = f"s3:{req.access_key[:8]}"
     token = jwt.encode(
-        {"sub": username, "role": "admin",
+        {"sub": username, "role": "admin", "eid": eid,
+         "s3ak": _encrypt(req.access_key), "s3sk": _encrypt(req.secret_key),
          "exp": datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)},
         JWT_SECRET, algorithm="HS256")
     response = JSONResponse({"username": username, "role": "admin"})
@@ -3559,6 +3668,12 @@ def list_all_buckets(user: dict = Depends(get_current_user)):
     result = []
     with _get_users_db() as db:
         endpoints = db.execute("SELECT id, name, endpoint_url FROM s3_endpoints ORDER BY is_default DESC, created_at").fetchall()
+    # AUTH_MODE=s3: scope to the single endpoint the user authenticated against, listed
+    # with THEIR keys — so they see only their account's buckets, not every endpoint's.
+    s3_creds = _user_creds_ctx.get(None)
+    if s3_creds and s3_creds.get("ak"):
+        bound_eid = _current_endpoint_id()  # middleware bound this to the user's login endpoint
+        endpoints = [ep for ep in endpoints if ep["id"] == bound_eid] or [ep for ep in endpoints if ep["id"] == "default"]
     for ep in endpoints:
         eid = ep["id"]
         try:
@@ -3601,14 +3716,22 @@ _BUCKET_LIST_TTL = 30  # seconds
 @app.get("/api/buckets")
 def list_buckets(user: dict = Depends(get_current_user)):
     now = time.time()
-    with _bucket_list_cache_lock:
-        if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
-            resp = _bucket_list_cache["data"]
-        else:
-            resp = s3.list_buckets()
-            _bucket_list_cache["data"] = resp
-            _bucket_list_cache["ts"] = now
-    # Non-admin: only show buckets with explicit permissions
+    s3_creds = _user_creds_ctx.get(None)
+    if s3_creds and s3_creds.get("ak"):
+        # AUTH_MODE=s3: list with the USER's keys so the provider IAM scopes the result.
+        # Never use the shared cache here — it's keyed by nothing and would leak one
+        # user's bucket list to another.
+        resp = s3.list_buckets()
+    else:
+        with _bucket_list_cache_lock:
+            if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
+                resp = _bucket_list_cache["data"]
+            else:
+                resp = s3.list_buckets()
+                _bucket_list_cache["data"] = resp
+                _bucket_list_cache["ts"] = now
+    # Non-admin: only show buckets with explicit permissions. S3-key users are already
+    # scoped by their keys above, so no extra filter (their role is admin).
     allowed = None
     if user["role"] != "admin":
         with _get_users_db() as udb:
