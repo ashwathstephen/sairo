@@ -29,7 +29,7 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 - **Object Browser** — Navigate buckets and prefixes with virtual scrolling for 100K+ objects
 - **Instant Search** — SQLite-indexed search across all objects by filename
 - **File Preview** — Images, text, CSV, JSON, PDF, Parquet/ORC/Avro schemas, and binary hex
-- **Upload & Download** — Multipart upload with progress tracking, drag-and-drop support
+- **Upload & Download** — Direct browser-to-S3 upload for files of any size (presigned multipart, no data through the server), drag-and-drop with progress, and presigned-URL downloads
 - **Storage Dashboard** — Visual breakdown by prefix with growth trend charts and cost estimates
 - **Cost Intelligence** — Per-folder cost breakdown with provider comparison. AWS pricing fetched live; others from community data
 - **Version Management** — Browse, restore, delete, and purge individual object versions

@@ -1,6 +1,6 @@
 ---
 title: Upload & Download
-description: Drag-and-drop upload with multipart support for large files, and presigned URL downloads with configurable expiration.
+description: Direct browser-to-S3 upload for files of any size, with presigned URL downloads and configurable expiration.
 ---
 
 import { Aside } from "@astrojs/starlight/components";
@@ -17,16 +17,25 @@ Drag files from your desktop or file manager and drop them anywhere on the objec
 
 You can drop multiple files at once or use the upload button to select several files from the file picker. All selected files are uploaded in parallel.
 
-### Multipart upload
+### Direct browser-to-S3 upload
 
-Files larger than **5 MB** are automatically uploaded using S3 multipart upload on the backend. The browser uploads the full file to Sairo, and the backend splits it into parts for parallel upload to S3. A progress bar shows upload completion from browser to server.
+Since v3.4.0, uploads go **directly from your browser to the S3 endpoint** — the file data does not pass through the Sairo server. Sairo only issues short-lived presigned URLs; the bytes flow browser → S3.
 
-Multipart upload provides a key benefit:
+- **Small files** (≤ 100 MB) upload with a single presigned `PUT`.
+- **Large files** (> 100 MB) use **presigned multipart upload**: the browser splits the file into parts and uploads them to S3 in parallel, each part signed just-in-time so a long transfer never fails on an expired URL. There is no single-PUT size ceiling — you can upload files far larger than before (up to S3's 5 TB object limit). A progress bar (with ETA) tracks the whole file, and an in-progress upload can be **Stopped**, which aborts the multipart upload on S3 so no orphaned parts are left behind.
 
-- **Throughput** -- The backend uploads multiple parts to S3 in parallel, which is significantly faster than a single-stream upload for large files.
+Because no file data is buffered on the server, large uploads no longer cause memory pressure or pod restarts at scale.
 
 <Aside>
-  Incomplete multipart uploads consume storage on the S3 backend. You can track and abort incomplete uploads from the bucket's **Settings > Multipart** tab, or configure a lifecycle rule to clean them up automatically.
+  Direct upload requires the bucket's CORS to allow `PUT` from the Sairo origin and to expose the `ETag` response header (the browser must read each part's `ETag`). Sairo configures this automatically on providers that support the S3 bucket-CORS API. On providers that don't (e.g. MinIO, which is configured globally), set CORS to allow `PUT`/`GET` from the Sairo origin and expose `ETag`.
+</Aside>
+
+#### Proxy fallback
+
+If direct upload isn't available (for example a restricted environment that blocks the browser→S3 request), Sairo falls back to a **proxy upload** through the server. This path now **streams** each file straight to S3 instead of buffering it in memory, so peak memory is bounded (~100 MB per in-flight file regardless of file size) rather than growing with the file. Concurrency is controlled by `UPLOAD_PROXY_CONCURRENCY` (default 3). You can also toggle proxy upload manually with the **Direct upload** checkbox in the upload dialog.
+
+<Aside>
+  Incomplete multipart uploads consume storage on the S3 backend. You can track and abort incomplete uploads from the bucket's **Settings > Multipart** tab, or configure an `AbortIncompleteMultipartUpload` lifecycle rule to clean them up automatically.
 </Aside>
 
 ## Download

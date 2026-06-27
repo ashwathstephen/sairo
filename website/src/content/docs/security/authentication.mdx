@@ -3,6 +3,8 @@ title: "Authentication"
 description: "How Sairo handles authentication with JWT tokens, secure cookies, session management, and rate limiting."
 ---
 
+import { Aside } from "@astrojs/starlight/components";
+
 Sairo uses JWT-based authentication with secure cookie storage. Tokens are issued on login and validated on every API request.
 
 ## Auth Modes
@@ -11,15 +13,25 @@ Sairo supports two authentication modes, controlled by the `AUTH_MODE` environme
 
 | Mode | `AUTH_MODE` | Login Fields | Best For |
 |---|---|---|---|
-| **Local** (default) | `local` | Username + Password | Teams with multiple users, RBAC, 2FA |
-| **S3 Keys** | `s3` | S3 Access Key + Secret Key | Single-user setups, quick start, headless |
+| **Local** (default) | `local` | Username + Password | Teams with multiple users, Sairo-managed RBAC, 2FA |
+| **S3 Keys** | `s3` | S3 Access Key + Secret Key | Delegating access control to your S3 provider's IAM; headless / quick start |
 
-In **S3 mode**, users authenticate by entering their S3 access key and secret key. Sairo validates the credentials by calling `list_buckets()` against the configured S3 endpoint. If it succeeds, the user gets an admin session. No user account setup needed.
+In **S3 mode**, users authenticate by entering their S3 access key and secret key. Sairo validates the credentials by calling `list_buckets()` against the configured S3 endpoint. No Sairo user accounts are needed — access is governed entirely by the S3 provider.
+
+Since **v3.4.1**, every S3 operation in this mode is performed with the **logged-in user's own keys** (kept encrypted in the session token), so the provider's IAM scopes exactly what each user can see and do:
+
+- A user sees and can manage **only the buckets their keys can access** — not every bucket the server can reach, and not buckets on other endpoints.
+- Access is enforced per request: object listings come from Sairo's local index, so each bucket request is independently checked against the provider with the user's keys before any indexed data is returned.
+- In multi-endpoint setups, a session is bound to the endpoint it logged into.
 
 ```yaml
 environment:
   AUTH_MODE: "s3"  # Authenticate with S3 credentials instead of username/password
 ```
+
+<Aside type="caution">
+  After upgrading to v3.4.1, existing S3-key users should log in again so their keys are captured in the session. Before v3.4.1, S3-key users were given an unscoped admin session and could see every bucket on every configured endpoint.
+</Aside>
 
 Both modes can be used simultaneously — the login page shows a toggle to switch between "S3 Keys" and "Password". In `s3` mode, the S3 tab is shown first. In `local` mode, the password tab is shown first (S3 tab appears only if explicitly enabled).
 
