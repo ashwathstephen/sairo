@@ -247,7 +247,10 @@ function MainApp() {
     }, (err) => {
       setLoading(false);
       setDone(true);
-      if (err.message && err.message.includes("NoSuchBucket")) {
+      if (err.status === 403 || (err.message && err.message.includes("403"))) {
+        toast(`You don't have access to bucket "${b}"`, "error");
+        goHome();
+      } else if (err.message && err.message.includes("NoSuchBucket")) {
         toast(`Bucket "${b}" no longer exists`, "warning");
         goHome();
       } else {

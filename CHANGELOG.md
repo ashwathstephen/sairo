@@ -2,6 +2,17 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.4.1] - 2026-06-27
+
+Security/correctness fix for S3-key authentication with multiple endpoints (issue #8). Previously a user who logged in with S3 access keys could see and manage **every** bucket on **every** configured endpoint, because the server used its own stored endpoint credentials (and an unconditional admin role) for all operations and discarded the user's keys.
+
+### Fixed
+
+- **S3-key sessions now act with the user's own keys** — in `AUTH_MODE=s3`, every S3 call (bucket listing, object listing/preview/download, uploads, presigned URLs) is made with the **logged-in user's** access key, so the provider's IAM scopes exactly what they can see and do. Logging in with one account's keys shows only that account's buckets, not other endpoints'. The keys are kept encrypted in the session token (Fernet, same key that protects stored endpoint credentials) so this works statelessly across replicas.
+- **The local index is no longer an access bypass** — object listings are served from Sairo's per-bucket index (built with server credentials), so S3-key requests are now independently gated by a `head_bucket` check with the user's keys (cached briefly) before any indexed data is returned.
+- **Per-bucket permission checks could be bypassed via the multi-endpoint path** — `bucket_permission_middleware` ran *before* the `/api/e/{endpoint}/...` path rewrite, so prefixing a bucket URL with `/api/e/<id>/` skipped the permission check entirely (an IDOR on read routes). The middleware now runs after the rewrite, and S3-key sessions are bound to the endpoint they authenticated against.
+- **Bucket-list cache no longer shared across users** — the 30s `/api/buckets` cache (keyed by nothing) is bypassed for S3-key sessions so one user's bucket list can't be served to another.
+
 ## [3.4.0] - 2026-06-15
 
 Direct browser→S3 uploads for files of any size — closes the proxy-upload OOM / size-ceiling problem (issue #6). Validated end-to-end against MinIO (all paths, md5-verified) and in a real browser, with measured memory bounds.
