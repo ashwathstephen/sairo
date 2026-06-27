@@ -13,6 +13,38 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.4.1
+
+**S3-key authentication is scoped per user**
+
+- **Fixed (issue #8):** In `AUTH_MODE=s3`, every S3 operation is now performed with the **logged-in user's own keys**, so the provider's IAM scopes exactly what they can see and do. Previously an S3-key user got an unscoped admin session and could see every bucket on every configured endpoint. The user's keys are kept encrypted in the session token; bucket access is independently enforced per request (the local index can no longer be used to reach a bucket the user's keys can't).
+- **Fixed:** an IDOR where the per-bucket permission check could be skipped by prefixing a request with `/api/e/{endpoint}/` — the check now runs on the resolved path, and S3-key sessions are bound to the endpoint they logged into.
+- Existing S3-key users should log in again after upgrading.
+
+## v3.4.0
+
+**Direct browser-to-S3 upload for files of any size** (issue #6)
+
+- Uploads now go **directly from the browser to S3** via presigned URLs — small files with a single `PUT`, large files (> 100 MB) with **presigned multipart** (parts signed just-in-time, no single-PUT size ceiling). No file data passes through the Sairo server, so large uploads no longer cause memory pressure or pod restarts.
+- The proxy upload path remains as a fallback but now **streams** to S3 with bounded memory (~100 MB per in-flight file regardless of size; `UPLOAD_PROXY_CONCURRENCY`, default 3).
+- In-progress uploads can be **Stopped**, which aborts the multipart upload on S3 to avoid orphaned parts.
+- New tunables: `UPLOAD_PROXY_CONCURRENCY`, `MULTIPART_URL_EXPIRY`.
+
+## v3.3.1
+
+**Delta-crawler freshness fixes**
+
+- New partitions are reliably indexed even when they sort beyond the first 1000 siblings; discovery walks all datasets in parallel; natural-sort partition selection (so `day=2`…`day=10` picks the true newest); a cooldown prevents back-to-back delta crawls; restart resumes from the existing index instead of re-crawling; the index stays "ready" during crawl transitions.
+
+## v3.3.0
+
+**Performance & freshness at scale**
+
+- **Keyset pagination** for listings — million-object folders open instantly (first page ~73 ms vs ~1.4 s before).
+- **Adaptive crawl scheduler** with fast incremental **delta crawls** that pick up new objects in ~30 s on large buckets, plus a periodic full reconcile.
+- **Covering index** + covered range scans for folder listings and storage breakdowns (top-level breakdown ~2.5 ms).
+- Direct presigned-PUT uploads (completed in v3.4.0), restart-resumes-from-index, SQLite tuning. New tunables: `S3_MAX_POOL_CONNECTIONS`, `FULL_CRAWL_INTERVAL`, `LARGE_BUCKET_SECONDS`, `DELTA_*`.
+
 ## v3.2.0
 
 **Cost Intelligence, Multipart Cleanup & Optimization Recommendations**

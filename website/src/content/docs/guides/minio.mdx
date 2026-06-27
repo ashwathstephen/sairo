@@ -88,3 +88,9 @@ mc admin user svcacct add myminio minioadmin --name sairo-service
 Sairo and the MinIO Console can run side by side. They access the same buckets and objects through the same MinIO server. Changes made in either UI are immediately visible in the other.
 
 MinIO Console runs on port **9001** by default, while the MinIO API runs on port **9000**. Sairo connects to the API port.
+
+## Direct upload and CORS
+
+Sairo uploads files directly from the browser to MinIO using presigned URLs, so the browser makes a cross-origin request to the MinIO API. The browser must be allowed to `PUT` to MinIO and to read the `ETag` response header (required to complete multipart uploads).
+
+MinIO does not implement the S3 bucket-CORS API, so Sairo cannot configure this automatically — set it on the MinIO server instead. MinIO allows all origins for the S3 API by default and exposes `ETag`, so direct upload typically works out of the box; if you have locked CORS down, allow the Sairo origin for `PUT`/`GET` and expose `ETag`. If a direct upload can't reach MinIO, Sairo automatically falls back to a memory-bounded proxy upload through the server.
