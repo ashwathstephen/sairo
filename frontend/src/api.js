@@ -87,7 +87,7 @@ export function streamList(bucket, prefix, onPage, onError, opts = {}) {
       if (cursor) params.set("cursor", cursor);
     }
     const res = await apiFetch(`${bucketBase(bucket)}/list?${params}`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`List failed: ${res.status}`);
+    if (!res.ok) { const e = new Error(`List failed: ${res.status}`); e.status = res.status; throw e; }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
