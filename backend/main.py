@@ -294,7 +294,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.4.1"
+SAIRO_VERSION = "3.5.0"
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
@@ -2269,8 +2269,9 @@ def startup():
 
     # Start telemetry heartbeat
     if TELEMETRY:
+        _tel_record_boot()  # boot_count + restart history + crash detection (prev unclean exit)
         threading.Thread(target=_telemetry_loop, daemon=True).start()
-        log.info("Anonymous telemetry enabled. Set TELEMETRY=false to disable.")
+        log.info("Anonymous telemetry enabled (schema v2). Set TELEMETRY=false to disable.")
     else:
         log.info("Telemetry disabled.")
 
@@ -2278,7 +2279,177 @@ def startup():
 # ── Telemetry ─────────────────────────────────────────────────────────────
 
 TELEMETRY_URL = "https://dashboard.sairo.dev/api/v1/ping"
-TELEMETRY_INTERVAL = 86400  # 24 hours
+TELEMETRY_INTERVAL = int(os.environ.get("TELEMETRY_INTERVAL", "3600"))  # hourly (trailing-24h metrics assume regular pings)
+TELEMETRY_SCHEMA_VERSION = "2"
+
+# ── Telemetry runtime counters (Tier 1 health + Tier 3 engagement) ──────────
+# Lightweight, in-memory, and strictly FAIL-SAFE: nothing here may ever alter a
+# request/response or raise into the request path. Aggregate counts only — never
+# bucket names, keys, paths, or any user content.
+_tel_lock = threading.Lock()
+_tel_req_hours: dict = {}      # epoch_hour -> request count
+_tel_failed_hours: dict = {}   # epoch_hour -> 5xx count
+_tel_bucket_seen: dict = {}    # bucket -> last-access epoch (for active_buckets_24h; names never sent)
+_tel_last_write = [0.0]        # epoch of the last successful write operation
+
+
+def _tel_record(path: str, method: str, status: int):
+    """Account one request for the trailing-24h counters. Never raises."""
+    try:
+        now = time.time()
+        hr = int(now // 3600)
+        with _tel_lock:
+            _tel_req_hours[hr] = _tel_req_hours.get(hr, 0) + 1
+            if status >= 500:
+                _tel_failed_hours[hr] = _tel_failed_hours.get(hr, 0) + 1
+            cutoff = hr - 26  # keep ~26h of hourly buckets
+            for d in (_tel_req_hours, _tel_failed_hours):
+                for k in [k for k in d if k < cutoff]:
+                    d.pop(k, None)
+            if status < 400 and path.startswith("/api/buckets/"):
+                parts = path.split("/")
+                if len(parts) >= 4 and parts[3]:
+                    _tel_bucket_seen[parts[3]] = now
+                    if method in ("POST", "PUT", "DELETE", "PATCH"):
+                        _tel_last_write[0] = now
+                    if len(_tel_bucket_seen) > 10000:  # bound memory
+                        _tel_bucket_seen.pop(min(_tel_bucket_seen, key=_tel_bucket_seen.get), None)
+    except Exception:
+        pass
+
+
+def _tel_sum_24h(d: dict) -> int:
+    cutoff = int(time.time() // 3600) - 23
+    with _tel_lock:
+        return sum(v for k, v in d.items() if k >= cutoff)
+
+
+def _tel_active_buckets_24h() -> int:
+    cutoff = time.time() - 86400
+    with _tel_lock:
+        return sum(1 for ts in _tel_bucket_seen.values() if ts >= cutoff)
+
+
+@app.middleware("http")
+async def telemetry_counter_middleware(request: Request, call_next):
+    """Outermost middleware — counts requests for anonymous telemetry. Strictly
+    pass-through: it never modifies the request/response and never swallows the
+    handler's exception (it re-raises after recording a failure)."""
+    if not TELEMETRY:
+        return await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        try:
+            _tel_record(request.scope.get("path", request.url.path), request.method, 500)
+        except Exception:
+            pass
+        raise
+    try:
+        _tel_record(request.scope.get("path", request.url.path), request.method, response.status_code)
+    except Exception:
+        pass
+    return response
+
+
+def _meta_get(key: str, default=None):
+    try:
+        with _get_users_db() as db:
+            row = db.execute("SELECT value FROM instance_meta WHERE key=?", (key,)).fetchone()
+            return row[0] if row else default
+    except Exception:
+        return default
+
+
+def _meta_set(key: str, value: str):
+    try:
+        with _get_users_db() as db:
+            db.execute("INSERT OR REPLACE INTO instance_meta (key, value) VALUES (?, ?)", (key, str(value)))
+            db.commit()
+    except Exception:
+        pass
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _epoch_to_iso(e: float) -> str:
+    return datetime.fromtimestamp(e, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _sqlts_to_iso(s):
+    """SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', UTC) -> ISO-8601 Z. None-safe."""
+    if not s:
+        return None
+    s = str(s).strip()
+    return s.replace(" ", "T") + ("" if s.endswith("Z") else "Z")
+
+
+def _tel_record_boot():
+    """Once per process start: bump boot_count, record the restart, and detect whether the
+    PREVIOUS run exited cleanly. A missing clean-exit marker ⇒ the prior process died
+    uncleanly (crash / OOM / SIGKILL / node loss) ⇒ count a crash (distinct from an
+    orchestrated SIGTERM restart). boot_count powers the dashboard's persistent-vs-ephemeral
+    classification — an ephemeral install (state wiped each boot) is forever boot_count==1."""
+    try:
+        now = int(time.time())
+        bc = int(_meta_get("boot_count", "0") or "0") + 1
+        _meta_set("boot_count", bc)
+        rlst = [t for t in json.loads(_meta_get("restart_ts", "[]") or "[]") if now - t < 26 * 3600]
+        rlst.append(now)
+        _meta_set("restart_ts", json.dumps(rlst[-200:]))
+        if bc > 1 and _meta_get("clean_exit", "1") != "1":  # previous run did NOT shut down cleanly
+            clst = [t for t in json.loads(_meta_get("crash_ts", "[]") or "[]") if now - t < 26 * 3600]
+            clst.append(now)
+            _meta_set("crash_ts", json.dumps(clst[-200:]))
+        _meta_set("clean_exit", "0")  # mark dirty until a graceful shutdown flips it back
+    except Exception:
+        pass
+
+
+def _tel_mark_clean_exit():
+    """Graceful-shutdown hook — flips the marker so the next boot doesn't count a crash."""
+    _meta_set("clean_exit", "1")
+
+
+def _detect_storage_ephemeral():
+    """Best-effort: is DB_DIR on ephemeral storage? Returns True / False / None (unknown).
+    An explicit operator/Helm hint (SAIRO_STORAGE_EPHEMERAL) wins; else infer from the mount table."""
+    hint = os.environ.get("SAIRO_STORAGE_EPHEMERAL", "").strip().lower()
+    if hint in ("true", "1", "yes"):
+        return True
+    if hint in ("false", "0", "no"):
+        return False
+    try:
+        dbdir = os.path.realpath(DB_DIR)
+        best, fstype = "", ""
+        with open("/proc/mounts") as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 3 and (dbdir == p[1] or dbdir.startswith(p[1].rstrip("/") + "/")):
+                    if len(p[1]) >= len(best):  # most-specific (longest) matching mountpoint
+                        best, fstype = p[1], p[2]
+        if fstype in ("tmpfs", "ramfs"):
+            return True
+        if best == "/" and fstype in ("overlay", "overlayfs", "aufs"):  # container root, no dedicated volume
+            return True
+        return None  # separate non-tmpfs mount (PVC / named volume / emptyDir) — indistinguishable from here
+    except Exception:
+        return None  # non-Linux or unreadable → unknown
+
+
+def _id_persistence(boot_count) -> str:
+    """persistent (proven, or hinted) / ephemeral (hinted or tmpfs/overlay-root) / unknown."""
+    if boot_count and int(boot_count) > 1:
+        return "persistent"  # proven: local state survived at least one restart
+    eph = _detect_storage_ephemeral()
+    if eph is True:
+        return "ephemeral"
+    if eph is False:
+        return "persistent"
+    return "unknown"
+
 
 def _get_instance_id() -> str:
     """Get or create a persistent anonymous instance ID."""
@@ -2320,11 +2491,10 @@ def _collect_telemetry() -> dict:
     except Exception:
         pass
 
-    # Count users, endpoints, and API token usage (MCP/CLI indicator)
-    user_count = 0
-    endpoint_count = 0
-    api_tokens = 0
-    api_tokens_active = 0
+    # Count users, endpoints, API tokens, 2FA, share links; earliest token/usage
+    user_count = endpoint_count = api_tokens = api_tokens_active = 0
+    twofa_count = share_link_count = 0
+    first_token_at = first_mcp_at = None
     try:
         with _get_users_db() as db:
             user_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -2333,31 +2503,184 @@ def _collect_telemetry() -> dict:
             api_tokens_active = db.execute(
                 "SELECT COUNT(*) FROM api_tokens WHERE last_used IS NOT NULL AND last_used > datetime('now', '-7 days')"
             ).fetchone()[0]
+            try:
+                twofa_count = db.execute("SELECT COUNT(*) FROM users WHERE totp_enabled=1").fetchone()[0]
+            except Exception:
+                pass
+            try:
+                share_link_count = db.execute("SELECT COUNT(*) FROM share_links").fetchone()[0]
+            except Exception:
+                pass
+            r = db.execute("SELECT MIN(created_at), MIN(last_used) FROM api_tokens").fetchone()
+            if r:
+                first_token_at, first_mcp_at = _sqlts_to_iso(r[0]), _sqlts_to_iso(r[1])
     except Exception:
         pass
 
     provider = detect_provider(S3_ENDPOINT)
 
+    # Disk usage of the volume backing the index/data
+    disk_total = disk_used = 0
+    try:
+        import shutil
+        du = shutil.disk_usage(DB_DIR)
+        disk_total, disk_used = du.total, du.used
+    except Exception:
+        pass
+
+    # Trailing-24h request counters + restart history
+    requests_24h = _tel_sum_24h(_tel_req_hours)
+    requests_failed_24h = min(_tel_sum_24h(_tel_failed_hours), requests_24h)
+    restart_count_24h = crash_count_24h = boot_count = 0
+    try:
+        _now = time.time()
+        restart_count_24h = sum(1 for t in json.loads(_meta_get("restart_ts", "[]") or "[]") if _now - t < 86400)
+        crash_count_24h = sum(1 for t in json.loads(_meta_get("crash_ts", "[]") or "[]") if _now - t < 86400)
+        boot_count = int(_meta_get("boot_count", "0") or "0")
+    except Exception:
+        pass
+    id_persistence = _id_persistence(boot_count)
+
+    # active_buckets_24h — persist across restarts: merge in-memory with stored, prune to 24h.
+    # Bucket names stay LOCAL in instance_meta; only the COUNT is ever sent in the ping.
+    active_buckets_24h = 0
+    try:
+        _now = time.time()
+        persisted = json.loads(_meta_get("active_buckets", "{}") or "{}")
+        with _tel_lock:
+            for b, ts in _tel_bucket_seen.items():
+                if ts > persisted.get(b, 0):
+                    persisted[b] = ts
+        persisted = {b: ts for b, ts in persisted.items() if _now - ts < 86400}
+        if len(persisted) > 10000:
+            persisted = dict(sorted(persisted.items(), key=lambda kv: kv[1])[-10000:])
+        _meta_set("active_buckets", json.dumps(persisted))
+        active_buckets_24h = len(persisted)
+    except Exception:
+        active_buckets_24h = _tel_active_buckets_24h()
+
+    # Activation milestones (record-once, idempotent — never overwritten)
+    if bucket_count > 0 and not _meta_get("first_bucket_at"):
+        _meta_set("first_bucket_at", _iso_now())
+    if total_objects > 0 and not _meta_get("first_object_at"):
+        _meta_set("first_object_at", _iso_now())
+    first_bucket_at = _meta_get("first_bucket_at")
+    first_object_at = _meta_get("first_object_at")
+
+    # last_write_at: max(in-memory since boot, persisted) so it survives restarts
+    last_write_at = _meta_get("last_write_at")
+    if _tel_last_write[0] > 0:
+        cand = _epoch_to_iso(_tel_last_write[0])
+        if not last_write_at or cand > last_write_at:
+            _meta_set("last_write_at", cand)
+            last_write_at = cand
+
+    # features_enabled — config/DB-derived Sairo capabilities (stable lowercase slugs)
+    feats = []
+    if AUTH_MODE == "s3":
+        feats.append("s3_auth")
+    if os.environ.get("LDAP_ENABLED", "false").lower() == "true":
+        feats.append("ldap")
+    if os.environ.get("OAUTH_GOOGLE_CLIENT_ID") or os.environ.get("OAUTH_GITHUB_CLIENT_ID"):
+        feats.append("oauth")
+    if endpoint_count > 1:
+        feats.append("multi_endpoint")
+    if api_tokens > 0:
+        feats.append("api_tokens")
+    if twofa_count > 0:
+        feats.append("twofa")
+    if share_link_count > 0:
+        feats.append("share_links")
+    if os.environ.get("APP_NAME", "Sairo") != "Sairo" or os.environ.get("APP_LOGO"):
+        feats.append("custom_branding")
+    feats = feats[:32]
+
+    # update_available — read the cached check only; never triggers a network call here
+    _latest = _update_cache.get("latest")
+    update_available = bool(_latest and _latest != SAIRO_VERSION and _latest > SAIRO_VERSION)
+
+    # health rollup
+    err_rate = (requests_failed_24h / requests_24h) if requests_24h else 0.0
+    disk_pct = (disk_used / disk_total) if disk_total else 0.0
+    if disk_pct > 0.95 or err_rate > 0.25 or crash_count_24h >= 3:
+        health = "error"
+    elif disk_pct > 0.85 or crash_count_24h >= 1 or restart_count_24h > 5:
+        health = "degraded"
+    else:
+        health = "ok"
+
+    def _ci(v, hi):  # clamp to a non-negative int within bounds
+        try:
+            return max(0, min(int(v), hi))
+        except Exception:
+            return 0
+
+    bucket_count = _ci(bucket_count, 10000)
     return {
+        # ── existing baseline (unchanged) ──
         "instance_id": instance_id,
         "version": SAIRO_VERSION,
         "buckets": bucket_count,
-        "total_objects": total_objects,
-        "total_size": total_size,
+        "total_objects": _ci(total_objects, 10**12),
+        "total_size": _ci(total_size, 10**18),
         "provider": provider,
         "uptime_hours": uptime_hours,
         "os": f"{platform.system().lower()}/{platform.machine()}",
-        "endpoints": endpoint_count,
-        "users": user_count,
+        "endpoints": _ci(endpoint_count, 10000),
+        "users": _ci(user_count, 10**6),
         "auth_mode": AUTH_MODE,
-        "api_tokens": api_tokens,
-        "api_tokens_active": api_tokens_active,
+        "api_tokens": _ci(api_tokens, 10**6),
+        "api_tokens_active": _ci(api_tokens_active, 10**6),
+        # ── v2: schema + Tier 1 health ──
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "requests_24h": _ci(requests_24h, 10**12),
+        "requests_failed_24h": _ci(requests_failed_24h, 10**12),
+        "restart_count_24h": _ci(restart_count_24h, 10000),
+        "crash_count_24h": _ci(crash_count_24h, 10000),
+        "disk_total_bytes": _ci(disk_total, 10**18),
+        "disk_used_bytes": _ci(disk_used, 10**18),
+        "health": health,
+        # ── v2: id validity (persistent vs ephemeral / reincarnation) ──
+        "id_persistence": id_persistence,
+        "boot_count": _ci(boot_count, 10**9),
+        # ── v2: Tier 2 activation milestones ──
+        "first_bucket_at": first_bucket_at,
+        "first_object_at": first_object_at,
+        "first_api_token_at": first_token_at,
+        "first_mcp_connect_at": first_mcp_at,
+        # ── v2: Tier 3 engagement + adoption ──
+        "active_buckets_24h": min(_ci(active_buckets_24h, 10000), bucket_count),
+        "last_write_at": last_write_at,
+        "features_enabled": feats,
+        "update_available": update_available,
     }
 
+@app.on_event("shutdown")
+def _telemetry_shutdown():
+    """Record a clean shutdown so the next boot doesn't mis-count this as a crash."""
+    if TELEMETRY:
+        _tel_mark_clean_exit()
+
+
+_telemetry_lockfile = None  # held for the process lifetime by the elected pinger
+
+
 def _telemetry_loop():
-    """Background thread: send anonymous heartbeat every 24 hours."""
+    """Background thread: send the anonymous heartbeat every TELEMETRY_INTERVAL seconds (hourly by
+    default). Only ONE process per host pings — a non-blocking file lock elects a single leader so a
+    multi-worker deployment can't emit duplicate pings or split counters."""
+    global _telemetry_lockfile
     import urllib.request
     import json as _json
+    try:
+        import fcntl
+        _telemetry_lockfile = open(os.path.join(DB_DIR, ".telemetry.lock"), "w")
+        fcntl.flock(_telemetry_lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if another worker holds it
+    except ImportError:
+        pass  # no fcntl (non-POSIX) → assume single process
+    except OSError:
+        log.info("Telemetry: another worker holds the ping lock; this worker will not ping.")
+        return
     time.sleep(60)  # wait 1 min after startup before first ping
     while True:
         try:

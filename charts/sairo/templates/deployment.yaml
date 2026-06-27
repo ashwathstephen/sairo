@@ -83,6 +83,10 @@ spec:
             # ── Crawler ──
             - name: RECRAWL_INTERVAL
               value: {{ .Values.crawler.recrawlInterval | quote }}
+            # ── Telemetry: tell the app whether its storage is ephemeral, so anonymous
+            #    telemetry can report id_persistence accurately (emptyDir → ephemeral). ──
+            - name: SAIRO_STORAGE_EPHEMERAL
+              value: {{ not .Values.persistence.enabled | quote }}
             # ── Rate Limiting ──
             {{- if .Values.rateLimit }}
             {{- if .Values.rateLimit.default }}

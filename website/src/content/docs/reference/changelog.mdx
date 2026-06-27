@@ -13,6 +13,13 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.5.0
+
+**Anonymous telemetry schema v2** — richer, still privacy-first
+
+- The heartbeat now also reports instance **health** (trailing-24h requests/errors, restarts, disk used/total, derived status), **activation milestones**, and **engagement** (active buckets, last write, enabled features, update-available). Still **aggregate counts + timestamps only** — never names, keys, paths, IPs, or content; clamped and < 4 KB.
+- Cadence is now **hourly** (`TELEMETRY_INTERVAL`, default 3600s). Fully opt-out via `TELEMETRY=false`. See [Telemetry](/security/telemetry).
+
 ## v3.4.1
 
 **S3-key authentication is scoped per user**

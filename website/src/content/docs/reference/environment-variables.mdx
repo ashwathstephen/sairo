@@ -97,6 +97,14 @@ These bound how the incremental delta crawler discovers new data on large bucket
 
 Login attempts are rate-limited with two layers: **10 per minute** via slowapi and **10 per 5 minutes per IP** via a hardcoded window. Neither is independently configurable.
 
+## Telemetry
+
+| Variable | Default | Description |
+|---|---|---|
+| `TELEMETRY` | `true` | Send an anonymous usage heartbeat (aggregate counts + timestamps only — never names, keys, paths, or content). Set to `false` to disable entirely. See [Telemetry](/security/telemetry). |
+| `TELEMETRY_INTERVAL` | `3600` | Seconds between heartbeats. |
+| `SAIRO_STORAGE_EPHEMERAL` | _(auto)_ | Optional hint for the telemetry `id_persistence` field: `true` if `DB_DIR` is ephemeral (e.g. `emptyDir`), `false` if durable. The Helm chart sets it from `persistence.enabled`; otherwise Sairo infers it from the mount table. |
+
 ## Example: Full Configuration
 
 ```yaml
