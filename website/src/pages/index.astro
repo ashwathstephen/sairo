@@ -318,7 +318,7 @@ const features = [
                   <div class="upload-bar-track">
                     <div class="upload-bar-fill" style="width: 68%"></div>
                   </div>
-                  <span class="upload-item-meta">68% &middot; <strong>114 MB/s</strong></span>
+                  <span class="upload-item-meta">68% &middot; <strong>92 MB/s</strong></span>
                 </div>
               </div>
               <div class="upload-item upload-active">
@@ -561,15 +561,15 @@ const features = [
             <div class="cli-table-row"><span class="cli-col-key">events/2026-03/hour=10/data.parquet</span><span class="cli-col-size">824 MB</span><span class="cli-col-date">4h ago</span></div>
             <div class="cli-table-row"><span class="cli-col-key">analytics/2026-03/part-0001.parquet</span><span class="cli-col-size">641 MB</span><span class="cli-col-date">5h ago</span></div>
             <div class="cli-table-row"><span class="cli-col-key">analytics/2026-03/part-0002.parquet</span><span class="cli-col-size">618 MB</span><span class="cli-col-date">5h ago</span></div>
-            <div class="cli-result"><span class="cli-result-dot"></span>5 results in 2.1ms &middot; 134,707 objects indexed</div>
+            <div class="cli-result"><span class="cli-result-dot"></span>5 results in 2.1ms &middot; FTS5 index</div>
           </div>
           <div class="cli-line" style="margin-top: 0.75rem;"><span class="cli-prompt">$</span> <span class="cli-cmd">sairo du</span> production-data <span class="cli-flag">-d 1</span></div>
           <div class="cli-output">
             <div class="cli-table-header"><span class="cli-col-prefix">PREFIX</span><span class="cli-col-objs">OBJECTS</span><span class="cli-col-sz">SIZE</span><span class="cli-col-pct">%</span></div>
-            <div class="cli-table-row"><span class="cli-col-prefix">events/</span><span class="cli-col-objs">74,201</span><span class="cli-col-sz">14.8 TB</span><span class="cli-col-pct">38.0%</span></div>
-            <div class="cli-table-row"><span class="cli-col-prefix">analytics/</span><span class="cli-col-objs">48,330</span><span class="cli-col-sz">12.1 TB</span><span class="cli-col-pct">31.1%</span></div>
-            <div class="cli-table-row"><span class="cli-col-prefix">warehouse/</span><span class="cli-col-objs">12,176</span><span class="cli-col-sz">11.3 TB</span><span class="cli-col-pct">29.0%</span></div>
-            <div class="cli-result"><span class="cli-result-dot"></span>38.2 TB total &middot; 0.03s</div>
+            <div class="cli-table-row"><span class="cli-col-prefix">events/</span><span class="cli-col-objs">5,118,400</span><span class="cli-col-sz">64 TB</span><span class="cli-col-pct">53.3%</span></div>
+            <div class="cli-table-row"><span class="cli-col-prefix">analytics/</span><span class="cli-col-objs">3,294,200</span><span class="cli-col-sz">38 TB</span><span class="cli-col-pct">31.7%</span></div>
+            <div class="cli-table-row"><span class="cli-col-prefix">warehouse/</span><span class="cli-col-objs">1,447,400</span><span class="cli-col-sz">18 TB</span><span class="cli-col-pct">15.0%</span></div>
+            <div class="cli-result"><span class="cli-result-dot"></span>120 TB total &middot; 0.03s</div>
           </div>
         </div>
       </div>
