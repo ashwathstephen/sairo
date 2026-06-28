@@ -1160,6 +1160,28 @@ button.btn-danger:disabled { background: var(--bg-surface); }
   font-size: 13px;
 }
 
+.search-indexing {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 16px;
+  margin: 4px 0;
+  border: 1px solid var(--primary-ring);
+  border-radius: 8px;
+  background: var(--primary-light);
+}
+.search-indexing-text {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+.search-indexing-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-top: 3px;
+}
+
 .search-count {
   font-size: 12px;
   color: var(--text-muted);

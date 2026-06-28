@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { searchObjects, formatSize, formatDate, downloadUrl } from "../api";
+import { searchObjects, getCrawlStatus, formatSize, formatDate, downloadUrl } from "../api";
 
 function highlightMatch(text, query) {
   if (!query || query.length < 2) return text;
@@ -20,9 +20,11 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [indexing, setIndexing] = useState(null); // {objects} while the index is still building, else null
   const [selectedIdx, setSelectedIdx] = useState(-1);
   const inputRef = useRef();
   const timerRef = useRef();
+  const retryRef = useRef();
   const listRef = useRef();
 
   useEffect(() => {
@@ -32,23 +34,43 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
   useEffect(() => {
     if (!query || query.length < 2) {
       setResults(null);
+      setIndexing(null);
       return;
     }
     clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(async () => {
+    clearTimeout(retryRef.current);
+    let cancelled = false;
+    const run = async () => {
       setLoading(true);
       setError(null);
       try {
         const data = await searchObjects(bucket, query, prefix);
+        if (cancelled) return;
         setResults(data);
+        setIndexing(null);
         setSelectedIdx(-1);
       } catch (e) {
-        setError(e.message.includes("503") ? "Index not ready — crawl in progress" : e.message);
+        if (cancelled) return;
+        if (e.message.includes("503")) {
+          // Index still building — reassure + show progress, and re-run automatically
+          // once the crawl is ready (turns the index-not-ready race into a smooth wait).
+          setResults(null);
+          try {
+            const s = await getCrawlStatus(bucket);
+            if (!cancelled) setIndexing({ objects: s.total_objects || 0 });
+          } catch {
+            if (!cancelled) setIndexing({ objects: 0 });
+          }
+          retryRef.current = setTimeout(() => { if (!cancelled) run(); }, 2500);
+        } else {
+          setError(e.message);
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    }, 300);
-    return () => clearTimeout(timerRef.current);
+    };
+    timerRef.current = setTimeout(run, 300);
+    return () => { cancelled = true; clearTimeout(timerRef.current); clearTimeout(retryRef.current); };
   }, [query, prefix, bucket]);
 
   const scrollToItem = (idx) => {
@@ -115,8 +137,17 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
         </div>
 
         <div className="search-results">
-          {loading && (
+          {loading && !indexing && (
             <div className="search-loading"><div className="spinner" /> Searching...</div>
+          )}
+          {indexing && (
+            <div className="search-indexing">
+              <div className="spinner" />
+              <div className="search-indexing-text">
+                Indexing your bucket{indexing.objects > 0 ? ` — ${indexing.objects.toLocaleString()} objects so far` : "…"}
+                <div className="search-indexing-sub">Hang tight — your search will run automatically the moment the index is ready.</div>
+              </div>
+            </div>
           )}
           {error && <div className="search-error">{error}</div>}
           {results && !loading && (
