@@ -111,6 +111,7 @@ function MainApp() {
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [indexed, setIndexed] = useState(false);
+  const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling")
   const [selected, setSelected] = useState(new Set());
   const [selectedFolders, setSelectedFolders] = useState(new Set());
   const [showUpload, setShowUpload] = useState(false);
@@ -247,6 +248,7 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
+    getCrawlStatus(b).then((s) => setIndexing(s?.status === "crawling")).catch(() => {});
     crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
     let firstPage = true;
@@ -288,6 +290,7 @@ function MainApp() {
     // actually changed since the last load. Avoids re-downloading an unchanged folder
     // every 30s — the previous behavior re-streamed the whole listing each tick.
     getCrawlStatus(b).then((status) => {
+      setIndexing(status?.status === "crawling");
       const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
       if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
       crawlFpRef.current = fp;
@@ -754,6 +757,8 @@ function MainApp() {
         sortAsc={sortAsc}
         onSort={handleSort}
         indexed={indexed}
+        indexing={indexing}
+        onSearch={() => setShowSearch(true)}
         prefix={prefix}
         isAdmin={canWrite}
         showDeleted={showDeleted}

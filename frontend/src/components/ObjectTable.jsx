@@ -65,6 +65,8 @@ export default function ObjectTable({
   sortAsc,
   onSort,
   indexed,
+  indexing,
+  onSearch,
   prefix,
   isAdmin,
   showDeleted,
@@ -216,7 +218,19 @@ export default function ObjectTable({
       </div>
 
       <div ref={parentRef} className="table-scroll-area">
-        {isEmpty && (
+        {isEmpty && indexing && !filter && (
+          <div className="empty-state">
+            <div className="empty-state-icon"><div className="spinner" /></div>
+            <h3 className="empty-state-title">Indexing your bucket\u2026</h3>
+            <p className="empty-state-text">
+              Building a fast index of your objects \u2014 browsing and instant search will be ready in a moment.
+            </p>
+            {onSearch && (
+              <button className="btn-primary" style={{ marginTop: 12 }} onClick={onSearch}>&#128269; Try a search</button>
+            )}
+          </div>
+        )}
+        {isEmpty && !(indexing && !filter) && (
           <div className="empty-state">
             <div className="empty-state-icon">{filter ? "\uD83D\uDD0D" : "\uD83D\uDCC2"}</div>
             <h3 className="empty-state-title">{filter ? "No matching items" : "This folder is empty"}</h3>
