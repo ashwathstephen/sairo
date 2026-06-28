@@ -38,7 +38,7 @@ Click any search result to navigate directly to that object's location in the br
 
 ## Background indexing
 
-Sairo's crawler runs on a continuous loop (default: every 2 minutes, configurable via `RECRAWL_INTERVAL`). Each crawl updates the SQLite database and its FTS5 index, so newly uploaded or deleted objects appear in search results shortly after the next crawl completes.
+Sairo's crawler runs on a continuous loop (default: every 2 minutes, configurable via `RECRAWL_INTERVAL`). Each crawl updates the SQLite database and its FTS5 index, so newly uploaded or deleted objects appear in search results shortly after the next crawl completes. Large buckets are kept fresh by an **adaptive delta crawler** that re-lists only the newest prefixes each cycle (with periodic full reconciles), so search stays current at multi-million-object scale without re-walking the whole bucket — see [Architecture](/reference/architecture/).
 
 <Aside>
   Search results reflect the state of the local index, not a live listing from S3. If you need to search for an object that was just uploaded, trigger a manual re-index from the bucket's **Settings > Index** tab.

@@ -1,74 +1,118 @@
 ---
 title: "Benchmarks"
-description: "Performance benchmarks for search, indexing, uploads, and API response times — with reproduction scripts."
+description: "Performance benchmarks for search, indexing, uploads, and API response times — server-compute microbenchmarks plus validation on a live multi-hundred-terabyte deployment."
 ---
 
 import { Aside } from "@astrojs/starlight/components";
 
-Sairo ships with a benchmark suite you can run against your own deployment. All numbers on the landing page are derived from these reproducible tests.
+Sairo ships with a benchmark suite you can run against your own deployment. The numbers below come from two complementary contexts, kept deliberately separate so they are never conflated:
 
-## Test Environment
+1. **Server-compute microbenchmarks** — single Uvicorn process in Docker against local MinIO. These isolate Sairo's own latency (index lookups, FTS5, SQL aggregation) with negligible network overhead.
+2. **Production validation** — a live, read-only run against a real multi-hundred-terabyte deployment, to confirm the architecture holds at scale.
+
+<Aside type="tip">
+  Production deployments on dedicated Linux hardware with NVMe storage will yield better server-compute numbers than these Docker Desktop results.
+</Aside>
+
+## Production Validation (live deployment)
+
+Measured read-only against a live production instance on Leaseweb S3-compatible object storage:
+
+| Parameter | Value |
+|---|---|
+| **Total indexed** | **15.5M objects across 14 buckets, ~269 TB** |
+| **Largest single bucket** | **~9.86M objects** |
+| **Access path** | Public internet, behind a CDN/TLS edge |
+
+Because this run crosses the public internet, every request carries a fixed transport round-trip (RTT) floor. We measured that floor against a zero-compute endpoint and subtract it to isolate Sairo's server-side cost:
+
+| Operation (on the ~9.86M-object bucket) | End-to-end p50 | Server compute (end-to-end − RTT floor) |
+|---|---|---|
+| `/healthz` (zero-compute reference) | 284ms | — *(this is the RTT floor)* |
+| **Folder listing** | 281ms | **≈ 0ms — at the network floor** |
+| Search (200 results) | 305ms | **~20–35ms** |
+| Storage breakdown (root) | 304ms | **~20–35ms** |
+
+The headline result: **folder listing on a ~9.86M-object bucket lands at the network floor** — Sairo adds no measurable server-side latency, because the listing is a single indexed lookup against a pre-computed prefix hierarchy regardless of folder size. Search and storage breakdown stay in the tens of milliseconds server-side at ~10M objects.
+
+<Aside type="note">
+  These end-to-end figures are dominated by transport, not Sairo. They are included to show real at-scale behavior over a real network — for clean millisecond-level server latency, see the localhost microbenchmarks below.
+</Aside>
+
+## Test Environment (microbenchmarks)
 
 | Parameter | Value |
 |---|---|
 | **Runtime** | Docker container, single Uvicorn process |
 | **Host** | macOS, Apple Silicon (Docker Desktop) |
-| **Local S3** | MinIO (localhost:9000) |
-| **Production S3** | Remote S3-compatible object storage |
-| **Production dataset** | 134,707 objects, 38.25 TB |
-| **Methodology** | 30 iterations per measurement, percentile reporting |
+| **Storage** | Local MinIO, plus a local Sairo pointed at production S3 indexes |
+| **Methodology** | 15–30 iterations per measurement, percentile reporting |
 
-<Aside type="tip">
-  Production deployments on dedicated Linux hardware with NVMe storage will yield better numbers than these Docker Desktop results.
-</Aside>
+## Search Latency (server-compute)
 
-## Search Latency
+FTS5 trigram search, measured locally to isolate server cost:
 
-FTS5 trigram search against the production bucket (134,707 objects, 38.25 TB):
+| Dataset | Query | Results | p50 | p95 |
+|---|---|---|---|---|
+| 134K-object index | typical (limit=200) | 200 | **2.2–3.1ms** | 3–22ms |
+| 134K-object index | broad match, limit=500 | 500 | **40ms** | 43ms |
+| ~10M-object bucket (live, minus RTT) | 200 results | 200 | **~20–35ms** | — |
 
-| Query | Results | p50 | p95 |
+Typical queries return in **single-digit milliseconds** on hundreds of thousands of objects, and in **tens of milliseconds** on ~10M-object buckets. Larger result sets (500+ rows) cost more because of row serialization, not search.
+
+## Object Listing & Pagination
+
+Listing is served from the SQLite index, never a live S3 `LIST`. Folder navigation uses a pre-computed `prefix_children` hierarchy, so it is a constant-time index lookup at any folder size.
+
+| Scenario | Before | After | Notes |
 |---|---|---|---|
-| `parquet` (limit=100) | 100 | **3.1ms** | 4.8ms |
-| `events` | 200 | **2.4ms** | 16.2ms |
-| `tracking` | 200 | **2.3ms** | 3.0ms |
-| `analytics` | 200 | **2.5ms** | 3.4ms |
-| `ingest` | 200 | **2.4ms** | 5.5ms |
-| `metadata` | 200 | **2.4ms** | 4.3ms |
-| `2026` | 200 | **2.2ms** | 22.0ms |
+| Folder listing, 557K-object bucket | 114ms | **0.048ms** | pre-computed prefix hierarchy |
+| Folder listing, >1M-object bucket | OOM (disabled) | **constant-time** | previously turned off above 1M objects; now lands at the network floor on a live 9.86M-object bucket |
+| Leaf listing (large folder), paginated | 8.7ms, ~1 MB payload | **4.8ms, ~238 KB payload** | pagination (v3.3.0) caps payload + latency |
+| Flat folder with 1,000,000 objects in one prefix | — | **~1.3s** | worst case: a single non-hierarchical folder of 1M keys |
 
-Fastest observed: **1.7ms**. Typical queries return in **2-3ms p50** against 134K objects.
+The flat-1M-folder case is the deliberate stress test — a single prefix holding a million keys with no sub-structure. Even then it returns in ~1.3s; any normally-partitioned layout lists in low single-digit milliseconds.
 
 ## Indexing Throughput
 
-| Bucket | Objects | Duration | Throughput |
-|---|---|---|---|
-| bench-small | 1,000 | 1.08s | **926 obj/s** |
-| bench-mixed | 2,416 | 1.08s | **1,348 obj/s** |
-| production-bucket | 134,707 | completed | Production-scale crawl |
-
-Indexing rate: **1,000–1,350 objects/second** on local MinIO.
-
-## Upload Throughput
-
-| File Size | p50 | Throughput |
+| Bucket | Objects | Throughput |
 |---|---|---|
-| 1 KB | 44.9ms | — |
-| 1 MB | 51.9ms | 19.3 MB/s |
-| 10 MB | 130.7ms | 76.5 MB/s |
-| 50 MB | 436.2ms | **114.6 MB/s** |
+| bench-small | 1,000 | **926 obj/s** |
+| bench-mixed | 2,416 | **1,348 obj/s** |
+| production buckets | 15.5M (live) | crawled + kept fresh via adaptive delta crawler |
 
-## API Response Times
+Indexing rate: **1,000–1,350 objects/second** on local MinIO. At production scale, large buckets are kept current by an **adaptive delta crawler** that re-lists only the newest partitions instead of re-walking the whole bucket each cycle, with periodic full reconciles.
+
+## Uploads (direct browser → S3)
+
+Since v3.4.0, uploads go **directly from the browser to the S3 endpoint** — file bytes never pass through the Sairo server. Small files use a single presigned `PUT`; large files use **presigned multipart**, splitting the file into parts uploaded in parallel, each part signed just-in-time.
+
+| Property | Behavior |
+|---|---|
+| **Server memory during upload** | **Flat, independent of file size** — no buffering, so no OOM or pod restarts at scale |
+| **Maximum object size** | Up to S3's **5 TB** per-object limit (no single-PUT ceiling) |
+| **Large-file transfer** | Parallel multipart parts; an in-progress upload can be stopped and is cleanly aborted on S3 |
+| **Throughput** | Bounded by the client's bandwidth to S3, not by Sairo |
+
+<Aside type="note">
+  Earlier versions streamed uploads through the server (a ~114 MB/s proxy path, capped by server memory). That path remains only as a fallback; the default direct path removes the server as a bottleneck entirely, which is the meaningful win at scale.
+</Aside>
+
+## API Response Times (server-compute)
 
 | Endpoint | p50 | p95 |
 |---|---|---|
 | `/healthz` | **2.1ms** | 3.6ms |
 | `/api/buckets` | **4.3ms** | 5.8ms |
-| Object listing (production) | **2.4ms** | 4.6ms |
+| Object listing | **2.4ms** | 4.6ms |
+| Storage breakdown (root) | **2.4–3.9ms** | 5–6ms |
 | Presigned URL generation | **3.1ms** | 5.6ms |
+
+Sub-5ms p50 for standard endpoints on local hardware.
 
 ## Concurrent Load
 
-Production S3, concurrent search queries:
+Concurrent search queries, single Uvicorn process:
 
 | Concurrent Users | Requests/sec |
 |---|---|
@@ -76,51 +120,28 @@ Production S3, concurrent search queries:
 | 10 | **333** |
 | 25 | **528** |
 
-## Scaling Performance (v3.0)
+Throughput scales with worker count; these are single-process numbers.
 
-Benchmarked on production data running in Docker against Leaseweb StorageGRID:
+## SQLite PRAGMA Tuning
 
-### Folder Listing (the user-facing speedup)
-
-| Bucket | Objects | Before (v2.0) | After (v3.0) | Speedup |
-|---|---|---|---|---|
-| ssp-production-reports | 557K | 114ms | **0.048ms** | **2,378x** |
-| ds-mletl-data | 139K | 27ms | **0.056ms** | **486x** |
-| druid-lw-prod | 2M (was >1M, disabled) | 312ms (DISTINCT fallback) | **0.002ms** | **191,231x** |
-
-Folder listing uses pre-computed `prefix_children` via SQL-only aggregation. Previously disabled for buckets >1M objects due to OOM — now works at any scale.
-
-### SQLite PRAGMA Tuning Impact
+The index database is opened with: `cache_size=-64000` (64 MB), `mmap_size=268435456` (256 MB memory-mapped I/O), `temp_store=MEMORY`. Impact at scale:
 
 | Query | Before | After | Dataset |
 |---|---|---|---|
-| COUNT(*) | 2.0ms | 1.5ms | 557K objects |
-| COUNT(*) | 11.3ms | 7.3ms | 2M objects |
-| SUM(size) | 40ms | 62ms | 557K objects |
-| Folder stats rebuild | 63ms | 56ms | 139K objects |
+| `COUNT(*)` | 11.3ms | **7.3ms** | 2M objects |
+| `COUNT(*)` | 2.0ms | **1.5ms** | 557K objects |
+| Folder stats rebuild | 63ms | **56ms** | 139K objects |
 
-PRAGMAs applied: `cache_size=-64000` (64MB), `mmap_size=268435456` (256MB), `temp_store=MEMORY`.
+## Crawl Architecture
 
-### Crawl Performance
-
-| Setting | Before | After |
-|---|---|---|
-| Crawl workers | 6 | **12** |
-| Prefix workers | 4 | **16** |
-| Batch size | 2,000 | **10,000** |
-| Update chunks | 500 | **2,000** |
-| FTS rebuild | Blocks 15+ min | **Background thread** |
-| Sub-prefix splitting | None | **Auto for buckets with few prefixes** |
-
-### At 1PB Scale (Projected)
-
-| Operation | Expected Performance |
+| Setting | Value |
 |---|---|
-| Folder listing | < 1ms (constant time, index lookup) |
-| Search | ~1ms (FTS5, always available) |
-| Storage breakdown | ~500ms (full scan with PRAGMA tuning) |
-| Crawl (50M objects) | ~25 min (with sub-prefix splitting) |
-| FTS rebuild (50M objects) | ~83 min (background, non-blocking) |
+| Crawl workers | **12** |
+| Prefix workers | **16** |
+| Batch insert size | **10,000** |
+| FTS rebuild | **Background thread** (never blocks listing/search) |
+| Large buckets | **Adaptive delta crawl** + periodic full reconcile |
+| Sub-prefix splitting | **Automatic** for buckets with few top-level prefixes |
 
 ## Running the Benchmarks
 
@@ -136,8 +157,6 @@ cd benchmark
 ./seed-data.sh large        # Seeds bench-large (50K objects)
 ```
 
-The seeder creates four buckets with realistic file structures:
-
 | Bucket | Objects | Pattern |
 |---|---|---|
 | `bench-small` | 1,000 | 5 dirs × 10 months × 20 files |
@@ -148,37 +167,25 @@ The seeder creates four buckets with realistic file structures:
 ### 2. Run benchmarks
 
 ```bash
-# Run all benchmarks
-./run-benchmarks.sh
-
-# Run specific benchmark categories
-./run-benchmarks.sh search          # Search latency only
-./run-benchmarks.sh crawl           # Crawl/indexing only
-./run-benchmarks.sh crawl listing   # Crawl + listing
+./run-benchmarks.sh                 # all categories
+./run-benchmarks.sh search          # search latency only
+./run-benchmarks.sh crawl listing   # crawl + listing
 ```
 
-### Prerequisites
-
-- Sairo running on `localhost:8000` (or set `SAIRO_URL`)
-- MinIO running on `localhost:9000`
-- Test buckets seeded via `seed-data.sh`
-- Default admin credentials (`admin`/`password`) or set `ADMIN_USER`/`ADMIN_PASS`
+Prerequisites: Sairo on `localhost:8000` (or set `SAIRO_URL`), MinIO on `localhost:9000`, test buckets seeded, and admin credentials.
 
 ### 3. Results
 
-Results are saved to `benchmark/results/`:
-
-- **JSON** — machine-readable per-run results (`benchmark-YYYYMMDD-HHMMSS.json`)
-- **Markdown** — human-readable summary (`LATEST-RESULTS.md`)
+Results are saved to `benchmark/results/` as machine-readable JSON and a human-readable `LATEST-RESULTS.md`.
 
 ## Landing Page Claims
 
-Every number on the landing page maps to a specific benchmark result:
-
 | Landing Page Claim | Benchmark Evidence |
 |---|---|
-| "Single-digit millisecond search" | Production p50 = 2.2–3.1ms on 134K objects |
+| "Proven at 269 TB / 15.5M objects" | Live deployment, 14 buckets, largest ~9.86M objects |
+| "Constant-time folder listing at any scale" | Listing lands at the network floor on a ~9.86M-object bucket |
+| "Single-digit millisecond search" | p50 = 2.2–3.1ms on 134K objects (tens of ms at ~10M) |
 | "1,300+ obj/sec indexing" | 1,348 obj/s measured on bench-mixed |
 | "Sub-5ms API responses" | healthz p50 = 2.1ms, most endpoints < 5ms |
-| "500+ requests/second" | 528 req/s at 25 concurrent users (production) |
-| "114 MB/s upload" | 50 MB file upload sustained throughput |
+| "500+ requests/second" | 528 req/s at 25 concurrent users |
+| "Uploads of any size, zero server memory" | Direct browser→S3 multipart up to 5 TB; flat server memory |

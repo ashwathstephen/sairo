@@ -60,6 +60,27 @@ Configuration:
 
 This approach scales to petabyte-level buckets with tens of millions of objects.
 
+## Adaptive Delta Crawling
+
+Re-crawling a small bucket in full every cycle is cheap. Re-walking a multi-million-object bucket every couple of minutes is not. So Sairo adapts per bucket:
+
+- A bucket whose **full crawl takes longer than `LARGE_BUCKET_SECONDS`** (default 60s) is flagged "large" and switched to **incremental delta crawls** instead of full re-crawls.
+- A delta crawl samples the most recently-indexed objects (`DELTA_SAMPLE`) to locate the **"hot" prefixes** that are actually receiving writes, then re-lists only those — capped at `DELTA_MAX_TARGETS`. In a time-partitioned layout (`year=/month=/day=/hour=`) this means re-listing today's partition and the one that just rolled over, not the entire history.
+- Partition vs. descriptive levels are distinguished by fan-out: a level with more than `DELTA_BRANCH_FANOUT` children is treated as a time partition (follow only the newest `DELTA_NEWEST_K`); a level with fewer is a descriptive branch (follow all).
+- A full reconcile runs every `FULL_CRAWL_INTERVAL` (default 3600s) to catch deletions and cold changes that a delta pass would miss.
+
+The result: new objects on a huge bucket show up in seconds, at a tiny fraction of the API cost of a full re-crawl. All delta parameters are tunable — see [Environment Variables](/reference/environment-variables/).
+
+## Upload Path (Browser → S3)
+
+Uploads do **not** stream through the Sairo server. The browser uploads object bytes **directly to the S3 endpoint** using presigned URLs that the server signs on demand:
+
+- **Small files** use a single presigned `PUT`.
+- **Large files** use **presigned multipart**: the browser splits the file into parts and uploads them in parallel, each part URL signed just-in-time so a long transfer never fails on an expired URL. There is no single-PUT size ceiling — objects can be as large as S3 allows (up to 5 TB). An in-progress upload can be stopped, which aborts the multipart upload on S3 so no orphaned parts remain.
+- Because no file data is buffered in the server process, **server memory stays flat regardless of file size** — large uploads no longer cause memory pressure or pod restarts at scale.
+
+A server-proxied streaming path remains as a fallback (bounded by `UPLOAD_PROXY_CONCURRENCY`) for environments where direct browser→S3 access is blocked.
+
 ## SQLite Performance Tuning
 
 Sairo applies aggressive PRAGMA tuning for maximum query performance:
@@ -86,7 +107,7 @@ SELECT * FROM prefix_children WHERE parent_prefix = '';
 SELECT DISTINCT SUBSTR(key, ...) FROM objects WHERE ...
 ```
 
-This works at any scale — tested up to 2M objects per bucket.
+This works at any scale — validated read-only on a live deployment of 15.5M objects across 14 buckets (~269 TB), where folder listing on the largest (~9.86M-object) bucket still returns at the network round-trip floor. See [Benchmarks](/reference/benchmarks/).
 
 ## NDJSON Streaming
 

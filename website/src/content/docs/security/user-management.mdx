@@ -5,6 +5,20 @@ description: "Managing users, roles, and per-bucket permissions in Sairo."
 
 Sairo has a built-in user system with two roles and granular per-bucket permissions for viewers.
 
+:::note[This page describes local auth mode]
+Everything below — roles, the admin/viewer model, and per-bucket permissions — applies when `AUTH_MODE=local` (the default). If you run Sairo in **S3-key auth mode** (`AUTH_MODE=s3`), authorization works differently — see [S3-key auth mode](#s3-key-auth-mode) below.
+:::
+
+## S3-key auth mode
+
+When `AUTH_MODE=s3`, users log in with their **own S3 access key and secret**, and Sairo performs every storage operation using *those* credentials — not a shared server key. As a result, **bucket visibility and permissions are governed entirely by your S3 provider's IAM**, not by Sairo's role system:
+
+- Each user sees and can act on **only the buckets their own keys are allowed to access**. A user whose keys are scoped to two buckets sees exactly those two — the rest of the account is invisible to them, even via direct URL.
+- The admin/viewer roles and the per-bucket permission grants described below **do not apply** in this mode. Authorization is delegated to the provider (AWS IAM, MinIO policies, Ceph caps, etc.).
+- This makes Sairo safe to expose to a team whose access is already managed by IAM: you grant and revoke access at the provider, and Sairo reflects it automatically.
+
+Use local auth mode (below) when you want Sairo itself to manage users and per-bucket access against a single set of storage credentials.
+
 ## Roles
 
 | Role | Capabilities |

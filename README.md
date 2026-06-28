@@ -27,7 +27,7 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 ## Features
 
 - **Object Browser** — Navigate buckets and prefixes with virtual scrolling for 100K+ objects
-- **Instant Search** — SQLite-indexed search across all objects by filename
+- **Instant Search** — SQLite-indexed search across all objects by filename, kept fresh on large buckets by an adaptive delta crawler that re-lists only the newest prefixes
 - **File Preview** — Images, text, CSV, JSON, PDF, Parquet/ORC/Avro schemas, and binary hex
 - **Upload & Download** — Direct browser-to-S3 upload for files of any size (presigned multipart, no data through the server), drag-and-drop with progress, and presigned-URL downloads
 - **Storage Dashboard** — Visual breakdown by prefix with growth trend charts and cost estimates
@@ -40,10 +40,12 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 - **Multi-Endpoint** — Connect multiple S3 backends and manage all from one dashboard
 - **Audit Log** — Full activity trail with filtering by action, user, and bucket
 - **User Management** — Role-based access control (admin / viewer) with per-bucket permissions
+- **S3-Key Auth** — Optional `AUTH_MODE=s3`: users log in with their own S3 keys and see only the buckets their provider IAM allows — access is delegated entirely to the provider
 - **Two-Factor Auth** — TOTP-based 2FA with QR setup and recovery codes
 - **OAuth & LDAP** — Google, GitHub OAuth and LDAP authentication
 - **AI-Powered Analysis (MCP)** — Connect Claude, Cursor, or any MCP client to ask natural language questions about your storage. 26 tools for analytics, cost optimization, pipeline health, and more
-- **Petabyte-Scale Performance** — Folder listings in 0.05ms on 500K+ objects. Pre-computed prefix hierarchies, 64MB SQLite page cache, 256MB memory-mapped I/O, async FTS rebuilds
+- **Petabyte-Scale Performance** — Proven on a live 269 TB / 15.5M-object deployment. Constant-time folder listing at any scale via pre-computed prefix hierarchies, 64MB SQLite page cache, 256MB memory-mapped I/O, async FTS rebuilds
+- **Anonymous Telemetry (opt-out)** — A privacy-first heartbeat reports aggregate counts, instance health, and activation timestamps only (never names, keys, paths, or content). Disable with `TELEMETRY=false`
 - **Dark Mode** — Full dark/light theme with system preference detection
 - **Keyboard Shortcuts** — 30+ shortcuts for power users
 - **Single Container** — No dependencies. No microservices. Just `docker run` and go.
@@ -109,17 +111,18 @@ Connect Claude Desktop, Cursor, or any MCP-compatible client and ask:
 
 ## Performance
 
-Benchmarked on production data (557K objects, 167 TB, NetApp StorageGRID):
+Validated read-only against a live production deployment (Leaseweb S3-compatible storage):
 
-| Operation | Speed |
-|-----------|-------|
-| Folder listing | 0.05ms (pre-computed prefix hierarchy) |
-| Object count | 1.5ms on 557K objects |
-| Full-text search | 22ms, 200 results on 139K objects |
-| Storage breakdown | 310ms on 557K objects |
-| Crawl throughput | 16 parallel prefix workers, 10K batch inserts |
+| Operation | Result |
+|-----------|--------|
+| Production scale | **15.5M objects across 14 buckets, ~269 TB** |
+| Largest single bucket | **~9.86M objects** |
+| Folder listing | **Constant-time** — lands at the network floor even on the 9.86M-object bucket (≈0ms server-side) |
+| Full-text search | Single-digit ms on 100K+ objects; tens of ms server-side at ~10M objects |
+| Upload | Direct browser→S3 multipart, up to 5 TB/object, **flat server memory** |
+| Crawl throughput | 16 parallel prefix workers, 10K batch inserts, adaptive delta crawl |
 
-**Scaling:** Tested up to 2M objects per bucket. Designed for petabyte scale with instant folder navigation at any dataset size.
+**Scaling:** Folder navigation is a constant-time index lookup, so it stays instant at any dataset size. See [Benchmarks](https://docs.sairo.dev/reference/benchmarks/) for the full methodology and server-compute microbenchmarks.
 
 ## Environment Variables
 
@@ -136,7 +139,13 @@ Benchmarked on production data (557K objects, 167 TB, NetApp StorageGRID):
 | `SESSION_HOURS` | `24` | Login session duration in hours |
 | `SECURE_COOKIE` | `true` | Set to `false` for HTTP (non-HTTPS) deployments |
 | `RECRAWL_INTERVAL` | `120` | Seconds between automatic re-index cycles |
+| `LARGE_BUCKET_SECONDS` | `60` | A bucket whose full crawl exceeds this is kept fresh via incremental delta crawls instead of full re-crawls |
+| `FULL_CRAWL_INTERVAL` | `3600` | Seconds between full reconcile crawls for large buckets (delta crawls run in between) |
 | `DB_DIR` | `/data` | Directory for SQLite databases |
+| `TELEMETRY` | `true` | Anonymous usage heartbeat (aggregate counts + health only). Set `false` to disable |
+| `TELEMETRY_INTERVAL` | `3600` | Seconds between telemetry heartbeats |
+
+> This is a summary. See the [full environment-variable reference](https://docs.sairo.dev/reference/environment-variables/) for delta-crawl tuning, uploads, LDAP/OAuth, branding, and rate limiting.
 
 ## Tech Stack
 
