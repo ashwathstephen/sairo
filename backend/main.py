@@ -295,6 +295,22 @@ async def s3_error_handler(request, exc):
 
 _app_start_time = time.time()
 SAIRO_VERSION = "3.5.0"
+
+
+def _version_gt(a: str, b: str) -> bool:
+    """True if version `a` is newer than `b`, compared numerically (not lexically,
+    so 3.10.0 > 3.9.0). Non-numeric/missing parts degrade gracefully to 0."""
+    def parts(v):
+        out = []
+        for p in (v or "").lstrip("vV").split("."):
+            num = "".join(c for c in p if c.isdigit())
+            out.append(int(num) if num else 0)
+        return out
+    pa, pb = parts(a), parts(b)
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    return pa > pb
 TELEMETRY = os.environ.get("TELEMETRY", "true").lower() != "false"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
@@ -2597,7 +2613,7 @@ def _collect_telemetry() -> dict:
 
     # update_available — read the cached check only; never triggers a network call here
     _latest = _update_cache.get("latest")
-    update_available = bool(_latest and _latest != SAIRO_VERSION and _latest > SAIRO_VERSION)
+    update_available = bool(_latest and _version_gt(_latest, SAIRO_VERSION))
 
     # health rollup
     err_rate = (requests_failed_24h / requests_24h) if requests_24h else 0.0
@@ -3346,7 +3362,7 @@ def get_version(user: dict = Depends(get_current_user)):
             _update_cache["checked_at"] = now
         except Exception:
             latest = _update_cache.get("latest") or SAIRO_VERSION
-    update_available = latest and latest != SAIRO_VERSION and latest > SAIRO_VERSION
+    update_available = bool(latest and _version_gt(latest, SAIRO_VERSION))
     return {
         "current": SAIRO_VERSION,
         "latest": latest,

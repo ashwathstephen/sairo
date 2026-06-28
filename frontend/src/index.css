@@ -880,6 +880,53 @@ button.btn-danger:disabled { background: var(--bg-surface); }
 .version-row-latest td { background: var(--success-bg); }
 .version-row-latest:hover td { background: var(--success-bg); filter: brightness(0.97); }
 .version-row-deleted td { background: var(--danger-light); }
+
+/* Update banner */
+.update-banner {
+  display: flex; align-items: flex-start; gap: 13px;
+  margin: 0 16px 12px; padding: 13px 14px;
+  border: 1px solid var(--primary-ring); border-radius: 10px;
+  background: var(--primary-light);
+}
+.update-banner .ub-icon {
+  width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; margin-top: 1px;
+  background: var(--primary); color: #fff; display: grid; place-items: center;
+}
+.update-banner .ub-icon svg { width: 16px; height: 16px; }
+.update-banner .ub-body { flex: 1; min-width: 0; }
+.update-banner .ub-head { font-size: 14px; font-weight: 600; color: var(--text); }
+.update-banner .ub-head .ub-cur { color: var(--text-muted); font-weight: 400; }
+.update-banner .ub-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 2px; }
+.update-banner .ub-chip {
+  font-size: 11.5px; color: var(--primary); background: var(--bg-surface);
+  border: 1px solid var(--primary-ring); border-radius: 999px; padding: 3px 9px; white-space: nowrap;
+}
+.update-banner .ub-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.update-banner .ub-btn {
+  font: inherit; font-size: 12.5px; font-weight: 600; border-radius: 7px; cursor: pointer;
+  padding: 7px 13px; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 6px;
+}
+.update-banner .ub-btn svg { width: 13px; height: 13px; }
+.update-banner .ub-primary { background: var(--primary); color: #fff; }
+.update-banner .ub-primary:hover { background: var(--primary-hover); }
+.update-banner .ub-link { background: none; color: var(--primary); text-decoration: none; padding: 7px 4px; }
+.update-banner .ub-link:hover { text-decoration: underline; }
+.update-banner .ub-dismiss {
+  margin-left: auto; background: none; border: 0; color: var(--text-muted);
+  cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 4px; align-self: flex-start;
+}
+.update-banner .ub-dismiss:hover { color: var(--text); }
+.update-banner .ub-cmd {
+  margin-top: 11px; display: flex; align-items: center; gap: 10px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-secondary);
+}
+.update-banner .ub-cmd code { flex: 1; overflow-x: auto; white-space: nowrap; }
+.update-banner .ub-copy {
+  font: inherit; font-size: 11px; color: var(--primary); background: none;
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; cursor: pointer; flex-shrink: 0;
+}
+.update-banner .ub-copy:hover { border-color: var(--primary-ring); }
 .version-row-deleted:hover td { background: var(--danger-light); filter: brightness(0.97); }
 
 .version-badge-latest {

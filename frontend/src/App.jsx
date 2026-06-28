@@ -33,6 +33,16 @@ import { streamList, deleteObjects, deleteFolder, createFolder, bulkCopy, bulkMo
 // paints instantly and no single response is huge, regardless of folder size.
 const LIST_PAGE_SIZE = 1000;
 
+// Update banner: the headline wins users get by upgrading. Refresh these to the
+// latest release's user-facing highlights when cutting a new version.
+const UPDATE_HIGHLIGHTS = [
+  "Direct uploads, any size",
+  "Million-object folders open instantly",
+  "Per-user S3-key access",
+  "Faster crawling",
+];
+const UPGRADE_CMD = "docker compose pull && docker compose up -d";
+
 // Share link route: /share/{token}
 function getShareToken() {
   const path = window.location.pathname;
@@ -131,6 +141,8 @@ function MainApp() {
   const [showEndpointManager, setShowEndpointManager] = useState(false);
   const [branding, setBranding] = useState({ app_name: "Sairo" });
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [showUpgradeCmd, setShowUpgradeCmd] = useState(false);
+  const [upgradeCmdCopied, setUpgradeCmdCopied] = useState(false);
   const [bucketPermission, setBucketPermission] = useState(null);
   const dragCounter = useRef(0);
   const abortRef = useRef(null);
@@ -610,14 +622,32 @@ function MainApp() {
           </div>
         </header>
         {updateInfo && updateInfo.update_available && (
-          <div style={{ padding: "8px 16px", background: "rgba(59, 130, 246, 0.1)", border: "1px solid rgba(59, 130, 246, 0.2)", borderRadius: 8, margin: "0 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 13, color: "var(--text, #e4e4e7)" }}>
-              Sairo <strong>v{updateInfo.latest}</strong> is available. You are on v{updateInfo.current}.
+          <div className="update-banner">
+            <span className="ub-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
             </span>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <a href="https://github.com/AshwathStephen/sairo/releases" target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none", fontWeight: 500 }}>View changelog</a>
-              <button onClick={() => setUpdateInfo(null)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16, padding: "0 4px" }}>&times;</button>
+            <div className="ub-body">
+              <div className="ub-head">
+                Sairo <strong>v{updateInfo.latest}</strong> is here <span className="ub-cur">· you're on v{updateInfo.current}</span>
+              </div>
+              <div className="ub-chips">
+                {UPDATE_HIGHLIGHTS.map((h) => <span className="ub-chip" key={h}>{h}</span>)}
+              </div>
+              <div className="ub-actions">
+                <button className="ub-btn ub-primary" onClick={() => setShowUpgradeCmd((v) => !v)}>
+                  Update now
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </button>
+                <a className="ub-btn ub-link" href="https://github.com/AshwathStephen/sairo/releases/latest" target="_blank" rel="noopener noreferrer">See what's new</a>
+              </div>
+              {showUpgradeCmd && (
+                <div className="ub-cmd">
+                  <code>{UPGRADE_CMD}</code>
+                  <button className="ub-copy" onClick={() => { navigator.clipboard?.writeText(UPGRADE_CMD); setUpgradeCmdCopied(true); setTimeout(() => setUpgradeCmdCopied(false), 1400); }}>{upgradeCmdCopied ? "Copied" : "Copy"}</button>
+                </div>
+              )}
             </div>
+            <button className="ub-dismiss" aria-label="Dismiss" onClick={() => setUpdateInfo(null)}>&times;</button>
           </div>
         )}
         <BucketList onSelect={navigateBucket} role={user.role} onDashboard={setDashboardBucket} />
