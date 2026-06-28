@@ -2394,6 +2394,41 @@ def _epoch_to_iso(e: float) -> str:
     return datetime.fromtimestamp(e, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── Activation milestones — recorded at request time, idempotent, fail-safe ──
+# Anonymous, aggregate-only (a timestamp / boolean per instance), routed through the
+# existing instance_meta + telemetry path. Used to measure time-to-first-search and
+# whether the activation funnel (search / dashboard) is reached. Never raises into a request.
+_recorded_milestones: set = set()
+
+
+def _record_milestone_once(key: str):
+    """Stamp `key` with the current time the first time it occurs. The in-memory guard keeps
+    it to one DB hit per process; the _meta_get check keeps it idempotent across restarts."""
+    if key in _recorded_milestones:
+        return
+    try:
+        if not _meta_get(key):
+            _meta_set(key, _iso_now())
+        _recorded_milestones.add(key)
+    except Exception:
+        pass
+
+
+def _record_first_search(returned_results: bool):
+    """Activation event: first search *served* (regardless of hit count). Also records whether
+    that first search returned any results — a free diagnostic for the index-not-ready race
+    (searched-but-zero-results before the crawl finished)."""
+    if "first_search_at" in _recorded_milestones:
+        return
+    try:
+        if not _meta_get("first_search_at"):
+            _meta_set("first_search_at", _iso_now())
+            _meta_set("first_search_returned_results", "1" if returned_results else "0")
+        _recorded_milestones.add("first_search_at")
+    except Exception:
+        pass
+
+
 def _sqlts_to_iso(s):
     """SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', UTC) -> ISO-8601 Z. None-safe."""
     if not s:
@@ -2582,6 +2617,11 @@ def _collect_telemetry() -> dict:
         _meta_set("first_object_at", _iso_now())
     first_bucket_at = _meta_get("first_bucket_at")
     first_object_at = _meta_get("first_object_at")
+    # Activation funnel (recorded at request time by _record_first_search / _record_milestone_once)
+    first_search_at = _meta_get("first_search_at")
+    first_dashboard_open_at = _meta_get("first_dashboard_open_at")
+    _fsr = _meta_get("first_search_returned_results")
+    first_search_returned_results = None if _fsr is None else (_fsr == "1")
 
     # last_write_at: max(in-memory since boot, persisted) so it survives restarts
     last_write_at = _meta_get("last_write_at")
@@ -2664,6 +2704,10 @@ def _collect_telemetry() -> dict:
         "first_object_at": first_object_at,
         "first_api_token_at": first_token_at,
         "first_mcp_connect_at": first_mcp_at,
+        # ── v2: activation funnel (time-to-first-search + dashboard reach) ──
+        "first_search_at": first_search_at,
+        "first_dashboard_open_at": first_dashboard_open_at,
+        "first_search_returned_results": first_search_returned_results,
         # ── v2: Tier 3 engagement + adoption ──
         "active_buckets_24h": min(_ci(active_buckets_24h, 10000), bucket_count),
         "last_write_at": last_write_at,
@@ -4320,6 +4364,7 @@ def search_objects(bucket: str, request: Request, q: str = Query(..., min_length
         raise HTTPException(503, "Index not ready — crawl in progress")
     with _get_db(bucket) as db:
         rows = _search_fts(db, q, prefix, limit)
+    _record_first_search(len(rows) > 0)  # activation milestone (fail-safe, idempotent)
     return {"results": [dict(r) for r in rows], "count": len(rows), "query": q}
 
 
@@ -4380,6 +4425,7 @@ def folder_size(bucket: str, prefix: str = "", user: dict = Depends(get_current_
 
 @app.get("/api/buckets/{bucket}/storage-breakdown")
 def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_current_user)):
+    _record_milestone_once("first_dashboard_open_at")  # activation milestone (fail-safe, idempotent)
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
 
