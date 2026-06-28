@@ -492,6 +492,8 @@ button.btn-danger:disabled { background: var(--bg-surface); }
 @keyframes rowHighlightPulse { 0% { background: var(--primary-light); } 100% { background: transparent; } }
 .table-row.row-highlight { animation: rowHighlightPulse 3s ease-out; box-shadow: inset 3px 0 0 var(--primary); }
 @media (prefers-reduced-motion: reduce) { .table-row.row-highlight { animation: none; background: var(--primary-light); } }
+.col-name-clickable { cursor: pointer; }
+.col-name-clickable:hover { color: var(--primary); }
 .table-row.row-folder:hover { background: var(--primary-light); }
 
 .table-row .td {

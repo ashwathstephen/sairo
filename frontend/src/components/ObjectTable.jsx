@@ -326,7 +326,8 @@ export default function ObjectTable({
                         onChange={() => toggleOne(file.key)}
                       />
                     </div>
-                    <div className="td col-name" title={file.key}>
+                    <div className="td col-name col-name-clickable" title={file.key}
+                      onClick={() => { if (canPreview(file.name) && onFilePreview) onFilePreview({ key: file.key, size: file.size }); else onFileInfo(file.key); }}>
                       {React.createElement(getFileIcon(file.name), { size: 16, className: "file-icon" })}
                       {file.name}
                     </div>

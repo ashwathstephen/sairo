@@ -544,11 +544,14 @@ function MainApp() {
   useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-      // Escape closes modals first before navigating
-      if (e.key === "Escape" && dashboardBucket) {
-        e.preventDefault();
-        setDashboardBucket(null);
-        return;
+      // Escape closes the topmost open modal first — and must NOT also navigate the folder
+      // underneath it (that competition is what made Esc feel like it needed several presses).
+      if (e.key === "Escape") {
+        if (dashboardBucket) { e.preventDefault(); setDashboardBucket(null); return; }
+        if (previewFile)     { e.preventDefault(); setPreviewFile(null); return; }
+        if (infoKey)         { e.preventDefault(); setInfoKey(null); return; }
+        if (showHelp)        { e.preventDefault(); setShowHelp(false); return; }
+        if (showSearch)      { e.preventDefault(); setShowSearch(false); return; }
       }
       if ((e.key === "Backspace" || e.key === "Escape") && bucket) {
         e.preventDefault();
