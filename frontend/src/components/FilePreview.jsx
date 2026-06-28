@@ -140,6 +140,13 @@ export default function FilePreview({ bucket, fileKey, size, onClose }) {
   const ext = getExt(fileKey);
   const filename = fileKey.split("/").pop();
 
+  // Esc closes the preview
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   useEffect(() => {
     setLoading(true);
     setError(null);

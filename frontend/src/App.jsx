@@ -111,6 +111,10 @@ function MainApp() {
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [indexed, setIndexed] = useState(false);
+  const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling")
+  const [indexCount, setIndexCount] = useState(0);  // objects indexed so far (drives the search-hint bar)
+  const [hideSearchHint, setHideSearchHint] = useState(() => !!localStorage.getItem("sairo-search-hint-dismissed"));
+  const [highlightKey, setHighlightKey] = useState(null); // file to scroll-to + highlight after "reveal in folder"
   const [selected, setSelected] = useState(new Set());
   const [selectedFolders, setSelectedFolders] = useState(new Set());
   const [showUpload, setShowUpload] = useState(false);
@@ -212,7 +216,8 @@ function MainApp() {
     setCurrentEndpoint("default");
   }, []);
 
-  const navigatePrefix = useCallback((pfx) => {
+  const navigatePrefix = useCallback((pfx, hl) => {
+    setHighlightKey(hl || null);  // optional: highlight this file once the folder loads
     setHash(bucket, pfx, endpointId);
     const current = parseHash();
     if (current.prefix === pfx && prefix === pfx) load(bucket, pfx);
@@ -247,6 +252,7 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
+    getCrawlStatus(b).then((s) => { setIndexing(s?.status === "crawling"); setIndexCount(s?.total_objects || 0); }).catch(() => {});
     crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
     let firstPage = true;
@@ -288,6 +294,8 @@ function MainApp() {
     // actually changed since the last load. Avoids re-downloading an unchanged folder
     // every 30s — the previous behavior re-streamed the whole listing each tick.
     getCrawlStatus(b).then((status) => {
+      setIndexing(status?.status === "crawling");
+      setIndexCount(status?.total_objects || 0);
       const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
       if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
       crawlFpRef.current = fp;
@@ -536,11 +544,14 @@ function MainApp() {
   useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-      // Escape closes modals first before navigating
-      if (e.key === "Escape" && dashboardBucket) {
-        e.preventDefault();
-        setDashboardBucket(null);
-        return;
+      // Escape closes the topmost open modal first — and must NOT also navigate the folder
+      // underneath it (that competition is what made Esc feel like it needed several presses).
+      if (e.key === "Escape") {
+        if (dashboardBucket) { e.preventDefault(); setDashboardBucket(null); return; }
+        if (previewFile)     { e.preventDefault(); setPreviewFile(null); return; }
+        if (infoKey)         { e.preventDefault(); setInfoKey(null); return; }
+        if (showHelp)        { e.preventDefault(); setShowHelp(false); return; }
+        if (showSearch)      { e.preventDefault(); setShowSearch(false); return; }
       }
       if ((e.key === "Backspace" || e.key === "Escape") && bucket) {
         e.preventDefault();
@@ -567,7 +578,7 @@ function MainApp() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [bucket, prefix, navigatePrefix, goHome, dashboardBucket]);
+  }, [bucket, prefix, navigatePrefix, goHome, dashboardBucket, previewFile, infoKey, showHelp, showSearch]);
 
   // Loading auth state
   if (user === undefined) {
@@ -735,6 +746,25 @@ function MainApp() {
         <div className="progress-bar-inner" />
       </div>
 
+      {!showDeleted && (indexing || (indexed && !hideSearchHint)) && (
+        <div className={`search-hint-bar ${indexing ? "shb-indexing" : ""}`}>
+          {indexing ? (
+            <span className="shb-text">
+              <span className="spinner shb-spinner" />
+              Indexing your bucket{indexCount > 0 ? ` — ${indexCount.toLocaleString()} objects so far` : "…"} — search will be ready in a moment.
+            </span>
+          ) : (
+            <>
+              <span className="shb-text">&#128269;&nbsp; Press <kbd>/</kbd> to instantly search{indexCount > 0 ? ` across ${indexCount.toLocaleString()} objects` : " this bucket"}.</span>
+              <div className="shb-actions">
+                <button className="shb-search" onClick={() => setShowSearch(true)}>Search now</button>
+                <button className="shb-dismiss" aria-label="Dismiss search tip" onClick={() => { setHideSearchHint(true); localStorage.setItem("sairo-search-hint-dismissed", "1"); }}>&times;</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <ObjectTable
         bucket={bucket}
         folders={folders}
@@ -754,6 +784,9 @@ function MainApp() {
         sortAsc={sortAsc}
         onSort={handleSort}
         indexed={indexed}
+        indexing={indexing}
+        onSearch={() => setShowSearch(true)}
+        highlightKey={highlightKey}
         prefix={prefix}
         isAdmin={canWrite}
         showDeleted={showDeleted}
@@ -801,7 +834,7 @@ function MainApp() {
         <BucketSettings bucket={bucket} onClose={() => setShowSettings(false)} role={user.role} />
       )}
       {showSearch && (
-        <SearchBar bucket={bucket} prefix={prefix} onClose={() => setShowSearch(false)} onNavigate={navigatePrefix} onFileInfo={setInfoKey} />
+        <SearchBar bucket={bucket} prefix={prefix} onClose={() => setShowSearch(false)} onNavigate={navigatePrefix} onFileInfo={setInfoKey} onFilePreview={setPreviewFile} />
       )}
       {showAuditLog && <AuditLog onClose={() => setShowAuditLog(false)} />}
       {dashboardBucket && <StorageDashboard bucket={dashboardBucket} onClose={() => setDashboardBucket(null)} onNavigate={(pfx) => { setDashboardBucket(null); navigatePrefix(pfx); }} />}

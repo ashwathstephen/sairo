@@ -4,6 +4,7 @@ import { getCrawlStatus, triggerCrawl, formatSize } from "../api";
 export default function CrawlStatus({ bucket }) {
   const [status, setStatus] = useState(null);
   const [expanded, setExpanded] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   const fetchStatus = async () => {
     try {
@@ -25,8 +26,21 @@ export default function CrawlStatus({ bucket }) {
   const isError = status.status?.startsWith("error");
 
   const handleRecrawl = async () => {
-    await triggerCrawl(bucket);
-    fetchStatus();
+    if (starting || isCrawling) return;       // guard against the double-click
+    setStarting(true);
+    try {
+      await triggerCrawl(bucket);
+      // Optimistically reflect "crawling" right away — the crawl_status table lags a beat
+      // behind the trigger, which is what made the first click look like a no-op.
+      setStatus((s) => ({ ...(s || {}), status: "crawling" }));
+      // Poll quickly for a few seconds to sync the real status, then the 5s interval takes over.
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        await fetchStatus();
+      }
+    } finally {
+      setStarting(false);
+    }
   };
 
   return (
@@ -64,8 +78,8 @@ export default function CrawlStatus({ bucket }) {
               <span>{new Date(status.last_crawl_end).toLocaleString()}</span>
             </div>
           )}
-          <button onClick={handleRecrawl} disabled={isCrawling} className="btn-primary" style={{ marginTop: 8, width: "100%" }}>
-            {isCrawling ? "Crawling..." : "Re-index Now"}
+          <button onClick={handleRecrawl} disabled={isCrawling || starting} className="btn-primary" style={{ marginTop: 8, width: "100%" }}>
+            {starting ? "Starting…" : isCrawling ? "Indexing…" : "Re-index Now"}
           </button>
         </div>
       )}

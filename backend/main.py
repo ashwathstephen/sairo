@@ -814,7 +814,7 @@ def _init_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.execute("PRAGMA page_size = 8192")          # larger pages → shallower B-trees (new DBs only)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
+    conn.execute("PRAGMA busy_timeout = 30000")      # wait up to 30s for locks (heavy parallel crawl contends)
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
@@ -966,7 +966,7 @@ def _init_db(bucket, endpoint_id=None):
 def _get_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
+    conn.execute("PRAGMA busy_timeout = 30000")      # wait up to 30s for locks (heavy parallel crawl contends)
     conn.execute("PRAGMA synchronous = NORMAL")      # safe under WAL; fewer fsyncs on the crawl write path
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
@@ -1523,13 +1523,41 @@ def _run_crawl(bucket, endpoint_id=None):
                     db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                     db.commit()
 
-        # Remove stale keys: anything with crawl_gen > 0 but older than current gen
-        with _get_db(bucket, eid) as db:
-            stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
-            if stale_count > 0:
-                db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
+        # Retry any prefixes that failed — typically transient SQLite write contention under heavy
+        # parallelism ("database is locked"). Re-crawl them sequentially (no contention) so a transient
+        # failure never silently drops data. Only runs when something failed, so the normal path is unchanged.
+        if failed_prefixes:
+            retry = list(failed_prefixes)
+            failed_prefixes = []
+            log.info("[%s:%s] Retrying %d failed prefix(es) sequentially", eid, bucket, len(retry))
+            for p in retry:
+                try:
+                    count = _crawl_prefix(bucket, p, endpoint_id=eid,
+                                          batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen))
+                    total_new += count
+                    log.info("[%s:%s] Prefix '%s' (retry): %s objects", eid, bucket, p[:40], f"{count:,}")
+                except Exception as e:
+                    failed_prefixes.append(p)
+                    log.warning("[%s:%s] Prefix '%s' failed on retry: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
+            with _get_db(bucket, eid) as db:
+                row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                 db.commit()
-                log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
+
+        # Remove stale keys (crawl_gen older than this gen) — but ONLY if every prefix crawled
+        # successfully. A still-failed prefix's keys carry the old gen; pruning them would turn a
+        # transient list failure into real data loss. Skip the prune this cycle to keep the index intact.
+        stale_count = 0
+        if not failed_prefixes:
+            with _get_db(bucket, eid) as db:
+                stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
+                if stale_count > 0:
+                    db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
+                    db.commit()
+                    log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
+        else:
+            log.warning("[%s:%s] Skipping stale-key prune — %d prefix(es) still failed after retry; index kept intact",
+                        eid, bucket, len(failed_prefixes))
 
         # Final counts
         with _get_db(bucket, eid) as db:
@@ -2394,6 +2422,41 @@ def _epoch_to_iso(e: float) -> str:
     return datetime.fromtimestamp(e, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── Activation milestones — recorded at request time, idempotent, fail-safe ──
+# Anonymous, aggregate-only (a timestamp / boolean per instance), routed through the
+# existing instance_meta + telemetry path. Used to measure time-to-first-search and
+# whether the activation funnel (search / dashboard) is reached. Never raises into a request.
+_recorded_milestones: set = set()
+
+
+def _record_milestone_once(key: str):
+    """Stamp `key` with the current time the first time it occurs. The in-memory guard keeps
+    it to one DB hit per process; the _meta_get check keeps it idempotent across restarts."""
+    if key in _recorded_milestones:
+        return
+    try:
+        if not _meta_get(key):
+            _meta_set(key, _iso_now())
+        _recorded_milestones.add(key)
+    except Exception:
+        pass
+
+
+def _record_first_search(returned_results: bool):
+    """Activation event: first search *served* (regardless of hit count). Also records whether
+    that first search returned any results — a free diagnostic for the index-not-ready race
+    (searched-but-zero-results before the crawl finished)."""
+    if "first_search_at" in _recorded_milestones:
+        return
+    try:
+        if not _meta_get("first_search_at"):
+            _meta_set("first_search_at", _iso_now())
+            _meta_set("first_search_returned_results", "1" if returned_results else "0")
+        _recorded_milestones.add("first_search_at")
+    except Exception:
+        pass
+
+
 def _sqlts_to_iso(s):
     """SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', UTC) -> ISO-8601 Z. None-safe."""
     if not s:
@@ -2582,6 +2645,11 @@ def _collect_telemetry() -> dict:
         _meta_set("first_object_at", _iso_now())
     first_bucket_at = _meta_get("first_bucket_at")
     first_object_at = _meta_get("first_object_at")
+    # Activation funnel (recorded at request time by _record_first_search / _record_milestone_once)
+    first_search_at = _meta_get("first_search_at")
+    first_dashboard_open_at = _meta_get("first_dashboard_open_at")
+    _fsr = _meta_get("first_search_returned_results")
+    first_search_returned_results = None if _fsr is None else (_fsr == "1")
 
     # last_write_at: max(in-memory since boot, persisted) so it survives restarts
     last_write_at = _meta_get("last_write_at")
@@ -2664,6 +2732,10 @@ def _collect_telemetry() -> dict:
         "first_object_at": first_object_at,
         "first_api_token_at": first_token_at,
         "first_mcp_connect_at": first_mcp_at,
+        # ── v2: activation funnel (time-to-first-search + dashboard reach) ──
+        "first_search_at": first_search_at,
+        "first_dashboard_open_at": first_dashboard_open_at,
+        "first_search_returned_results": first_search_returned_results,
         # ── v2: Tier 3 engagement + adoption ──
         "active_buckets_24h": min(_ci(active_buckets_24h, 10000), bucket_count),
         "last_write_at": last_write_at,
@@ -4320,6 +4392,7 @@ def search_objects(bucket: str, request: Request, q: str = Query(..., min_length
         raise HTTPException(503, "Index not ready — crawl in progress")
     with _get_db(bucket) as db:
         rows = _search_fts(db, q, prefix, limit)
+    _record_first_search(len(rows) > 0)  # activation milestone (fail-safe, idempotent)
     return {"results": [dict(r) for r in rows], "count": len(rows), "query": q}
 
 
@@ -4330,19 +4403,25 @@ def _search_fts(db, q, prefix, limit):
         try:
             fts_query = '"' + q.replace('"', '""') + '"'
             if prefix:
-                return db.execute("""
+                rows = db.execute("""
                     SELECT o.key, o.size, o.last_modified FROM objects o
                     JOIN objects_fts f ON o.rowid = f.rowid
                     WHERE objects_fts MATCH ? AND o.key LIKE ?
                     ORDER BY o.key LIMIT ?
                 """, (fts_query, prefix + "%", limit)).fetchall()
             else:
-                return db.execute("""
+                rows = db.execute("""
                     SELECT o.key, o.size, o.last_modified FROM objects o
                     JOIN objects_fts f ON o.rowid = f.rowid
                     WHERE objects_fts MATCH ?
                     ORDER BY o.key LIMIT ?
                 """, (fts_query, limit)).fetchall()
+            if rows:
+                return rows
+            # FTS returned nothing: either a genuine no-match, or — critically — the FTS index is
+            # still rebuilding right after a crawl (the crawl reports "complete" before the async
+            # rebuild finishes). Fall through to LIKE so the user's first search after indexing
+            # returns real results instead of a dead-end "no objects found".
         except Exception:
             pass  # FTS table missing or query error — fall back to LIKE
     # Fallback: LIKE pattern matching (works for all query lengths and old DBs)
@@ -4380,6 +4459,7 @@ def folder_size(bucket: str, prefix: str = "", user: dict = Depends(get_current_
 
 @app.get("/api/buckets/{bucket}/storage-breakdown")
 def storage_breakdown(bucket: str, prefix: str = "", user: dict = Depends(get_current_user)):
+    _record_milestone_once("first_dashboard_open_at")  # activation milestone (fail-safe, idempotent)
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready")
 

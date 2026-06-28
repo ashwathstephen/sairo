@@ -9,7 +9,7 @@ import {
 
 const PREVIEW_EXTS = new Set(["jpg","jpeg","png","gif","svg","webp","ico","bmp","txt","log","out","err","md","json","csv","xml","yaml","yml","js","jsx","ts","tsx","py","sql","sh","bash","conf","cfg","ini","html","css","toml","pdf","parquet","orc","avro"]);
 
-function canPreview(name) {
+export function canPreview(name) {
   const dot = name.lastIndexOf(".");
   return dot >= 0 && PREVIEW_EXTS.has(name.substring(dot + 1).toLowerCase());
 }
@@ -65,6 +65,9 @@ export default function ObjectTable({
   sortAsc,
   onSort,
   indexed,
+  indexing,
+  onSearch,
+  highlightKey,
   prefix,
   isAdmin,
   showDeleted,
@@ -158,6 +161,22 @@ export default function ObjectTable({
     overscan: 20,
   });
 
+  // "Reveal in folder" from search: scroll to + briefly highlight the target file.
+  // Consume each highlightKey once so a background refresh doesn't re-scroll the user.
+  const [highlightedKey, setHighlightedKey] = useState(null);
+  const consumedHlRef = useRef(null);
+  useEffect(() => {
+    if (!highlightKey) { consumedHlRef.current = null; return; }
+    if (highlightKey === consumedHlRef.current) return;
+    const idx = rows.findIndex((row) => row.type === "file" && row.data.key === highlightKey);
+    if (idx < 0) return; // target not in this folder's rows yet — wait for them to load
+    consumedHlRef.current = highlightKey;
+    rowVirtualizer.scrollToIndex(idx, { align: "center" });
+    setHighlightedKey(highlightKey);
+    const t = setTimeout(() => setHighlightedKey(null), 3000);
+    return () => clearTimeout(t);
+  }, [highlightKey, rows]);
+
   const allFileKeys = sortedFiles.map((f) => f.key);
   const allFolderPrefixes = filteredFolders.map((f) => f.prefix);
   const allSelected =
@@ -216,7 +235,19 @@ export default function ObjectTable({
       </div>
 
       <div ref={parentRef} className="table-scroll-area">
-        {isEmpty && (
+        {isEmpty && indexing && !filter && (
+          <div className="empty-state">
+            <div className="empty-state-icon"><div className="spinner" /></div>
+            <h3 className="empty-state-title">Indexing your bucket\u2026</h3>
+            <p className="empty-state-text">
+              Building a fast index of your objects \u2014 browsing and instant search will be ready in a moment.
+            </p>
+            {onSearch && (
+              <button className="btn-primary" style={{ marginTop: 12 }} onClick={onSearch}>&#128269; Try a search</button>
+            )}
+          </div>
+        )}
+        {isEmpty && !(indexing && !filter) && (
           <div className="empty-state">
             <div className="empty-state-icon">{filter ? "\uD83D\uDD0D" : "\uD83D\uDCC2"}</div>
             <h3 className="empty-state-title">{filter ? "No matching items" : "This folder is empty"}</h3>
@@ -278,7 +309,7 @@ export default function ObjectTable({
                 return (
                   <div
                     key={file.key}
-                    className={`table-row ${selected.has(file.key) ? "row-selected" : ""}`}
+                    className={`table-row ${selected.has(file.key) ? "row-selected" : ""} ${file.key === highlightedKey ? "row-highlight" : ""}`}
                     style={{
                       position: "absolute",
                       top: 0,
@@ -295,7 +326,8 @@ export default function ObjectTable({
                         onChange={() => toggleOne(file.key)}
                       />
                     </div>
-                    <div className="td col-name" title={file.key}>
+                    <div className="td col-name col-name-clickable" title={file.key}
+                      onClick={() => { if (canPreview(file.name) && onFilePreview) onFilePreview({ key: file.key, size: file.size }); else onFileInfo(file.key); }}>
                       {React.createElement(getFileIcon(file.name), { size: 16, className: "file-icon" })}
                       {file.name}
                     </div>
