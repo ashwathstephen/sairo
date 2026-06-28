@@ -23,7 +23,7 @@ const bentoFeatures = [
   },
   {
     title: 'High-Throughput I/O',
-    desc: 'Handle massive assets without the browser freezing. Sairo sustains 114 MB/s upload throughput and handles 500+ concurrent requests per second.',
+    desc: 'Uploads go straight from your browser to S3 — any file size, up to 5 TB per object, with zero server memory — while the API handles 500+ concurrent requests per second.',
     span: 'wide',
     visual: 'keyboard',
   },
@@ -111,11 +111,11 @@ const features = [
   <section class="landing-hero">
     <a href="https://github.com/AshwathStephen/sairo" class="hero-badge" target="_blank" rel="noopener">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-      Sairo v3.2 &middot; Cost Intelligence &middot; Petabyte Scale
+      Sairo v3.5 &middot; Cost Intelligence &middot; Petabyte Scale
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
     </a>
     <h1>Object storage,<br/><span class="hero-fade">beautifully engineered.</span></h1>
-    <p class="hero-desc">A lightning-fast, self-hosted web client for your S3-compatible endpoints. Stop wrestling with clunky cloud consoles and execute single-digit millisecond searches across hundreds of thousands of objects, right from your browser.</p>
+    <p class="hero-desc">A lightning-fast, self-hosted web client for your S3-compatible endpoints. Stop wrestling with clunky cloud consoles and execute millisecond-fast searches across millions of objects, right from your browser.</p>
     <div class="hero-actions">
       <a href="/getting-started/quickstart/" class="landing-btn landing-btn-titanium">
         Deploy via Docker
@@ -250,7 +250,7 @@ const features = [
         <div class="bento-visual bento-visual-streaming">
           <div class="stream-metrics">
             <div class="stream-metric">
-              <span class="stream-metric-value">134,707</span>
+              <span class="stream-metric-value">15.5M</span>
               <span class="stream-metric-label">Objects Indexed</span>
             </div>
             <div class="stream-metric">
@@ -299,7 +299,7 @@ const features = [
       <div class="bento-card bento-wide">
         <div class="bento-text">
           <h3>High-Throughput I/O</h3>
-          <p>Handle massive assets without the browser freezing. Sairo sustains <strong>114 MB/s</strong> upload throughput and handles <strong>528 requests/second</strong> under concurrent load.</p>
+          <p>Uploads stream straight from your browser to S3 — <strong>any size, up to 5 TB</strong> per object, with zero server memory — while the API handles <strong>528 requests/second</strong> under concurrent load.</p>
           <a href="/features/upload-download/" class="bento-link">Upload docs &rarr;</a>
         </div>
         <div class="bento-visual bento-visual-keyboard">
@@ -371,7 +371,7 @@ const features = [
     <p class="section-desc">Sairo indexes every object key with SQLite FTS5. No pagination. No loading spinners. Results in milliseconds.</p>
     <div class="benchmark">
       <div class="benchmark-header">
-        <span class="benchmark-label">Search across 134,707 objects (38 TB production bucket)</span>
+        <span class="benchmark-label">Search across a 134K-object bucket (of a ~269 TB production deployment)</span>
       </div>
       <div class="benchmark-bars">
         <div class="benchmark-row">
@@ -424,8 +424,8 @@ const features = [
         <span class="perf-stat-label">Req/s</span>
       </div>
       <div class="perf-stat">
-        <span class="perf-stat-value">114 MB/s</span>
-        <span class="perf-stat-label">Upload</span>
+        <span class="perf-stat-value">5 TB</span>
+        <span class="perf-stat-label">Max upload</span>
       </div>
       <div class="perf-stat">
         <span class="perf-stat-value">sub-5ms</span>
@@ -437,11 +437,11 @@ const features = [
   <!-- Telemetry Dashboard -->
   <section class="landing-section" id="telemetry">
     <h2>Validated performance.</h2>
-    <p class="section-desc">Benchmarked via Docker on Apple Silicon. Production deployments on NVMe Linux hardware yield even higher throughput.</p>
+    <p class="section-desc">Server-side latency benchmarked via Docker on Apple Silicon, and validated in production at 15.5M objects across ~269 TB. Deployments on NVMe Linux hardware yield even higher throughput.</p>
     <div class="telemetry-grid">
       <div class="telemetry-card">
         <h4>Search Latency</h4>
-        <p class="telemetry-subtitle">FTS5 Trigram &middot; 134,707 objects &middot; 38 TB</p>
+        <p class="telemetry-subtitle">FTS5 Trigram &middot; 134K-object bucket (of a ~269 TB deployment)</p>
         <table class="telemetry-table">
           <thead>
             <tr><th>Query</th><th>p50</th><th>p95</th></tr>
@@ -473,16 +473,16 @@ const features = [
         </table>
       </div>
       <div class="telemetry-card">
-        <h4>Throughput</h4>
-        <p class="telemetry-subtitle">Upload + concurrent load benchmarks</p>
+        <h4>Uploads &amp; Throughput</h4>
+        <p class="telemetry-subtitle">Direct browser&rarr;S3 + concurrent load</p>
         <table class="telemetry-table">
           <thead>
             <tr><th>Metric</th><th>Result</th><th></th></tr>
           </thead>
           <tbody>
-            <tr><td>50 MB upload</td><td class="telemetry-accent">436ms</td><td>114 MB/s</td></tr>
-            <tr><td>10 MB upload</td><td class="telemetry-accent">131ms</td><td>76 MB/s</td></tr>
-            <tr><td>5 concurrent</td><td class="telemetry-accent">236</td><td>req/s</td></tr>
+            <tr><td>Upload path</td><td class="telemetry-accent">Browser&rarr;S3</td><td>direct</td></tr>
+            <tr><td>Max object</td><td class="telemetry-accent">5 TB</td><td>no ceiling</td></tr>
+            <tr><td>Server memory</td><td class="telemetry-accent">flat</td><td>any size</td></tr>
             <tr><td>10 concurrent</td><td class="telemetry-accent">333</td><td>req/s</td></tr>
             <tr><td>25 concurrent</td><td class="telemetry-accent">528</td><td>req/s</td></tr>
           </tbody>
