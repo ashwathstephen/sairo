@@ -79,12 +79,12 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
     if (el) el.scrollIntoView({ block: "nearest" });
   };
 
-  // Click a result → open it directly (preview if previewable, else its info panel).
+  // Click a result → previewable files open the preview; non-previewable files reveal-in-folder
+  // (scroll to + highlight the file), which is more useful than dumping the user into raw metadata.
   const openResult = (r) => {
     const name = r.key.split("/").pop();
-    onClose();
-    if (onFilePreview && canPreview(name)) onFilePreview({ key: r.key, size: r.size });
-    else onFileInfo(r.key);
+    if (onFilePreview && canPreview(name)) { onClose(); onFilePreview({ key: r.key, size: r.size }); }
+    else revealInFolder(r.key);
   };
 
   // Click the path → jump to the containing folder AND highlight the file there.

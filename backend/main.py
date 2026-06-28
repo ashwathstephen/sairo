@@ -4403,19 +4403,25 @@ def _search_fts(db, q, prefix, limit):
         try:
             fts_query = '"' + q.replace('"', '""') + '"'
             if prefix:
-                return db.execute("""
+                rows = db.execute("""
                     SELECT o.key, o.size, o.last_modified FROM objects o
                     JOIN objects_fts f ON o.rowid = f.rowid
                     WHERE objects_fts MATCH ? AND o.key LIKE ?
                     ORDER BY o.key LIMIT ?
                 """, (fts_query, prefix + "%", limit)).fetchall()
             else:
-                return db.execute("""
+                rows = db.execute("""
                     SELECT o.key, o.size, o.last_modified FROM objects o
                     JOIN objects_fts f ON o.rowid = f.rowid
                     WHERE objects_fts MATCH ?
                     ORDER BY o.key LIMIT ?
                 """, (fts_query, limit)).fetchall()
+            if rows:
+                return rows
+            # FTS returned nothing: either a genuine no-match, or — critically — the FTS index is
+            # still rebuilding right after a crawl (the crawl reports "complete" before the async
+            # rebuild finishes). Fall through to LIKE so the user's first search after indexing
+            # returns real results instead of a dead-end "no objects found".
         except Exception:
             pass  # FTS table missing or query error — fall back to LIKE
     # Fallback: LIKE pattern matching (works for all query lengths and old DBs)
