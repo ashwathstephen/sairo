@@ -814,7 +814,7 @@ def _init_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.execute("PRAGMA page_size = 8192")          # larger pages → shallower B-trees (new DBs only)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
+    conn.execute("PRAGMA busy_timeout = 30000")      # wait up to 30s for locks (heavy parallel crawl contends)
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
@@ -966,7 +966,7 @@ def _init_db(bucket, endpoint_id=None):
 def _get_db(bucket, endpoint_id=None):
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")       # wait up to 5s for locks
+    conn.execute("PRAGMA busy_timeout = 30000")      # wait up to 30s for locks (heavy parallel crawl contends)
     conn.execute("PRAGMA synchronous = NORMAL")      # safe under WAL; fewer fsyncs on the crawl write path
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
@@ -1523,13 +1523,41 @@ def _run_crawl(bucket, endpoint_id=None):
                     db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                     db.commit()
 
-        # Remove stale keys: anything with crawl_gen > 0 but older than current gen
-        with _get_db(bucket, eid) as db:
-            stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
-            if stale_count > 0:
-                db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
+        # Retry any prefixes that failed — typically transient SQLite write contention under heavy
+        # parallelism ("database is locked"). Re-crawl them sequentially (no contention) so a transient
+        # failure never silently drops data. Only runs when something failed, so the normal path is unchanged.
+        if failed_prefixes:
+            retry = list(failed_prefixes)
+            failed_prefixes = []
+            log.info("[%s:%s] Retrying %d failed prefix(es) sequentially", eid, bucket, len(retry))
+            for p in retry:
+                try:
+                    count = _crawl_prefix(bucket, p, endpoint_id=eid,
+                                          batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen))
+                    total_new += count
+                    log.info("[%s:%s] Prefix '%s' (retry): %s objects", eid, bucket, p[:40], f"{count:,}")
+                except Exception as e:
+                    failed_prefixes.append(p)
+                    log.warning("[%s:%s] Prefix '%s' failed on retry: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
+            with _get_db(bucket, eid) as db:
+                row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                 db.commit()
-                log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
+
+        # Remove stale keys (crawl_gen older than this gen) — but ONLY if every prefix crawled
+        # successfully. A still-failed prefix's keys carry the old gen; pruning them would turn a
+        # transient list failure into real data loss. Skip the prune this cycle to keep the index intact.
+        stale_count = 0
+        if not failed_prefixes:
+            with _get_db(bucket, eid) as db:
+                stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
+                if stale_count > 0:
+                    db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
+                    db.commit()
+                    log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
+        else:
+            log.warning("[%s:%s] Skipping stale-key prune — %d prefix(es) still failed after retry; index kept intact",
+                        eid, bucket, len(failed_prefixes))
 
         # Final counts
         with _get_db(bucket, eid) as db:
