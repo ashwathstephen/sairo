@@ -112,6 +112,8 @@ function MainApp() {
   const [done, setDone] = useState(false);
   const [indexed, setIndexed] = useState(false);
   const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling")
+  const [indexCount, setIndexCount] = useState(0);  // objects indexed so far (drives the search-hint bar)
+  const [hideSearchHint, setHideSearchHint] = useState(() => !!localStorage.getItem("sairo-search-hint-dismissed"));
   const [selected, setSelected] = useState(new Set());
   const [selectedFolders, setSelectedFolders] = useState(new Set());
   const [showUpload, setShowUpload] = useState(false);
@@ -248,7 +250,7 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
-    getCrawlStatus(b).then((s) => setIndexing(s?.status === "crawling")).catch(() => {});
+    getCrawlStatus(b).then((s) => { setIndexing(s?.status === "crawling"); setIndexCount(s?.total_objects || 0); }).catch(() => {});
     crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
     let firstPage = true;
@@ -291,6 +293,7 @@ function MainApp() {
     // every 30s — the previous behavior re-streamed the whole listing each tick.
     getCrawlStatus(b).then((status) => {
       setIndexing(status?.status === "crawling");
+      setIndexCount(status?.total_objects || 0);
       const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
       if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
       crawlFpRef.current = fp;
@@ -737,6 +740,25 @@ function MainApp() {
       <div className={`progress-bar ${loading ? "progress-active" : ""} ${!loading && done ? "progress-done" : ""}`}>
         <div className="progress-bar-inner" />
       </div>
+
+      {!showDeleted && (indexing || (indexed && !hideSearchHint)) && (
+        <div className={`search-hint-bar ${indexing ? "shb-indexing" : ""}`}>
+          {indexing ? (
+            <span className="shb-text">
+              <span className="spinner shb-spinner" />
+              Indexing your bucket{indexCount > 0 ? ` — ${indexCount.toLocaleString()} objects so far` : "…"} — search will be ready in a moment.
+            </span>
+          ) : (
+            <>
+              <span className="shb-text">&#128269;&nbsp; Press <kbd>/</kbd> to instantly search{indexCount > 0 ? ` across ${indexCount.toLocaleString()} objects` : " this bucket"}.</span>
+              <div className="shb-actions">
+                <button className="shb-search" onClick={() => setShowSearch(true)}>Search now</button>
+                <button className="shb-dismiss" aria-label="Dismiss search tip" onClick={() => { setHideSearchHint(true); localStorage.setItem("sairo-search-hint-dismissed", "1"); }}>&times;</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <ObjectTable
         bucket={bucket}

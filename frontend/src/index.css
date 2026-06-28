@@ -1160,6 +1160,33 @@ button.btn-danger:disabled { background: var(--bg-surface); }
   font-size: 13px;
 }
 
+/* First-run discoverability: ties index status + "press / to search" into one in-context bar */
+.search-hint-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 0 16px 10px; padding: 9px 14px;
+  border: 1px solid var(--primary-ring); border-radius: 8px;
+  background: var(--primary-light); font-size: 13px; color: var(--text);
+}
+.search-hint-bar.shb-indexing { color: var(--text-secondary); }
+.search-hint-bar .shb-text { display: inline-flex; align-items: center; gap: 8px; }
+.search-hint-bar kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 6px; color: var(--text);
+}
+.search-hint-bar .shb-spinner { width: 14px; height: 14px; flex-shrink: 0; }
+.search-hint-bar .shb-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.search-hint-bar .shb-search {
+  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+  background: var(--primary); color: #fff; border: 0; border-radius: 6px; padding: 5px 12px;
+}
+.search-hint-bar .shb-search:hover { background: var(--primary-hover); }
+.search-hint-bar .shb-dismiss {
+  background: none; border: 0; color: var(--text-muted); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 0 4px;
+}
+.search-hint-bar .shb-dismiss:hover { color: var(--text); }
+
 .search-indexing {
   display: flex;
   align-items: center;
