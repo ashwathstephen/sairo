@@ -2278,7 +2278,7 @@ def startup():
 
 # ── Telemetry ─────────────────────────────────────────────────────────────
 
-TELEMETRY_URL = "https://dashboard.sairo.dev/api/v1/ping"
+TELEMETRY_URL = os.environ.get("TELEMETRY_URL", "https://dashboard.sairo.dev/api/v1/ping")
 TELEMETRY_INTERVAL = int(os.environ.get("TELEMETRY_INTERVAL", "3600"))  # hourly (trailing-24h metrics assume regular pings)
 TELEMETRY_SCHEMA_VERSION = "2"
 

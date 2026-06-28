@@ -103,6 +103,7 @@ Login attempts are rate-limited with two layers: **10 per minute** via slowapi a
 |---|---|---|
 | `TELEMETRY` | `true` | Send an anonymous usage heartbeat (aggregate counts + timestamps only — never names, keys, paths, or content). Set to `false` to disable entirely. See [Telemetry](/security/telemetry). |
 | `TELEMETRY_INTERVAL` | `3600` | Seconds between heartbeats. |
+| `TELEMETRY_URL` | `https://dashboard.sairo.dev/api/v1/ping` | Endpoint the heartbeat is POSTed to. Override to point at your own collector (or leave unset to disable by setting `TELEMETRY=false`). |
 | `SAIRO_STORAGE_EPHEMERAL` | _(auto)_ | Optional hint for the telemetry `id_persistence` field: `true` if `DB_DIR` is ephemeral (e.g. `emptyDir`), `false` if durable. The Helm chart sets it from `persistence.enabled`; otherwise Sairo infers it from the mount table. |
 
 ## Example: Full Configuration
