@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { searchObjects, getCrawlStatus, formatSize, formatDate, downloadUrl } from "../api";
+import { canPreview } from "./ObjectTable";
 
 function highlightMatch(text, query) {
   if (!query || query.length < 2) return text;
@@ -15,7 +16,7 @@ function highlightMatch(text, query) {
   );
 }
 
-export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileInfo }) {
+export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileInfo, onFilePreview }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -78,11 +79,20 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
     if (el) el.scrollIntoView({ block: "nearest" });
   };
 
-  const navigateToFolder = (key) => {
+  // Click a result → open it directly (preview if previewable, else its info panel).
+  const openResult = (r) => {
+    const name = r.key.split("/").pop();
+    onClose();
+    if (onFilePreview && canPreview(name)) onFilePreview({ key: r.key, size: r.size });
+    else onFileInfo(r.key);
+  };
+
+  // Click the path → jump to the containing folder AND highlight the file there.
+  const revealInFolder = (key) => {
     const idx = key.lastIndexOf("/");
     const folder = idx >= 0 ? key.substring(0, idx + 1) : "";
     onClose();
-    onNavigate(folder);
+    onNavigate(folder, key);
   };
 
   const handleKeyDown = (e) => {
@@ -111,9 +121,12 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
       if (e.metaKey || e.ctrlKey) {
         // Cmd/Ctrl+Enter: download
         window.location.href = downloadUrl(bucket, r.key);
+      } else if (e.shiftKey) {
+        // Shift+Enter: reveal in its folder
+        revealInFolder(r.key);
       } else {
-        // Enter: navigate to containing folder
-        navigateToFolder(r.key);
+        // Enter: open (preview / info)
+        openResult(r);
       }
     }
   };
@@ -166,18 +179,21 @@ export default function SearchBar({ bucket, prefix, onClose, onNavigate, onFileI
                         key={r.key}
                         className={`search-item ${i === selectedIdx ? "search-item-active" : ""}`}
                         onMouseEnter={() => setSelectedIdx(i)}
+                        onClick={() => openResult(r)}
+                        style={{ cursor: "pointer" }}
+                        title="Open (preview) · Shift+Enter to reveal in folder"
                       >
                         <div className="search-item-main">
-                          <span className="search-item-name" title={r.key}>{highlightMatch(name, query)}</span>
+                          <span className="search-item-name">{highlightMatch(name, query)}</span>
                           <span className="search-item-size">{formatSize(r.size)}</span>
                         </div>
                         <div className="search-item-path">
-                          <a href="#" onClick={(e) => { e.preventDefault(); navigateToFolder(r.key); }}>{path || "/"}</a>
+                          <a href="#" title="Reveal in folder" onClick={(e) => { e.preventDefault(); e.stopPropagation(); revealInFolder(r.key); }}>{path || "/"}</a>
                           <span className="search-item-date">{formatDate(r.last_modified)}</span>
                         </div>
                         <div className="search-item-actions">
-                          <a href={downloadUrl(bucket, r.key)} className="btn-small btn-xs">&#8595;</a>
-                          <button className="btn-small btn-xs btn-info" onClick={() => { onClose(); onFileInfo(r.key); }}>i</button>
+                          <a href={downloadUrl(bucket, r.key)} title="Download" className="btn-small btn-xs" onClick={(e) => e.stopPropagation()}>&#8595;</a>
+                          <button className="btn-small btn-xs btn-info" title="File info" onClick={(e) => { e.stopPropagation(); onClose(); onFileInfo(r.key); }}>i</button>
                         </div>
                       </li>
                     );

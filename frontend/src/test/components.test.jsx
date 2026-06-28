@@ -507,7 +507,37 @@ describe("SearchBar keyboard navigation", () => {
     expect(items[2].classList.contains("search-item-active")).toBe(true);
   });
 
-  it("Enter navigates to folder of selected result", async () => {
+  it("Enter opens (previews) the selected result instead of navigating to its folder", async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockSearchResults),
+    });
+
+    const onNavigate = vi.fn();
+    const onClose = vi.fn();
+    const onFilePreview = vi.fn();
+    const { default: SearchBar } = await import("../components/SearchBar");
+    render(
+      <SearchBar bucket="test" prefix="" onClose={onClose} onNavigate={onNavigate} onFileInfo={vi.fn()} onFilePreview={onFilePreview} />
+    );
+
+    const input = screen.getByPlaceholderText("Search test...");
+    fireEvent.change(input, { target: { value: "script" } });
+
+    await waitFor(() => {
+      expect(screen.getByText("3 results")).toBeInTheDocument();
+    });
+
+    // First result is src/script.py (previewable) — Enter opens the preview, not the folder.
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onClose).toHaveBeenCalled();
+    expect(onFilePreview).toHaveBeenCalledWith({ key: "src/script.py", size: 1024 });
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("Shift+Enter reveals the selected result in its folder (passing the file key for highlight)", async () => {
     global.fetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(mockSearchResults),
@@ -517,7 +547,7 @@ describe("SearchBar keyboard navigation", () => {
     const onClose = vi.fn();
     const { default: SearchBar } = await import("../components/SearchBar");
     render(
-      <SearchBar bucket="test" prefix="" onClose={onClose} onNavigate={onNavigate} onFileInfo={vi.fn()} />
+      <SearchBar bucket="test" prefix="" onClose={onClose} onNavigate={onNavigate} onFileInfo={vi.fn()} onFilePreview={vi.fn()} />
     );
 
     const input = screen.getByPlaceholderText("Search test...");
@@ -528,10 +558,10 @@ describe("SearchBar keyboard navigation", () => {
     });
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
 
     expect(onClose).toHaveBeenCalled();
-    expect(onNavigate).toHaveBeenCalledWith("src/");
+    expect(onNavigate).toHaveBeenCalledWith("src/", "src/script.py");
   });
 
   it("shows arrow key hint when results exist", async () => {

@@ -488,6 +488,10 @@ button.btn-danger:disabled { background: var(--bg-surface); }
 .table-row:hover { background: var(--bg-hover); }
 .table-row.row-selected { background: var(--bg-selected); }
 .table-row.row-folder { background: var(--bg-surface); }
+/* "Reveal in folder" highlight — a brief pulse + accent rail so the revealed file is obvious */
+@keyframes rowHighlightPulse { 0% { background: var(--primary-light); } 100% { background: transparent; } }
+.table-row.row-highlight { animation: rowHighlightPulse 3s ease-out; box-shadow: inset 3px 0 0 var(--primary); }
+@media (prefers-reduced-motion: reduce) { .table-row.row-highlight { animation: none; background: var(--primary-light); } }
 .table-row.row-folder:hover { background: var(--primary-light); }
 
 .table-row .td {

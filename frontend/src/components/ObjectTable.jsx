@@ -9,7 +9,7 @@ import {
 
 const PREVIEW_EXTS = new Set(["jpg","jpeg","png","gif","svg","webp","ico","bmp","txt","log","out","err","md","json","csv","xml","yaml","yml","js","jsx","ts","tsx","py","sql","sh","bash","conf","cfg","ini","html","css","toml","pdf","parquet","orc","avro"]);
 
-function canPreview(name) {
+export function canPreview(name) {
   const dot = name.lastIndexOf(".");
   return dot >= 0 && PREVIEW_EXTS.has(name.substring(dot + 1).toLowerCase());
 }
@@ -67,6 +67,7 @@ export default function ObjectTable({
   indexed,
   indexing,
   onSearch,
+  highlightKey,
   prefix,
   isAdmin,
   showDeleted,
@@ -159,6 +160,22 @@ export default function ObjectTable({
     estimateSize: () => rowHeight,
     overscan: 20,
   });
+
+  // "Reveal in folder" from search: scroll to + briefly highlight the target file.
+  // Consume each highlightKey once so a background refresh doesn't re-scroll the user.
+  const [highlightedKey, setHighlightedKey] = useState(null);
+  const consumedHlRef = useRef(null);
+  useEffect(() => {
+    if (!highlightKey) { consumedHlRef.current = null; return; }
+    if (highlightKey === consumedHlRef.current) return;
+    const idx = rows.findIndex((row) => row.type === "file" && row.data.key === highlightKey);
+    if (idx < 0) return; // target not in this folder's rows yet — wait for them to load
+    consumedHlRef.current = highlightKey;
+    rowVirtualizer.scrollToIndex(idx, { align: "center" });
+    setHighlightedKey(highlightKey);
+    const t = setTimeout(() => setHighlightedKey(null), 3000);
+    return () => clearTimeout(t);
+  }, [highlightKey, rows]);
 
   const allFileKeys = sortedFiles.map((f) => f.key);
   const allFolderPrefixes = filteredFolders.map((f) => f.prefix);
@@ -292,7 +309,7 @@ export default function ObjectTable({
                 return (
                   <div
                     key={file.key}
-                    className={`table-row ${selected.has(file.key) ? "row-selected" : ""}`}
+                    className={`table-row ${selected.has(file.key) ? "row-selected" : ""} ${file.key === highlightedKey ? "row-highlight" : ""}`}
                     style={{
                       position: "absolute",
                       top: 0,

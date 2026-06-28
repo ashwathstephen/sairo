@@ -114,6 +114,7 @@ function MainApp() {
   const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling")
   const [indexCount, setIndexCount] = useState(0);  // objects indexed so far (drives the search-hint bar)
   const [hideSearchHint, setHideSearchHint] = useState(() => !!localStorage.getItem("sairo-search-hint-dismissed"));
+  const [highlightKey, setHighlightKey] = useState(null); // file to scroll-to + highlight after "reveal in folder"
   const [selected, setSelected] = useState(new Set());
   const [selectedFolders, setSelectedFolders] = useState(new Set());
   const [showUpload, setShowUpload] = useState(false);
@@ -215,7 +216,8 @@ function MainApp() {
     setCurrentEndpoint("default");
   }, []);
 
-  const navigatePrefix = useCallback((pfx) => {
+  const navigatePrefix = useCallback((pfx, hl) => {
+    setHighlightKey(hl || null);  // optional: highlight this file once the folder loads
     setHash(bucket, pfx, endpointId);
     const current = parseHash();
     if (current.prefix === pfx && prefix === pfx) load(bucket, pfx);
@@ -781,6 +783,7 @@ function MainApp() {
         indexed={indexed}
         indexing={indexing}
         onSearch={() => setShowSearch(true)}
+        highlightKey={highlightKey}
         prefix={prefix}
         isAdmin={canWrite}
         showDeleted={showDeleted}
@@ -828,7 +831,7 @@ function MainApp() {
         <BucketSettings bucket={bucket} onClose={() => setShowSettings(false)} role={user.role} />
       )}
       {showSearch && (
-        <SearchBar bucket={bucket} prefix={prefix} onClose={() => setShowSearch(false)} onNavigate={navigatePrefix} onFileInfo={setInfoKey} />
+        <SearchBar bucket={bucket} prefix={prefix} onClose={() => setShowSearch(false)} onNavigate={navigatePrefix} onFileInfo={setInfoKey} onFilePreview={setPreviewFile} />
       )}
       {showAuditLog && <AuditLog onClose={() => setShowAuditLog(false)} />}
       {dashboardBucket && <StorageDashboard bucket={dashboardBucket} onClose={() => setDashboardBucket(null)} onNavigate={(pfx) => { setDashboardBucket(null); navigatePrefix(pfx); }} />}
