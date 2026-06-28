@@ -578,7 +578,7 @@ function MainApp() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [bucket, prefix, navigatePrefix, goHome, dashboardBucket]);
+  }, [bucket, prefix, navigatePrefix, goHome, dashboardBucket, previewFile, infoKey, showHelp, showSearch]);
 
   // Loading auth state
   if (user === undefined) {
