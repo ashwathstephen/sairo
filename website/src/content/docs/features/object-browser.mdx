@@ -54,3 +54,7 @@ A filter input above the table narrows the visible objects to those whose name m
 ## NDJSON streaming
 
 When you open a folder, Sairo's backend streams object metadata to the browser as newline-delimited JSON (NDJSON). The frontend appends rows to the table as each chunk arrives rather than waiting for the full response. This gives you progressive rendering -- you see the first results immediately, even if the folder contains millions of objects.
+
+## Keyset pagination
+
+For very large folders, the backend pages through objects using **keyset (cursor-based) pagination** rather than offset pagination. Each page is fetched by seeking to the last key seen, so page latency and payload size stay constant no matter how deep into the folder you scroll — a folder with a million objects in a single prefix opens just as quickly as the first page. This is what keeps memory and response sizes bounded on the largest buckets.

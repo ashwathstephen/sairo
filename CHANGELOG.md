@@ -2,6 +2,19 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.5.0] - 2026-06-27
+
+Anonymous telemetry schema v2 — richer, still privacy-first.
+
+### Added
+
+- **Telemetry v2** — the anonymous heartbeat now also reports instance **health** (trailing-24h request + error counts, restart count, **crash count** — unclean exits like OOM/SIGKILL, counted separately from orchestrated restarts — index-disk used/total, a derived `ok`/`degraded`/`error` status), **activation milestones** (first bucket / object / API token / MCP connection timestamps), **engagement** (active-buckets-in-24h, last-write time, enabled feature slugs, update-available), and **instance validity** (`boot_count` + `id_persistence` so a durable install is distinguishable from throwaway-storage instances that mint a new id each restart). All additive; still aggregate **counts and timestamps only** — never bucket names, keys, paths, IPs, or any user content. Values are clamped before sending and the payload stays well under 4 KB. New `schema_version: "2"`. Documented at [Telemetry](https://sairo.dev/security/telemetry).
+- A single process is elected (file lock) to emit the heartbeat, so a multi-worker deployment can't send duplicate pings; the Helm chart sets `SAIRO_STORAGE_EPHEMERAL` from `persistence.enabled` so `id_persistence` is accurate on Kubernetes.
+
+### Changed
+
+- **Heartbeat cadence is now hourly** (`TELEMETRY_INTERVAL`, default `3600`s) instead of daily, so the trailing-24h health metrics stay current. Telemetry remains fully opt-out via `TELEMETRY=false` (no ping is sent when disabled).
+
 ## [3.4.1] - 2026-06-27
 
 Security/correctness fix for S3-key authentication with multiple endpoints (issue #8). Previously a user who logged in with S3 access keys could see and manage **every** bucket on **every** configured endpoint, because the server used its own stored endpoint credentials (and an unconditional admin role) for all operations and discarded the user's keys.

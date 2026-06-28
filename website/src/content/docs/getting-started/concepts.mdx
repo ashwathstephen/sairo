@@ -76,7 +76,7 @@ Sairo's background crawler keeps the local index in sync with your S3 storage.
 
 2. **Parallel indexing**
 
-   The crawler processes **4 prefix threads per bucket** simultaneously. For buckets with deep prefix hierarchies, this dramatically reduces indexing time compared to a single-threaded approach.
+   The crawler processes **16 concurrent prefix threads per bucket**. For buckets with deep prefix hierarchies, this dramatically reduces indexing time compared to a single-threaded approach. See [Architecture](/reference/architecture/) for the full crawl model.
 
 3. **Metadata stored**
 
@@ -88,12 +88,16 @@ Sairo's background crawler keeps the local index in sync with your S3 storage.
 
 4. **Auto-recrawl loop**
 
-   After the initial crawl completes, Sairo waits `RECRAWL_INTERVAL` seconds (default: **120**) and then starts another crawl. This loop repeats indefinitely, keeping the index reasonably fresh.
+   After the initial crawl completes, Sairo waits `RECRAWL_INTERVAL` seconds (default: **120**) and then refreshes the index. This loop repeats indefinitely, keeping the index fresh.
+
+5. **Adaptive delta crawling for large buckets**
+
+   A small bucket is cheap to re-crawl in full, so it is. But re-walking a multi-million-object bucket every two minutes would be slow and expensive. So once a bucket's full crawl takes longer than `LARGE_BUCKET_SECONDS` (default: **60**), Sairo switches it to **incremental delta crawls**: each cycle re-lists only the newest/"hot" prefixes (e.g. today's partition in a `year=/month=/day=` layout) to pick up new objects in seconds, and runs a full reconcile every `FULL_CRAWL_INTERVAL` (default: **3600s**) to catch deletions and cold changes. This keeps huge buckets current without re-listing the whole bucket each cycle.
 
 </Steps>
 
-<Aside type="tip" title="Tuning the recrawl interval">
-  The recrawl interval is a tradeoff between index freshness and S3 API costs. For buckets with millions of objects, consider increasing `RECRAWL_INTERVAL` to reduce `ListObjectsV2` calls. For rapidly changing buckets, decrease it. See [Configuration](/installation/configuration/).
+<Aside type="tip" title="Tuning crawl freshness vs. cost">
+  Crawl frequency is a tradeoff between index freshness and S3 API costs. For large buckets, delta crawling handles freshness automatically; tune `RECRAWL_INTERVAL`, `LARGE_BUCKET_SECONDS`, and `FULL_CRAWL_INTERVAL` to balance the two. See [Configuration](/installation/configuration/) and the [delta-crawl tuning reference](/reference/environment-variables/).
 </Aside>
 
 ## Authentication model

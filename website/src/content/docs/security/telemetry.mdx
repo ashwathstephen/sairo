@@ -1,0 +1,54 @@
+---
+title: "Telemetry"
+description: "What anonymous usage data Sairo reports, why, and how to turn it off."
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Sairo sends a small, anonymous heartbeat so the maintainers can understand fleet health and adoption (which versions and providers are in use, whether instances are healthy). It is **aggregate counts and timestamps only** — never your data.
+
+<Aside type="tip">
+  To disable telemetry completely, set `TELEMETRY=false`. No ping is sent at all when it's off.
+</Aside>
+
+## What is sent
+
+The heartbeat (schema v2) is a single small JSON POST (well under 4 KB) to `https://dashboard.sairo.dev/api/v1/ping`, by default once per hour. It contains:
+
+- **Identity / build:** a random anonymous `instance_id` (generated locally, not tied to you), the Sairo `version`, `os`, and detected storage `provider`.
+- **Scale (aggregate counts):** number of buckets, total objects, total size, endpoints, users, API tokens.
+- **Health:** trailing-24h request count, error count, **process restart count and crash count** (crashes = unclean exits like OOM/SIGKILL, counted separately from orchestrated restarts), index-volume disk total/used bytes, and a derived `ok | degraded | error` status.
+- **Activation timestamps:** when this instance first created a bucket, first stored an object, first minted an API token, first saw an MCP/CLI connection.
+- **Engagement:** count of buckets active in the last 24h, last-write timestamp, which Sairo features are enabled (e.g. `oauth`, `ldap`, `twofa`, `multi_endpoint`), and whether a newer version is available.
+- **Instance validity:** `boot_count` (how many times this install has started) and `id_persistence` (`persistent` / `ephemeral` / `unknown`) — so the dashboard can tell a long-lived install from one on throwaway storage that gets a new id on every restart. No identifying data; just counts and a label.
+
+<Aside>
+  The disk figures are for **Sairo's own index volume** (`DB_DIR`), not your S3 object storage — they're a health signal (a full index disk degrades crawling), not a measure of how much data you store.
+</Aside>
+
+## What is never sent
+
+Sairo deliberately collects **none** of the following:
+
+- Bucket names, object keys, file names, or any paths
+- Any object content or metadata values
+- Usernames, emails, or any user-identifying information
+- IP addresses or request bodies
+- Free-text of any kind
+
+Counts and timestamps cannot be reversed into your content. The collector also clamps values on arrival as a second line of defense.
+
+## Controlling it
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TELEMETRY` | `true` | Set to `false` to disable all telemetry (no ping is sent). |
+| `TELEMETRY_INTERVAL` | `3600` | Seconds between pings. |
+| `SAIRO_STORAGE_EPHEMERAL` | _(auto)_ | Optional hint for `id_persistence`: `true` if `DB_DIR` is throwaway storage, `false` if durable. The Helm chart sets it automatically from `persistence.enabled`; otherwise Sairo infers it. |
+
+```yaml
+environment:
+  TELEMETRY: "false"   # opt out entirely
+```
+
+The startup log line states whether telemetry is enabled, so you can confirm your setting took effect.

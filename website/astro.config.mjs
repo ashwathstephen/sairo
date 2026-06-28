@@ -60,6 +60,7 @@ export default defineConfig({
 						{ slug: 'security/api-tokens' },
 						{ slug: 'security/oauth-ldap' },
 						{ slug: 'security/audit-log' },
+						{ slug: 'security/telemetry' },
 					],
 				},
 				{
