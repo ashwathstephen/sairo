@@ -5,6 +5,7 @@ node_modules/
 frontend/dist/
 website/dist/
 website/.astro/
+backend/static/
 
 # Python
 __pycache__/

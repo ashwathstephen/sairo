@@ -31,7 +31,15 @@ export async function login(username, password) {
 }
 
 export async function logout() {
-  await fetch(`${BASE}/logout`, { method: "POST" });
+  // Returns an SSO end-session URL when the session is an OIDC one and
+  // RP-initiated logout is enabled, so the caller can complete a single logout.
+  try {
+    const res = await fetch(`${BASE}/logout`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    return data.sso_logout_url || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function loginS3(accessKey, secretKey) {

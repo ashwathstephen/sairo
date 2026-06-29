@@ -147,6 +147,42 @@ spec:
             - name: OAUTH_ALLOWED_DOMAINS
               value: {{ .Values.oauth.allowedDomains | quote }}
             {{- end }}
+            # ── OIDC — generic OpenID Connect SSO (optional) ──
+            {{- if .Values.oidc.issuer }}
+            - name: OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            {{- if .Values.oidc.clientSecret }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: oidc-client-secret
+            {{- end }}
+            - name: OIDC_PROVIDER_NAME
+              value: {{ .Values.oidc.providerName | quote }}
+            - name: OIDC_USERNAME_CLAIM
+              value: {{ .Values.oidc.usernameClaim | quote }}
+            - name: OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | quote }}
+            - name: OIDC_DEFAULT_ROLE
+              value: {{ .Values.oidc.defaultRole | quote }}
+            {{- if .Values.oidc.allowedDomains }}
+            - name: OIDC_ALLOWED_DOMAINS
+              value: {{ .Values.oidc.allowedDomains | quote }}
+            {{- end }}
+            {{- if .Values.oidc.adminGroup }}
+            - name: OIDC_ADMIN_GROUP
+              value: {{ .Values.oidc.adminGroup | quote }}
+            - name: OIDC_GROUPS_CLAIM
+              value: {{ .Values.oidc.groupsClaim | quote }}
+            {{- end }}
+            - name: OIDC_REQUIRE_VERIFIED_EMAIL
+              value: {{ .Values.oidc.requireVerifiedEmail | quote }}
+            - name: OIDC_RP_LOGOUT
+              value: {{ .Values.oidc.rpLogout | quote }}
+            {{- end }}
             # ── Branding (optional) ──
             {{- if .Values.branding.appName }}
             - name: APP_NAME

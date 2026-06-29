@@ -81,6 +81,25 @@ These bound how the incremental delta crawler discovers new data on large bucket
 | `OAUTH_DEFAULT_ROLE` | `viewer` | Default role for OAuth-provisioned users |
 | `OAUTH_ALLOWED_DOMAINS` | _(none)_ | Comma-separated list of allowed email domains for Google OAuth |
 
+## OIDC (OpenID Connect)
+
+Generic OIDC SSO for any compliant provider. Enabled when `OIDC_ISSUER` and `OIDC_CLIENT_ID` are both set. See [OAuth, OIDC & LDAP](/security/oauth-ldap/) for per-provider setup.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OIDC_ISSUER` | _(none)_ | Issuer URL, e.g. `https://login.example.com/realms/main`. Endpoints are auto-discovered from `<issuer>/.well-known/openid-configuration` |
+| `OIDC_CLIENT_ID` | _(none)_ | Client/application ID from your provider |
+| `OIDC_CLIENT_SECRET` | _(none)_ | Client secret. Omit for a **public** client (PKCE is always used) |
+| `OIDC_PROVIDER_NAME` | `SSO` | Label on the login button |
+| `OIDC_USERNAME_CLAIM` | `preferred_username` | Claim used as the local username (e.g. `email` for Google) |
+| `OIDC_SCOPES` | `openid profile email` | Requested scopes |
+| `OIDC_DEFAULT_ROLE` | `viewer` | Role for new users (they get no bucket access until an admin grants it) |
+| `OIDC_ALLOWED_DOMAINS` | _(none)_ | Comma-separated email-domain allowlist |
+| `OIDC_ADMIN_GROUP` | _(none)_ | If set, members of this group become admins (enables group→role mapping) |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim that carries the user's groups |
+| `OIDC_REQUIRE_VERIFIED_EMAIL` | `false` | Reject logins whose email isn't verified |
+| `OIDC_RP_LOGOUT` | `false` | Also end the IdP session on logout (single logout) |
+
 ## Branding
 
 | Variable | Default | Description |

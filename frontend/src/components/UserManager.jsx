@@ -2,6 +2,18 @@ import React, { useState, useEffect } from "react";
 import { listUsers, createUser, updateUserRole, deleteUser, formatDate, getUserPermissions, setUserPermissions, listBuckets, reset2FA } from "../api";
 import ConfirmDialog from "./ConfirmDialog";
 
+// How each account authenticates — shown as a badge so admins can tell local
+// accounts apart from SSO/LDAP ones at a glance.
+const SOURCE_META = {
+  local: { label: "Local", cls: "src-local" },
+  oidc: { label: "SSO", cls: "src-sso" },
+  oauth: { label: "OAuth", cls: "src-oauth" },
+  oauth_google: { label: "Google", cls: "src-oauth" },
+  oauth_github: { label: "GitHub", cls: "src-oauth" },
+  ldap: { label: "LDAP", cls: "src-ldap" },
+};
+const sourceMeta = (s) => SOURCE_META[s] || SOURCE_META.local;
+
 export default function UserManager({ onClose, currentUser }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -16,6 +28,8 @@ export default function UserManager({ onClose, currentUser }) {
   const [allBuckets, setAllBuckets] = useState([]);
   const [userPerms, setUserPerms] = useState({}); // { bucket: "read"|"write" }
   const [permsLoading, setPermsLoading] = useState(false);
+  const [permSearch, setPermSearch] = useState("");
+  const [savedFlash, setSavedFlash] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -80,6 +94,7 @@ export default function UserManager({ onClose, currentUser }) {
       return;
     }
     setExpandedUser(username);
+    setPermSearch("");
     setPermsLoading(true);
     setError("");
     try {
@@ -99,23 +114,36 @@ export default function UserManager({ onClose, currentUser }) {
     setPermsLoading(false);
   };
 
-  const handlePermChange = async (username, bucket, value) => {
-    setError("");
-    const updated = { ...userPerms };
-    if (value === "none") {
-      delete updated[bucket];
-    } else {
-      updated[bucket] = value;
-    }
-    setUserPerms(updated);
-    // Save all permissions
+  // Persist the whole permission map, then reflect the new grant count on the
+  // row and flash a "Saved" indicator.
+  const persistPerms = async (username, nextMap) => {
+    setUserPerms(nextMap);
     try {
-      const permissions = Object.entries(updated).map(([b, p]) => ({ bucket: b, permission: p }));
+      const permissions = Object.entries(nextMap).map(([b, p]) => ({ bucket: b, permission: p }));
       await setUserPermissions(username, permissions);
+      setUsers(prev => prev.map(u => u.username === username ? { ...u, bucket_count: permissions.length } : u));
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 1200);
     } catch (err) {
       setError(err.message);
     }
   };
+
+  const handlePermChange = (username, bucket, value) => {
+    setError("");
+    const updated = { ...userPerms };
+    if (value === "none") delete updated[bucket];
+    else updated[bucket] = value;
+    persistPerms(username, updated);
+  };
+
+  // Quick actions. "Grant read to all" keeps any existing write grants.
+  const grantReadAll = (username) => {
+    const m = {};
+    allBuckets.forEach(b => { m[b] = userPerms[b] === "write" ? "write" : "read"; });
+    persistPerms(username, m);
+  };
+  const revokeAll = (username) => persistPerms(username, {});
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -164,6 +192,7 @@ export default function UserManager({ onClose, currentUser }) {
                   <th>Username</th>
                   <th>Role</th>
                   <th>2FA</th>
+                  <th>Access</th>
                   <th>Created</th>
                   <th></th>
                 </tr>
@@ -179,6 +208,7 @@ export default function UserManager({ onClose, currentUser }) {
                       <td style={{ fontWeight: 500 }}>
                         {u.username}
                         {isSelf(u.username) && <span className="user-you-badge">you</span>}
+                        <span className={`src-badge ${sourceMeta(u.auth_source).cls}`}>{sourceMeta(u.auth_source).label}</span>
                       </td>
                       <td onClick={(e) => e.stopPropagation()}>
                         {isSelf(u.username) ? (
@@ -206,39 +236,84 @@ export default function UserManager({ onClose, currentUser }) {
                           <span className="tfa-badge tfa-badge-off">OFF</span>
                         )}
                       </td>
+                      <td onClick={(e) => e.stopPropagation()} style={{ fontSize: 12 }}>
+                        {u.role === "admin" ? (
+                          <span className="muted">All buckets</span>
+                        ) : (
+                          <button
+                            className={`access-pill ${expandedUser === u.username ? "access-pill-open" : ""}`}
+                            onClick={() => !isSelf(u.username) && togglePermissions(u.username)}
+                            disabled={isSelf(u.username)}
+                            title="Manage bucket access"
+                          >
+                            {(u.bucket_count || 0)} bucket{(u.bucket_count || 0) === 1 ? "" : "s"}
+                          </button>
+                        )}
+                      </td>
                       <td style={{ fontSize: 12 }}>{formatDate(u.created_at)}</td>
                       <td onClick={(e) => e.stopPropagation()}>
-                        {!isSelf(u.username) && (
-                          <button onClick={() => setConfirmDelete(u)} className="btn-small btn-danger">Delete</button>
-                        )}
+                        <div className="user-row-actions">
+                          {u.role !== "admin" && !isSelf(u.username) && (
+                            <button onClick={() => togglePermissions(u.username)} className="btn-small">
+                              {expandedUser === u.username ? "Done" : "Manage access"}
+                            </button>
+                          )}
+                          {!isSelf(u.username) && (
+                            <button onClick={() => setConfirmDelete(u)} className="btn-small btn-danger">Delete</button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                     {expandedUser === u.username && u.role !== "admin" && (
                       <tr>
-                        <td colSpan={5} style={{ padding: 0 }}>
+                        <td colSpan={6} style={{ padding: 0 }}>
                           <div className="perm-panel">
-                            <div className="perm-header">Bucket Permissions</div>
+                            <div className="perm-panel-head">
+                              <strong>Bucket access for {u.username}</strong>
+                              <span className={`perm-saved ${savedFlash ? "perm-saved-on" : ""}`}>Saved ✓</span>
+                              <div className="perm-quick">
+                                <button className="btn-xs" onClick={() => grantReadAll(u.username)} disabled={allBuckets.length === 0}>Grant read to all</button>
+                                <button className="btn-xs" onClick={() => revokeAll(u.username)} disabled={Object.keys(userPerms).length === 0}>Revoke all</button>
+                              </div>
+                            </div>
                             {permsLoading ? (
                               <div className="empty"><div className="spinner" /></div>
                             ) : allBuckets.length === 0 ? (
-                              <p className="muted" style={{ margin: "8px 12px" }}>No buckets available.</p>
+                              <p className="muted" style={{ margin: "8px 12px" }}>No buckets available to grant.</p>
                             ) : (
-                              <div className="perm-grid">
-                                {allBuckets.map(bucket => (
-                                  <div key={bucket} className="perm-row">
-                                    <span className="perm-bucket">{bucket}</span>
-                                    <select
-                                      value={userPerms[bucket] || "none"}
-                                      onChange={(e) => handlePermChange(u.username, bucket, e.target.value)}
-                                      className="perm-select"
-                                    >
-                                      <option value="none">No Access</option>
-                                      <option value="read">Read</option>
-                                      <option value="write">Write</option>
-                                    </select>
-                                  </div>
-                                ))}
-                              </div>
+                              <>
+                                {allBuckets.length > 6 && (
+                                  <input
+                                    className="perm-search"
+                                    placeholder="Filter buckets…"
+                                    value={permSearch}
+                                    onChange={(e) => setPermSearch(e.target.value)}
+                                  />
+                                )}
+                                <div className="perm-grid">
+                                  {allBuckets
+                                    .filter(b => b.toLowerCase().includes(permSearch.toLowerCase()))
+                                    .map(bucket => {
+                                      const cur = userPerms[bucket] || "none";
+                                      return (
+                                        <div key={bucket} className="perm-row">
+                                          <span className="perm-bucket">{bucket}</span>
+                                          <div className="perm-seg" role="group" aria-label={`Access for ${bucket}`}>
+                                            {["none", "read", "write"].map(level => (
+                                              <button
+                                                key={level}
+                                                className={`perm-seg-btn ${cur === level ? "perm-seg-active perm-seg-" + level : ""}`}
+                                                onClick={() => handlePermChange(u.username, bucket, level)}
+                                              >
+                                                {level === "none" ? "No access" : level === "read" ? "Read" : "Write"}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
+                              </>
                             )}
                           </div>
                         </td>
@@ -252,7 +327,7 @@ export default function UserManager({ onClose, currentUser }) {
         )}
 
         <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
-          <strong>Admin</strong> = full access to all buckets. <strong>Viewer</strong> = click a row to assign per-bucket permissions (Read / Write / No Access).
+          <strong>Admin</strong> = full access to all buckets. <strong>Viewer</strong> = use <strong>Manage access</strong> to grant specific buckets (Read / Write). SSO &amp; LDAP users sign in through your identity provider; you assign their bucket access here.
         </p>
 
         <div className="modal-actions">
