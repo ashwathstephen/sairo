@@ -2,7 +2,7 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.6.0] - 2026-06-29
 
 Generic OpenID Connect SSO + a real per-bucket access UI (issue #9).
 
