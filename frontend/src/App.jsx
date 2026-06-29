@@ -208,12 +208,14 @@ function MainApp() {
   }, []);
 
   const handleLogout = useCallback(async () => {
-    await logout();
+    const ssoLogoutUrl = await logout();
     setUser(null);
     setBucket("");
     setPrefix("");
     setEndpointId("default");
     setCurrentEndpoint("default");
+    // Complete single logout at the identity provider if one was returned.
+    if (ssoLogoutUrl) window.location.href = ssoLogoutUrl;
   }, []);
 
   const navigatePrefix = useCallback((pfx, hl) => {

@@ -605,16 +605,29 @@ def _init_users_db():
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bp_username ON bucket_permissions(username)")
-    # 2FA columns (added via ALTER TABLE for backward compat)
+    # 2FA + auth-source columns (added via ALTER TABLE for backward compat)
     for col, coldef in [
         ("totp_secret", "TEXT"),
         ("totp_enabled", "INTEGER DEFAULT 0"),
         ("recovery_codes", "TEXT"),  # JSON array of bcrypt-hashed codes
+        ("auth_source", "TEXT"),     # local | ldap | oauth_google | oauth_github | oidc
     ]:
         try:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {coldef}")
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Backfill auth_source for rows created before the column existed, inferring
+    # the original identity provider from the placeholder password_hash prefix
+    # (federated logins store "LDAP:"/"OAUTH:"/"OIDC:"; everything else is local).
+    # This is what lets us block one provider from hijacking another's account.
+    conn.execute("""
+        UPDATE users SET auth_source = CASE
+            WHEN password_hash LIKE 'LDAP:%'  THEN 'ldap'
+            WHEN password_hash LIKE 'OIDC:%'  THEN 'oidc'
+            WHEN password_hash LIKE 'OAUTH:%' THEN 'oauth'
+            ELSE 'local' END
+        WHERE auth_source IS NULL
+    """)
     # S3 endpoints table for multi-endpoint support
     conn.execute("""
         CREATE TABLE IF NOT EXISTS s3_endpoints (
@@ -735,6 +748,53 @@ def require_admin(request: Request, user: dict = Depends(get_current_user)):
     if request.url.path.startswith("/api/buckets/") and bp == "write":
         return user
     raise HTTPException(403, "Admin access required")
+
+
+class FederatedAuthError(Exception):
+    """Raised when a federated (SSO) login can't be completed safely."""
+
+
+def _sync_federated_user(username: str, source: str, hash_prefix: str,
+                         default_role: str, mapped_role: str | None = None):
+    """Create-or-fetch a user logging in via an external IdP (OIDC/OAuth/LDAP).
+
+    The single security-critical chokepoint for every SSO path:
+
+    * **Account-takeover guard** — if a user with this name already exists from a
+      *different* auth source, the login is rejected. Without this, an IdP user
+      who can set their username to ``admin`` would log straight into the local
+      admin account. A user is only ever logged in against the provider that
+      created them.
+    * New users are created with ``default_role`` and NO bucket grants (an admin
+      assigns access). When ``mapped_role`` is provided (e.g. derived from IdP
+      groups), it sets the role on create and re-syncs it for that provider's
+      own users on later logins — never for a user owned by another source.
+
+    Returns ``(role, totp_enabled)``. Raises ``FederatedAuthError`` on conflict.
+    """
+    with _get_users_db() as db:
+        row = db.execute(
+            "SELECT role, totp_enabled, auth_source FROM users WHERE username=?",
+            (username,)).fetchone()
+        if row is not None:
+            existing_source = row["auth_source"] or "local"
+            if existing_source != source:
+                raise FederatedAuthError(
+                    f"username '{username}' already exists via '{existing_source}'")
+            role = row["role"]
+            if mapped_role and mapped_role != role:
+                # Provider-managed role (group mapping) — keep DB in sync.
+                db.execute("UPDATE users SET role=? WHERE username=?", (mapped_role, username))
+                db.commit()
+                role = mapped_role
+            return role, bool(row["totp_enabled"])
+        role = mapped_role or default_role
+        db.execute(
+            "INSERT INTO users (username, password_hash, role, auth_source) VALUES (?,?,?,?)",
+            (username, f"{hash_prefix}:{secrets.token_hex(16)}", role, source))
+        db.commit()
+        _audit("user_created", username, details=f"method={source}")
+        return role, False
 
 
 def _summarize_keys(keys, max_items=3):
@@ -2879,19 +2939,47 @@ def auth_login_s3(req: LoginS3Request, request: Request):
 
 
 @app.post("/api/auth/logout")
-def auth_logout():
-    response = JSONResponse({"logged_out": True})
+def auth_logout(request: Request):
+    # Always clear the local session. If the session belongs to an OIDC user and
+    # RP-initiated logout is enabled, also hand back the IdP end-session URL so the
+    # frontend can complete a single logout (the SSO session, not just ours).
+    sso_logout_url = None
+    if OIDC_ENABLED and OIDC_RP_LOGOUT:
+        token = request.cookies.get("access_token")
+        if token:
+            try:
+                sub = jwt.decode(token, JWT_SECRET, algorithms=["HS256"]).get("sub")
+            except Exception:
+                sub = None
+            if sub:
+                with _get_users_db() as db:
+                    row = db.execute("SELECT auth_source FROM users WHERE username=?", (sub,)).fetchone()
+                if row and (row["auth_source"] or "local") == "oidc":
+                    try:
+                        end = _oidc_config().get("end_session_endpoint")
+                        if end:
+                            import urllib.parse
+                            base = str(request.base_url).rstrip("/")
+                            qs = urllib.parse.urlencode({
+                                "client_id": OIDC_CLIENT_ID,
+                                "post_logout_redirect_uri": base + "/",
+                            })
+                            sso_logout_url = f"{end}?{qs}"
+                    except Exception:
+                        sso_logout_url = None
+    response = JSONResponse({"logged_out": True, "sso_logout_url": sso_logout_url})
     response.delete_cookie("access_token", path="/")
     return response
 
 @app.get("/api/auth/me")
 def auth_me(user: dict = Depends(get_current_user), request: Request = None):
     result = {"username": user["username"], "role": user["role"]}
-    # Include 2FA status
+    # Include 2FA status + which provider this account authenticates against
     with _get_users_db() as db:
-        row = db.execute("SELECT totp_enabled FROM users WHERE username=?", (user["username"],)).fetchone()
+        row = db.execute("SELECT totp_enabled, auth_source FROM users WHERE username=?", (user["username"],)).fetchone()
     if row:
         result["totp_enabled"] = bool(row["totp_enabled"])
+        result["auth_source"] = row["auth_source"] or "local"
     token = request.cookies.get("access_token") if request else None
     if token:
         try:
@@ -2917,11 +3005,16 @@ def auth_refresh(user: dict = Depends(get_current_user)):
 @app.get("/api/auth/users")
 def auth_list_users(user: dict = Depends(require_admin)):
     with _get_users_db() as db:
-        rows = db.execute("SELECT username, role, created_at, totp_enabled FROM users ORDER BY created_at").fetchall()
+        rows = db.execute("SELECT username, role, created_at, totp_enabled, auth_source FROM users ORDER BY created_at").fetchall()
+        # bucket-grant counts per user, so the UI can show "N buckets" at a glance
+        counts = {r["username"]: r["n"] for r in db.execute(
+            "SELECT username, COUNT(*) AS n FROM bucket_permissions GROUP BY username").fetchall()}
     users = []
     for r in rows:
         u = dict(r)
         u["totp_enabled"] = bool(u.get("totp_enabled"))
+        u["auth_source"] = u.get("auth_source") or "local"
+        u["bucket_count"] = counts.get(u["username"], 0)
         users.append(u)
     return {"users": users}
 
@@ -3393,18 +3486,13 @@ def activate_license(req: ActivateLicenseRequest, user: dict = Depends(require_a
 @app.get("/api/branding")
 def get_branding():
     """Public endpoint — returns custom branding. No auth required."""
-    oauth_providers = []
-    if os.environ.get("OAUTH_GOOGLE_CLIENT_ID"):
-        oauth_providers.append({"id": "google", "name": "Google"})
-    if os.environ.get("OAUTH_GITHUB_CLIENT_ID"):
-        oauth_providers.append({"id": "github", "name": "GitHub"})
     return {
         "app_name": os.environ.get("APP_NAME", "Sairo"),
         "app_logo": os.environ.get("APP_LOGO", ""),  # URL to custom logo
         "primary_color": os.environ.get("PRIMARY_COLOR", "#3b82f6"),
         "login_message": os.environ.get("LOGIN_MESSAGE", ""),
         "ldap_enabled": os.environ.get("LDAP_ENABLED", "false").lower() == "true",
-        "oauth_providers": oauth_providers,
+        "oauth_providers": _auth_providers(),
         "auth_mode": AUTH_MODE,
         "version": SAIRO_VERSION,
     }
@@ -3498,19 +3586,18 @@ def auth_ldap(req: LoginRequest, request: Request):
         log.error("LDAP error: %s", e)
         raise HTTPException(502, f"LDAP error: {e}")
 
-    # Sync to local users table (create or update role)
-    with _get_users_db() as db:
-        existing = db.execute("SELECT username, totp_enabled FROM users WHERE username=?", (req.username,)).fetchone()
-        if existing:
-            db.execute("UPDATE users SET role=? WHERE username=?", (role, req.username))
-        else:
-            # Create user with a random unusable password (LDAP-only auth)
-            db.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
-                       (req.username, f"LDAP:{secrets.token_hex(16)}", role))
-        db.commit()
+    # Sync to local users table via the hardened federated chokepoint. LDAP role
+    # is group-derived, so it's passed as mapped_role (re-synced each login for
+    # LDAP-owned users, never for a local/other-IdP account of the same name).
+    try:
+        role, totp_enabled = _sync_federated_user(
+            req.username, "ldap", "LDAP", LDAP_DEFAULT_ROLE, mapped_role=role)
+    except FederatedAuthError:
+        _audit("login_failed", req.username, details="ldap account-source conflict")
+        raise HTTPException(409, "This username already exists with a different sign-in method")
 
     # Check 2FA
-    if existing and existing["totp_enabled"]:
+    if totp_enabled:
         pending_token = jwt.encode(
             {"sub": req.username, "role": role, "purpose": "2fa",
              "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
@@ -3543,15 +3630,25 @@ OAUTH_GITHUB_CLIENT_SECRET = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET", "")
 OAUTH_DEFAULT_ROLE = os.environ.get("OAUTH_DEFAULT_ROLE", "viewer")
 OAUTH_ALLOWED_DOMAINS = [d.strip() for d in os.environ.get("OAUTH_ALLOWED_DOMAINS", "").split(",") if d.strip()]
 
-@app.get("/api/auth/oauth/providers")
-def oauth_providers():
-    """Public endpoint — list available OAuth providers."""
+def _auth_providers() -> list:
+    """Single source of truth for the SSO buttons the frontend renders.
+
+    Each entry carries an explicit ``login_path`` so the frontend doesn't have
+    to assume a URL shape (OIDC lives under /oidc, not /oauth/<id>)."""
     providers = []
     if OAUTH_GOOGLE_CLIENT_ID:
-        providers.append({"id": "google", "name": "Google"})
+        providers.append({"id": "google", "name": "Google", "login_path": "/api/auth/oauth/google/login"})
     if OAUTH_GITHUB_CLIENT_ID:
-        providers.append({"id": "github", "name": "GitHub"})
-    return {"providers": providers}
+        providers.append({"id": "github", "name": "GitHub", "login_path": "/api/auth/oauth/github/login"})
+    if OIDC_ENABLED:
+        providers.append({"id": "oidc", "name": OIDC_PROVIDER_NAME, "login_path": "/api/auth/oidc/login"})
+    return providers
+
+
+@app.get("/api/auth/oauth/providers")
+def oauth_providers():
+    """Public endpoint — list available SSO providers (OAuth + OIDC)."""
+    return {"providers": _auth_providers()}
 
 @app.get("/api/auth/oauth/{provider}/login")
 def oauth_start(provider: str, request: Request):
@@ -3640,18 +3737,14 @@ def oauth_callback(provider: str, code: str, request: Request):
     else:
         return RedirectResponse(f"/?error=unknown_provider")
 
-    # Sync to local DB
-    role = OAUTH_DEFAULT_ROLE
-    totp_enabled = False
-    with _get_users_db() as db:
-        existing = db.execute("SELECT role, totp_enabled FROM users WHERE username=?", (username,)).fetchone()
-        if existing:
-            role = existing["role"]  # Preserve existing role
-            totp_enabled = bool(existing["totp_enabled"])
-        else:
-            db.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
-                       (username, f"OAUTH:{secrets.token_hex(16)}", role))
-            db.commit()
+    # Sync to local DB through the hardened federated chokepoint (rejects a login
+    # for a username already owned by a different auth source — e.g. local admin).
+    try:
+        role, totp_enabled = _sync_federated_user(
+            username, "oauth", "OAUTH", OAUTH_DEFAULT_ROLE, mapped_role=None)
+    except FederatedAuthError:
+        _audit("login_failed", username, details="oauth account-source conflict")
+        return RedirectResponse("/?error=account_conflict")
 
     # Check 2FA
     if totp_enabled:
@@ -3675,6 +3768,296 @@ def oauth_callback(provider: str, code: str, request: Request):
     response.set_cookie("access_token", token, httponly=True, samesite="strict",
                         secure=_secure_cookie, max_age=SESSION_HOURS * 3600, path="/")
     _audit("login", username, details=f"method=oauth_{provider}")
+    return response
+
+
+# ── API: OpenID Connect (generic OIDC) ──────────────────────────────────────
+#
+# Unlike the hardcoded Google/GitHub OAuth above, this is a standards-compliant
+# OIDC client for ANY issuer (Keycloak, Okta, Auth0, Entra ID, Authentik, …):
+#   • discovers endpoints from <issuer>/.well-known/openid-configuration
+#   • protects the round-trip with state + nonce + PKCE (S256)
+#   • validates the ID token properly — signature via the issuer's JWKS, plus
+#     iss / aud / exp — before trusting any claim
+#
+# Per the product decision (issue #9): we sync ONLY the username. Role and
+# per-bucket permissions are NOT derived from OIDC claims/groups — a brand-new
+# user lands as OIDC_DEFAULT_ROLE (viewer) with zero bucket grants, and an admin
+# assigns access. An existing user's role/permissions are never overwritten on
+# login, so OIDC can't silently escalate or downgrade someone an admin set up.
+
+OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").rstrip("/")
+OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+OIDC_SCOPES = os.environ.get("OIDC_SCOPES", "openid profile email")
+OIDC_USERNAME_CLAIM = os.environ.get("OIDC_USERNAME_CLAIM", "preferred_username")
+OIDC_PROVIDER_NAME = os.environ.get("OIDC_PROVIDER_NAME", "SSO")
+OIDC_DEFAULT_ROLE = os.environ.get("OIDC_DEFAULT_ROLE", "viewer")
+OIDC_ALLOWED_DOMAINS = [d.strip().lower() for d in os.environ.get("OIDC_ALLOWED_DOMAINS", "").split(",") if d.strip()]
+# Optional group→role mapping (off by default → issue #9 username-only behaviour).
+# When OIDC_ADMIN_GROUP is set, membership of that group in the OIDC_GROUPS_CLAIM
+# claim maps the user to admin; everyone else gets OIDC_DEFAULT_ROLE. Mirrors LDAP.
+OIDC_GROUPS_CLAIM = os.environ.get("OIDC_GROUPS_CLAIM", "groups")
+OIDC_ADMIN_GROUP = os.environ.get("OIDC_ADMIN_GROUP", "")
+# Optional hardening toggles.
+OIDC_REQUIRE_VERIFIED_EMAIL = os.environ.get("OIDC_REQUIRE_VERIFIED_EMAIL", "false").lower() == "true"
+OIDC_RP_LOGOUT = os.environ.get("OIDC_RP_LOGOUT", "false").lower() == "true"
+# Enabled only when both an issuer and a client id are configured.
+OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID)
+# Only asymmetric algs — never HS*/none — so a leaked/forged token signed with a
+# symmetric key (or the alg-confusion attack using the public key as an HMAC
+# secret) can't pass validation.
+_OIDC_ALLOWED_ALGS = ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"]
+
+_oidc_discovery_cache: dict = {"doc": None, "fetched_at": 0}
+_oidc_jwks_client = None  # lazily-built jwt.PyJWKClient (caches keys internally)
+
+
+def _oidc_config() -> dict:
+    """Fetch + cache (1h TTL) the issuer's OpenID discovery document."""
+    import httpx
+    now = time.time()
+    if _oidc_discovery_cache["doc"] and now - _oidc_discovery_cache["fetched_at"] < 3600:
+        return _oidc_discovery_cache["doc"]
+    resp = httpx.get(f"{OIDC_ISSUER}/.well-known/openid-configuration", timeout=10)
+    resp.raise_for_status()
+    doc = resp.json()
+    _oidc_discovery_cache["doc"] = doc
+    _oidc_discovery_cache["fetched_at"] = now
+    return doc
+
+
+def _oidc_jwks():
+    """Lazy, cached PyJWKClient pointed at the issuer's jwks_uri."""
+    global _oidc_jwks_client
+    if _oidc_jwks_client is None:
+        _oidc_jwks_client = jwt.PyJWKClient(_oidc_config()["jwks_uri"])
+    return _oidc_jwks_client
+
+
+def _oidc_userinfo(access_token: str, cfg: dict) -> dict:
+    """Best-effort fetch of the userinfo endpoint, to fill claims an IdP omits
+    from the ID token (commonly groups or email). Never raises into the flow."""
+    import httpx
+    ep = cfg.get("userinfo_endpoint")
+    if not ep or not access_token:
+        return {}
+    try:
+        r = httpx.get(ep, headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+        return r.json() if r.status_code == 200 else {}
+    except Exception:
+        return {}
+
+
+def _oidc_mapped_role(claims: dict):
+    """Optional group→role mapping. Returns None when OIDC_ADMIN_GROUP is unset
+    (username-only mode — role left to admins). Otherwise returns 'admin' if the
+    user is in the admin group, else OIDC_DEFAULT_ROLE — a provider-managed role
+    that re-syncs on every login (so removing someone from the group demotes them).
+
+    Matching is on the WHOLE group value or a delimited component — never a loose
+    substring — so admin group "sairo-admins" does NOT match "sairo-admins-readonly".
+    Handles plain names ("sairo-admins"), Keycloak paths ("/parent/sairo-admins"),
+    and LDAP/AD DNs ("cn=sairo-admins,ou=groups,dc=corp")."""
+    if not OIDC_ADMIN_GROUP:
+        return None
+    want = OIDC_ADMIN_GROUP.strip().strip("/").lower()
+    raw = claims.get(OIDC_GROUPS_CLAIM)
+    groups = raw if isinstance(raw, list) else ([raw] if raw else [])
+    for g in groups:
+        g = str(g).strip().lower()
+        # Candidate identities for this group: the whole value, each path/DN
+        # component, and the value side of any "key=value" DN component.
+        candidates = {g, g.strip("/")}
+        for part in g.replace(",", "/").split("/"):
+            part = part.strip()
+            if not part:
+                continue
+            candidates.add(part)
+            if "=" in part:
+                candidates.add(part.split("=", 1)[1].strip())
+        if want in candidates:
+            return "admin"
+    return OIDC_DEFAULT_ROLE
+
+
+@app.get("/api/auth/oidc/login")
+def oidc_start(request: Request):
+    """Begin the OIDC authorization-code (+ PKCE) flow: redirect to the issuer."""
+    if not OIDC_ENABLED:
+        raise HTTPException(404, "OIDC is not configured")
+    import urllib.parse, hashlib, base64
+    try:
+        cfg = _oidc_config()
+    except Exception:
+        raise HTTPException(502, "OIDC issuer discovery failed")
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = f"{base_url}/api/auth/oidc/callback"
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    verifier = secrets.token_urlsafe(64)  # PKCE code_verifier
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    params = urllib.parse.urlencode({
+        "client_id": OIDC_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": OIDC_SCOPES,
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    # Stash state/nonce/verifier in a short-lived signed cookie bound to this
+    # browser. SameSite=Lax (not Strict) so it survives the top-level redirect
+    # back from the IdP; Strict would drop it on the cross-site return.
+    state_token = jwt.encode(
+        {"state": state, "nonce": nonce, "cv": verifier, "purpose": "oidc_state",
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        JWT_SECRET, algorithm="HS256")
+    response = RedirectResponse(f"{cfg['authorization_endpoint']}?{params}")
+    _secure_cookie = os.environ.get("SECURE_COOKIE", "true").lower() != "false"
+    response.set_cookie("oidc_state", state_token, httponly=True, samesite="lax",
+                        secure=_secure_cookie, max_age=600, path="/api/auth/oidc")
+    return response
+
+
+@app.get("/api/auth/oidc/callback")
+def oidc_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Handle the OIDC redirect: verify state, exchange code, validate the ID token."""
+    if not OIDC_ENABLED:
+        raise HTTPException(404, "OIDC is not configured")
+    if error:
+        return RedirectResponse("/?error=oidc_failed")
+
+    # 1) CSRF: the state param must match the signed state cookie we set.
+    state_cookie = request.cookies.get("oidc_state")
+    if not state_cookie or not code or not state:
+        return RedirectResponse("/?error=oidc_failed")
+    try:
+        st = jwt.decode(state_cookie, JWT_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return RedirectResponse("/?error=oidc_failed")
+    if st.get("purpose") != "oidc_state" or not secrets.compare_digest(st.get("state", ""), state):
+        return RedirectResponse("/?error=oidc_state_mismatch")
+
+    import httpx
+    try:
+        cfg = _oidc_config()
+    except Exception:
+        return RedirectResponse("/?error=oidc_failed")
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = f"{base_url}/api/auth/oidc/callback"
+
+    # 2) Exchange the code (with the PKCE verifier) for tokens.
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": OIDC_CLIENT_ID,
+        "code_verifier": st.get("cv", ""),
+    }
+    if OIDC_CLIENT_SECRET:
+        data["client_secret"] = OIDC_CLIENT_SECRET
+    try:
+        token_resp = httpx.post(cfg["token_endpoint"], data=data, timeout=10,
+                                headers={"Accept": "application/json"})
+    except Exception:
+        return RedirectResponse("/?error=oidc_failed")
+    if token_resp.status_code != 200:
+        return RedirectResponse("/?error=oidc_failed")
+    tokens = token_resp.json()
+    id_token = tokens.get("id_token")
+    access_token = tokens.get("access_token")
+    if not id_token:
+        return RedirectResponse("/?error=oidc_no_id_token")
+
+    # 3) Validate the ID token: signature via JWKS + iss/aud/exp. This is the
+    #    step that makes the claims trustworthy — do NOT skip it.
+    try:
+        signing_key = _oidc_jwks().get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token, signing_key.key,
+            algorithms=_OIDC_ALLOWED_ALGS,
+            audience=OIDC_CLIENT_ID,
+            issuer=cfg.get("issuer", OIDC_ISSUER),
+            leeway=60,  # tolerate small clock skew between us and the IdP
+            options={"require": ["exp", "iat", "iss", "aud"]},
+        )
+    except Exception:
+        _audit("login_failed", "(oidc)", details="id_token validation failed")
+        return RedirectResponse("/?error=oidc_invalid_token")
+
+    # 4) Replay protection: the nonce must match the one we sent.
+    if claims.get("nonce") != st.get("nonce"):
+        return RedirectResponse("/?error=oidc_nonce_mismatch")
+
+    # 4a) Authorized-party: when present (typically with multiple audiences), azp
+    #     MUST be our client id — otherwise the token was minted for someone else.
+    if claims.get("azp") and claims["azp"] != OIDC_CLIENT_ID:
+        _audit("login_failed", "(oidc)", details="azp mismatch")
+        return RedirectResponse("/?error=oidc_invalid_token")
+
+    # 4b) Fill claims some IdPs keep out of the ID token (commonly groups/email)
+    #     from the userinfo endpoint — only when we actually need them.
+    need_username = not claims.get(OIDC_USERNAME_CLAIM)
+    need_groups = bool(OIDC_ADMIN_GROUP) and not claims.get(OIDC_GROUPS_CLAIM)
+    need_email = (OIDC_REQUIRE_VERIFIED_EMAIL or bool(OIDC_ALLOWED_DOMAINS)) and not claims.get("email")
+    if access_token and (need_username or need_groups or need_email):
+        for k, v in _oidc_userinfo(access_token, cfg).items():
+            claims.setdefault(k, v)
+
+    # 5) Optional email checks.
+    email = claims.get("email", "") or ""
+    if OIDC_REQUIRE_VERIFIED_EMAIL and claims.get("email_verified") is not True:
+        return RedirectResponse("/?error=email_not_verified")
+    if OIDC_ALLOWED_DOMAINS:
+        domain = email.split("@")[1].lower() if "@" in email else ""
+        if domain not in OIDC_ALLOWED_DOMAINS:
+            return RedirectResponse("/?error=domain_not_allowed")
+
+    # 6) Pick the username claim (sync ONLY the username, unless group mapping is on).
+    username = str(claims.get(OIDC_USERNAME_CLAIM) or claims.get("preferred_username")
+                   or claims.get("email") or claims.get("sub") or "").strip()
+    if not username:
+        return RedirectResponse("/?error=oidc_no_username")
+
+    # 7) Sync through the hardened federated chokepoint:
+    #    new user → default role + no bucket grants (admin assigns later);
+    #    existing user → reject if it belongs to a different auth source
+    #    (account-takeover guard, protects the local admin especially).
+    #    mapped_role is None in username-only mode, or admin/viewer when groups map.
+    try:
+        role, totp_enabled = _sync_federated_user(
+            username, "oidc", "OIDC", OIDC_DEFAULT_ROLE, mapped_role=_oidc_mapped_role(claims))
+    except FederatedAuthError:
+        _audit("login_failed", username, details="oidc account-source conflict")
+        return RedirectResponse("/?error=account_conflict")
+
+    _secure_cookie = os.environ.get("SECURE_COOKIE", "true").lower() != "false"
+
+    # 7a) If the synced user has 2FA, hand off to the existing 2FA flow.
+    if totp_enabled:
+        pending_token = jwt.encode(
+            {"sub": username, "role": role, "purpose": "2fa",
+             "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+            JWT_SECRET, algorithm="HS256")
+        response = RedirectResponse("/?requires_2fa=true")
+        response.set_cookie("access_token", pending_token, httponly=True, samesite="strict",
+                            secure=_secure_cookie, max_age=300, path="/")
+        response.delete_cookie("oidc_state", path="/api/auth/oidc")
+        return response
+
+    # 7b) Issue the normal session token and land in the app.
+    token = jwt.encode(
+        {"sub": username, "role": role,
+         "exp": datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)},
+        JWT_SECRET, algorithm="HS256")
+    response = RedirectResponse("/")
+    response.set_cookie("access_token", token, httponly=True, samesite="strict",
+                        secure=_secure_cookie, max_age=SESSION_HOURS * 3600, path="/")
+    response.delete_cookie("oidc_state", path="/api/auth/oidc")
+    _audit("login", username, details="method=oidc")
     return response
 
 

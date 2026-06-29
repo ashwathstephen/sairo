@@ -63,9 +63,15 @@ Viewers have no access to any bucket by default. An admin must explicitly grant 
 
 ## Managing Permissions
 
-From the Admin Panel, click on a viewer's username to open their permission editor. You will see a list of all buckets with a dropdown for each.
+In the **Users** panel, each viewer row shows how many buckets they can access and a **Manage access** button. Click it to open the per-bucket editor, where each bucket has a **No Access / Read / Write** control that saves instantly. Use the filter box to find a bucket quickly, or **Grant read to all** / **Revoke all** for bulk changes. Admins implicitly have access to every bucket, so they have no per-bucket editor.
 
-For bulk changes, select multiple buckets and apply a permission level in one action.
+Each user row also shows an **auth-source badge** — **Local**, **SSO** (OIDC), **OAuth**, or **LDAP** — so you can tell at a glance who signs in through your identity provider.
+
+## SSO and externally-provisioned users
+
+Users who sign in via [OIDC, OAuth, or LDAP](/security/oauth-ldap/) appear here automatically on first login, created as **viewers with no bucket access**. You grant their access the same way as any local viewer — with **Manage access**. (When OIDC group→role mapping is enabled, admin-group members instead arrive as admins.)
+
+A username is bound to the auth source that created it: an SSO/OAuth/LDAP login **cannot** sign in as a username that already exists from a different source (for example, the local `admin` account), so an identity provider can't be used to take over a local account.
 
 ## Password Changes
 

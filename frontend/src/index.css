@@ -3051,6 +3051,94 @@ button.btn-danger:disabled { background: var(--bg-surface); }
   margin-left: 12px;
 }
 
+/* ── Auth-source badge (user list) ──────────────────────── */
+.src-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border-radius: 999px;
+  vertical-align: middle;
+  border: 1px solid transparent;
+}
+.src-local { background: var(--bg-secondary); color: var(--text-muted); border-color: var(--border); }
+.src-sso   { background: var(--primary-light); color: var(--primary); border-color: var(--primary-ring); }
+.src-oauth { background: var(--primary-light); color: var(--primary); border-color: var(--primary-ring); }
+.src-ldap  { background: #f5f0ff; color: #6d28d9; border-color: #ddd0fb; }
+[data-theme="dark"] .src-ldap { background: #1e1633; color: #c4b5fd; border-color: #4c1d95; }
+
+/* ── Access pill + row actions ──────────────────────────── */
+.user-row-actions { display: inline-flex; gap: 6px; }
+.access-pill {
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.access-pill:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.access-pill:disabled { cursor: default; opacity: 0.6; }
+.access-pill-open { background: var(--primary-light); color: var(--primary); border-color: var(--primary-ring); }
+
+/* ── Permission editor (polished) ───────────────────────── */
+.perm-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.perm-quick { margin-left: auto; display: inline-flex; gap: 6px; }
+.perm-saved {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--success, #16a34a);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.perm-saved-on { opacity: 1; }
+.perm-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 13px;
+}
+.perm-seg {
+  display: inline-flex;
+  margin-left: 12px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.perm-seg-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: none;
+  border-left: 1px solid var(--border-input);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.perm-seg-btn:first-child { border-left: none; }
+.perm-seg-btn:hover { background: var(--bg-hover); }
+.perm-seg-active { color: #fff; }
+.perm-seg-active.perm-seg-none  { background: var(--text-light); }
+.perm-seg-active.perm-seg-read  { background: var(--primary); }
+.perm-seg-active.perm-seg-write { background: #d97706; }
+
 /* ── Lifecycle Rule Builder ─────────────────────────────── */
 .lc-warning {
   background: var(--danger-bg);

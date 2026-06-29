@@ -13,6 +13,15 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## Unreleased
+
+**OpenID Connect SSO + a real per-bucket access UI** (issue #9)
+
+- **Generic OIDC single sign-on** — works with any compliant provider (Keycloak, Authentik, Okta, Auth0, Microsoft Entra ID, Google, Dex, …). Auto-discovers endpoints, fully validates the ID token (JWKS signature, `iss`/`aud`/`exp`/`azp`, nonce), and protects the flow with state + nonce + PKCE. Only the **username** is synced — new users are viewers with no access until an admin grants it. Confidential or public client. See [SSO setup](/security/oauth-ldap/).
+- **Optional** group→role mapping, verified-email and email-domain restrictions, and RP-initiated single logout — all opt-in.
+- **Per-bucket access management UI** — auth-source badges (Local / SSO / LDAP / OAuth), a bucket-grant count, and a **Manage access** editor (Read / Write / No Access, with search and bulk grant/revoke).
+- **Security:** federated logins (OIDC/OAuth/LDAP) now go through one hardened path that **cannot take over an account owned by a different auth source** — notably the local admin. An `auth_source` is tracked per user.
+
 ## v3.5.0
 
 **Anonymous telemetry schema v2** — richer, still privacy-first

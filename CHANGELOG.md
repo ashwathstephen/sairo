@@ -2,6 +2,26 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Generic OpenID Connect SSO + a real per-bucket access UI (issue #9).
+
+### Added
+
+- **OpenID Connect (OIDC) SSO** — a standards-compliant client for any provider (Keycloak, Authentik, Okta, Auth0, Entra ID, Google, Dex, …). Endpoints are auto-discovered from `<issuer>/.well-known/openid-configuration`; every ID token is fully validated (JWKS signature, `iss`/`aud`/`exp`/`azp`, nonce) and the flow is protected with **state + nonce + PKCE (S256)**. Per issue #9, **only the username is synced** — new users are viewers with no access until an admin grants it. Configured entirely via `OIDC_*` env vars; works with a confidential **or** public (secretless) client. Tested end-to-end against Keycloak, Authentik, and Dex. See [docs/SSO.md](docs/SSO.md).
+- **Optional OIDC group→role mapping** (`OIDC_ADMIN_GROUP` / `OIDC_GROUPS_CLAIM`) — off by default; when enabled, admin-group membership maps to the admin role and re-syncs each login. Matching is exact / path-segment / DN — never a loose substring.
+- **Optional hardening toggles** — `OIDC_REQUIRE_VERIFIED_EMAIL`, `OIDC_ALLOWED_DOMAINS`, and RP-initiated single logout (`OIDC_RP_LOGOUT`).
+- **Per-bucket access management UI** — Users now shows an auth-source badge (Local / SSO / LDAP / OAuth) and a bucket-grant count; "Manage access" opens a Read / Write / No-Access editor with search and bulk grant/revoke. (The backend permission API already existed; this makes it usable.)
+- Friendly login-page error messages for SSO failures.
+
+### Changed
+
+- **`auth_source` is now tracked per user** (with a backfill migration). All federated logins — OIDC, OAuth, and LDAP — go through one hardened sync path.
+
+### Security
+
+- Closed an **account-takeover** vector: a federated (OIDC/OAuth/LDAP) login can no longer sign in as a username already owned by a different auth source — notably the local admin.
+
 ## [3.5.0] - 2026-06-27
 
 Anonymous telemetry schema v2 — richer, still privacy-first.

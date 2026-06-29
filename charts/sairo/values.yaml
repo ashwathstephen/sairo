@@ -83,6 +83,25 @@ oauth:
   defaultRole: "viewer"
   allowedDomains: ""       # Comma-separated: "example.com,corp.com"
 
+# OIDC — generic OpenID Connect SSO (optional).
+# Enabled when issuer + clientId are set. Endpoints are auto-discovered from
+# <issuer>/.well-known/openid-configuration and the ID token is fully validated.
+# Only the username is synced; admins assign roles/bucket permissions.
+# Redirect URI to register with your provider: https://<host>/api/auth/oidc/callback
+oidc:
+  issuer: ""               # e.g. https://login.example.com/realms/main
+  clientId: ""
+  clientSecret: ""
+  providerName: "SSO"      # label on the login button
+  usernameClaim: "preferred_username"
+  scopes: "openid profile email"
+  defaultRole: "viewer"
+  allowedDomains: ""       # optional email-domain allowlist
+  adminGroup: ""           # optional: members of this group become admins (off = username-only)
+  groupsClaim: "groups"    # claim containing the user's groups
+  requireVerifiedEmail: false
+  rpLogout: false          # also end the IdP session on logout (single logout)
+
 # White-labeling (optional)
 branding:
   appName: "Sairo"

@@ -42,7 +42,7 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 - **User Management** — Role-based access control (admin / viewer) with per-bucket permissions
 - **S3-Key Auth** — Optional `AUTH_MODE=s3`: users log in with their own S3 keys and see only the buckets their provider IAM allows — access is delegated entirely to the provider
 - **Two-Factor Auth** — TOTP-based 2FA with QR setup and recovery codes
-- **OAuth & LDAP** — Google, GitHub OAuth and LDAP authentication
+- **SSO — OAuth, OIDC & LDAP** — Google/GitHub OAuth, generic OpenID Connect (Keycloak, Okta, Auth0, Entra ID, Google, Authentik, Dex, …) with auto-discovery + full ID-token validation (PKCE, nonce, JWKS), and LDAP. OIDC syncs the username only; admins assign per-bucket access. **Setup guide: [docs/SSO.md](docs/SSO.md)**
 - **AI-Powered Analysis (MCP)** — Connect Claude, Cursor, or any MCP client to ask natural language questions about your storage. 26 tools for analytics, cost optimization, pipeline health, and more
 - **Petabyte-Scale Performance** — Proven on a live 269 TB / 15.5M-object deployment. Constant-time folder listing at any scale via pre-computed prefix hierarchies, 64MB SQLite page cache, 256MB memory-mapped I/O, async FTS rebuilds
 - **Anonymous Telemetry (opt-out)** — A privacy-first heartbeat reports aggregate counts, instance health, and activation timestamps only (never names, keys, paths, or content). Disable with `TELEMETRY=false`
@@ -122,7 +122,7 @@ Validated read-only against a live production deployment (Leaseweb S3-compatible
 | Upload | Direct browser→S3 multipart, up to 5 TB/object, **flat server memory** |
 | Crawl throughput | 16 parallel prefix workers, 10K batch inserts, adaptive delta crawl |
 
-**Scaling:** Folder navigation is a constant-time index lookup, so it stays instant at any dataset size. See [Benchmarks](https://docs.sairo.dev/reference/benchmarks/) for the full methodology and server-compute microbenchmarks.
+**Scaling:** Folder navigation is a constant-time index lookup, so it stays instant at any dataset size. See [benchmark results](benchmark/results/LATEST-RESULTS.md) for the full methodology and server-compute microbenchmarks.
 
 ## Environment Variables
 
@@ -145,7 +145,7 @@ Validated read-only against a live production deployment (Leaseweb S3-compatible
 | `TELEMETRY` | `true` | Anonymous usage heartbeat (aggregate counts + health only). Set `false` to disable |
 | `TELEMETRY_INTERVAL` | `3600` | Seconds between telemetry heartbeats |
 
-> This is a summary. See the [full environment-variable reference](https://docs.sairo.dev/reference/environment-variables/) for delta-crawl tuning, uploads, LDAP/OAuth, branding, and rate limiting.
+> This is a summary; see **[.env.example](.env.example)** for the full annotated environment-variable reference (delta-crawl tuning, uploads, LDAP/OAuth, branding, rate limiting). For single sign-on (OIDC / OAuth / LDAP) setup with per-provider examples, see **[docs/SSO.md](docs/SSO.md)**.
 
 ## Tech Stack
 

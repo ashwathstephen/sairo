@@ -1,11 +1,96 @@
 ---
-title: "OAuth & LDAP"
-description: "Configuring Google OAuth, GitHub OAuth, and LDAP authentication for Sairo."
+title: "SSO: OAuth, OIDC & LDAP"
+description: "Configuring OpenID Connect (OIDC), Google/GitHub OAuth, and LDAP single sign-on for Sairo."
 ---
 
-Sairo supports external authentication via Google OAuth, GitHub OAuth, and LDAP. Users authenticated through external providers are auto-provisioned on first login.
+Sairo supports external authentication via generic **OpenID Connect (OIDC)**, built-in **Google/GitHub OAuth**, and **LDAP**. Users authenticated through external providers are auto-provisioned on first login.
+
+For most providers, **OIDC is the recommended path** — it works with any compliant identity provider and validates tokens properly.
+
+## OIDC (OpenID Connect)
+
+A standards-compliant OIDC client that works with **any** provider — Keycloak, Authentik, Okta, Auth0, Microsoft Entra ID, Google, Dex, Zitadel, and more. Endpoints are auto-discovered from `<issuer>/.well-known/openid-configuration`, and every ID token is fully validated (JWKS signature, `iss` / `aud` / `exp` / `azp`, nonce). The flow is protected with **state + nonce + PKCE (S256)**, so a confidential *or* public (secretless) client both work.
+
+### The model: identity in, access assigned
+
+OIDC **syncs the username only**. A first-time user is created as a **viewer with no bucket access**; an admin then grants per-bucket Read/Write under **Users → Manage access** (see [User Management](/security/user-management/)). Optional group→role mapping is available but off by default.
+
+### Setup
+
+1. Register a new client/application on your identity provider.
+2. Add the redirect URI: `https://your-domain/api/auth/oidc/callback` (`http://localhost:8000/...` works for local testing).
+3. Set the environment variables:
+
+```yaml
+environment:
+  OIDC_ISSUER: "https://login.example.com/realms/main"
+  OIDC_CLIENT_ID: "sairo"
+  OIDC_CLIENT_SECRET: "your-client-secret"   # omit for a public client
+  OIDC_PROVIDER_NAME: "Company SSO"          # label on the login button
+```
+
+You can point Sairo at an identity provider you already run — just register a **new client** for Sairo on it; your users, passwords, MFA, and SSO sessions are reused.
+
+### Provider examples
+
+**Keycloak**
+
+```yaml
+OIDC_ISSUER: "https://keycloak.example.com/realms/main"
+OIDC_CLIENT_ID: "sairo"
+OIDC_CLIENT_SECRET: "..."
+```
+
+**Okta**
+
+```yaml
+OIDC_ISSUER: "https://your-org.okta.com"
+OIDC_CLIENT_ID: "..."
+OIDC_CLIENT_SECRET: "..."
+```
+
+**Auth0** (no `preferred_username`; group claims are namespaced)
+
+```yaml
+OIDC_ISSUER: "https://your-tenant.us.auth0.com/"
+OIDC_CLIENT_ID: "..."
+OIDC_CLIENT_SECRET: "..."
+OIDC_USERNAME_CLAIM: "nickname"
+```
+
+**Microsoft Entra ID** (groups are object-ID GUIDs)
+
+```yaml
+OIDC_ISSUER: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+OIDC_CLIENT_ID: "..."
+OIDC_CLIENT_SECRET: "..."
+```
+
+**Google** (no username concept; use email)
+
+```yaml
+OIDC_ISSUER: "https://accounts.google.com"
+OIDC_CLIENT_ID: "...apps.googleusercontent.com"
+OIDC_CLIENT_SECRET: "..."
+OIDC_USERNAME_CLAIM: "email"
+OIDC_ALLOWED_DOMAINS: "yourcompany.com"
+```
+
+### Optional: group → role mapping
+
+Off by default (username-only). Set `OIDC_ADMIN_GROUP` (and `OIDC_GROUPS_CLAIM`, default `groups`) to map admin-group membership to the admin role — re-evaluated on every login. Matching is on the whole group value or a delimited component (path segment / DN), never a loose substring, so `sairo-admins` will not match `sairo-admins-readonly`. Plain Google OIDC does not emit groups.
+
+### Optional: single logout
+
+Set `OIDC_RP_LOGOUT: "true"` to also end the session at your identity provider when a user logs out of Sairo.
+
+### Troubleshooting
+
+Sign-in failures land back on the login page with a friendly message and an `?error=` code: `account_conflict` (username already exists with a different sign-in method), `oidc_invalid_token`, `oidc_state_mismatch` / `oidc_nonce_mismatch` (session expired / cookies blocked), `oidc_no_username` (set `OIDC_USERNAME_CLAIM`), `email_not_verified`, `domain_not_allowed`.
 
 ## Google OAuth
+
+The built-in Google integration below is a simpler, Google-specific OAuth flow. For new deployments, prefer the generic **OIDC** path above (it adds full ID-token validation and works with any provider).
 
 Google OAuth uses the OpenID Connect authorization code flow.
 
