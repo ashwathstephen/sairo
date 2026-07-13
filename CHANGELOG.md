@@ -2,6 +2,16 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.6.2] - 2026-07-02
+
+White-label branding is now complete and seamless across every surface.
+
+### Fixed
+
+- **The app name follows `APP_NAME` everywhere.** Previously several surfaces showed "Sairo" regardless of `APP_NAME`: the browser tab title, the `og:title` used in link/social previews (e.g. Slack unfurls), the PWA manifest name, the first-run welcome modal, the update banner, and the public share-download page. The title/og/description/theme-color and the manifest are now injected **server-side**, so a branded deployment is correct the instant the page loads — no flash from "Sairo" while the client fetches branding.
+- **`APP_LOGO` is now rendered** (login screen, app headers, and the share page) — it was previously fetched but never displayed.
+- **`PRIMARY_COLOR` is now applied** to the UI accent (primary/hover/focus-ring and the tab theme-color) — previously read but never used.
+
 ## [3.6.1] - 2026-07-02
 
 Fixes for the activation metric and white-label branding.

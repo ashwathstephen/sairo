@@ -173,6 +173,20 @@ function MainApp() {
     if (branding.app_name) document.title = branding.app_name;
   }, [branding.app_name]);
 
+  // Apply a white-label PRIMARY_COLOR to the accent CSS variables (main accent,
+  // hover, focus ring) so a branded deployment is recoloured throughout the UI.
+  useEffect(() => {
+    const hex = branding.primary_color;
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+    if (!m) return;
+    const [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16));
+    const dark = (v, f) => Math.max(0, Math.round(v * (1 - f)));
+    const root = document.documentElement.style;
+    root.setProperty("--primary", `#${m[1]}`);
+    root.setProperty("--primary-hover", `rgb(${dark(r, .12)}, ${dark(g, .12)}, ${dark(b, .12)})`);
+    root.setProperty("--primary-ring", `rgba(${r}, ${g}, ${b}, 0.3)`);
+  }, [branding.primary_color]);
+
   // Listen for session-expired events from api.js (replaces hard page reload)
   useEffect(() => {
     const handler = () => {
@@ -604,6 +618,14 @@ function MainApp() {
   }
 
   const appName = branding.app_name || "Sairo";
+  // White-label logo: use APP_LOGO when set, else the default mark.
+  const logoMark = branding.app_logo
+    ? <img src={branding.app_logo} alt={appName} style={{ height: 22, width: "auto", display: "block" }} />
+    : (
+      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="22" height="22">
+        <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
+      </svg>
+    );
 
   const userBadge = (
     <div className="user-badge">
@@ -621,9 +643,7 @@ function MainApp() {
         <header>
           <div className="header-left">
             <span className="header-logo-mark">
-              <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="22" height="22">
-                <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
-              </svg>
+              {logoMark}
             </span>
             <h1>{appName}</h1>
             <span className="bucket-name">Object Storage</span>
@@ -647,7 +667,7 @@ function MainApp() {
             </span>
             <div className="ub-body">
               <div className="ub-head">
-                Sairo <strong>v{updateInfo.latest}</strong> is here <span className="ub-cur">· you're on v{updateInfo.current}</span>
+                {appName} <strong>v{updateInfo.latest}</strong> is here <span className="ub-cur">· you're on v{updateInfo.current}</span>
               </div>
               <div className="ub-chips">
                 {UPDATE_HIGHLIGHTS.map((h) => <span className="ub-chip" key={h}>{h}</span>)}
@@ -672,7 +692,7 @@ function MainApp() {
         <BucketList onSelect={navigateBucket} role={user.role} onDashboard={setDashboardBucket} />
         {showAuditLog && <AuditLog onClose={() => setShowAuditLog(false)} />}
         {dashboardBucket && <StorageDashboard bucket={dashboardBucket} onClose={() => setDashboardBucket(null)} onNavigate={(pfx) => { setDashboardBucket(null); setHash(dashboardBucket, pfx); }} />}
-        {showWelcome && <Welcome onDismiss={() => setShowWelcome(false)} />}
+        {showWelcome && <Welcome onDismiss={() => setShowWelcome(false)} appName={appName} />}
         {showTokenManager && <TokenManager onClose={() => setShowTokenManager(false)} />}
         {showLicense && <LicenseManager onClose={() => setShowLicense(false)} />}
         {showUserManager && <UserManager onClose={() => setShowUserManager(false)} currentUser={user} />}
@@ -696,9 +716,7 @@ function MainApp() {
       <header>
         <div className="header-left">
           <span className="header-logo-mark" style={{ cursor: "pointer" }} onClick={goHome}>
-            <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="20" height="20">
-              <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
-            </svg>
+            {logoMark}
           </span>
           <h1 style={{ cursor: "pointer" }} onClick={goHome}>{appName}</h1>
           <span className="bucket-name">{bucket}</span>

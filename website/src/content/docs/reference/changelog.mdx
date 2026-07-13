@@ -13,6 +13,14 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.6.2
+
+**White-label branding** is now complete and seamless across every surface
+
+- The app name follows `APP_NAME` **everywhere** — browser tab title, `og:title` for link/social previews, the PWA manifest, the welcome modal, the update banner, and the public share page (previously several showed "Sairo"). Title/OG/manifest are injected **server-side**, so there's no flash from "Sairo" on load.
+- **`APP_LOGO` is now rendered** (login, headers, share page) — previously fetched but unused.
+- **`PRIMARY_COLOR` is now applied** to the UI accent + tab theme-color — previously read but unused.
+
 ## v3.6.1
 
 **Fixes** for the activation metric and white-label branding
