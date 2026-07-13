@@ -294,7 +294,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.6.0"
+SAIRO_VERSION = "3.6.1"
 
 
 def _version_gt(a: str, b: str) -> bool:
@@ -2502,17 +2502,24 @@ def _record_milestone_once(key: str):
         pass
 
 
-def _record_first_search(returned_results: bool):
-    """Activation event: first search *served* (regardless of hit count). Also records whether
-    that first search returned any results — a free diagnostic for the index-not-ready race
-    (searched-but-zero-results before the crawl finished)."""
-    if "first_search_at" in _recorded_milestones:
+def _record_first_search():
+    """Activation event: the user reached search. Recorded on the search REQUEST — before the
+    index-ready gate — so it is symmetric with first_dashboard_open_at (which records on view
+    open). Recording it only on a served 200 response systematically under-counted fresh
+    installs whose early searches 503 during the initial crawl, manufacturing a false 0%."""
+    _record_milestone_once("first_search_at")
+
+
+def _record_search_returned(returned_results: bool):
+    """Diagnostic paired with first_search_at: did the first *served* search return any results
+    (distinguishes a genuine no-match from the index-not-ready race). Set once, on the first
+    search that actually reaches the index."""
+    if "first_search_returned_results" in _recorded_milestones:
         return
     try:
-        if not _meta_get("first_search_at"):
-            _meta_set("first_search_at", _iso_now())
+        if _meta_get("first_search_returned_results") is None:
             _meta_set("first_search_returned_results", "1" if returned_results else "0")
-        _recorded_milestones.add("first_search_at")
+        _recorded_milestones.add("first_search_returned_results")
     except Exception:
         pass
 
@@ -4771,11 +4778,14 @@ def refresh_prefix(bucket: str, prefix: str = "", user: dict = Depends(require_a
 @app.get("/api/buckets/{bucket}/search")
 @limiter.limit("60/minute")
 def search_objects(bucket: str, request: Request, q: str = Query(..., min_length=1), prefix: str = "", limit: int = 200, user: dict = Depends(get_current_user)):
+    _record_first_search()  # activation: reached search — record on the request (symmetric with
+                            # first_dashboard_open_at), BEFORE the index-ready gate, so a search
+                            # issued during the initial crawl still counts.
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready — crawl in progress")
     with _get_db(bucket) as db:
         rows = _search_fts(db, q, prefix, limit)
-    _record_first_search(len(rows) > 0)  # activation milestone (fail-safe, idempotent)
+    _record_search_returned(len(rows) > 0)  # diagnostic, on the first served search
     return {"results": [dict(r) for r in rows], "count": len(rows), "query": q}
 
 

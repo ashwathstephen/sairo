@@ -167,6 +167,12 @@ function MainApp() {
     getBranding().then(setBranding).catch(() => {});
   }, []);
 
+  // Keep the browser tab title in sync with the (white-label) app name, so a
+  // deployment that sets APP_NAME doesn't still read "Sairo" in the tab.
+  useEffect(() => {
+    if (branding.app_name) document.title = branding.app_name;
+  }, [branding.app_name]);
+
   // Listen for session-expired events from api.js (replaces hard page reload)
   useEffect(() => {
     const handler = () => {
