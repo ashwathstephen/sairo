@@ -2,6 +2,12 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.6.3] - 2026-07-13
+
+### Fixed
+
+- **The SPA shell is no longer heuristically cached by browsers.** `index.html` and `/manifest.json` are now served with `Cache-Control: no-cache, must-revalidate`, so a new deploy is picked up on the next load instead of users being stuck on a stale cached bundle (e.g. old branding/title) until a manual hard-refresh. Hashed `/assets/*` remain long-cacheable.
+
 ## [3.6.2] - 2026-07-02
 
 White-label branding is now complete and seamless across every surface.
