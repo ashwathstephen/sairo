@@ -13,6 +13,12 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.6.3
+
+**Fixed** — the SPA shell is no longer heuristically cached
+
+- `index.html` and `/manifest.json` are served with `Cache-Control: no-cache, must-revalidate`, so a new deploy is picked up on the next page load rather than users being stuck on a stale cached bundle (old branding/title) until a manual hard-refresh. Hashed `/assets/*` stay long-cacheable.
+
 ## v3.6.2
 
 **White-label branding** is now complete and seamless across every surface

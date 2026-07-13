@@ -294,7 +294,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.6.2"
+SAIRO_VERSION = "3.6.3"
 
 
 def _version_gt(a: str, b: str) -> bool:
@@ -6934,6 +6934,12 @@ if os.path.isdir(static_dir):
                 _spa_cache["html"] = None
         return _spa_cache["html"]
 
+    # The SPA shell + manifest must revalidate on every load, or browsers
+    # heuristically cache them and users stay on a stale bundle after a deploy
+    # (e.g. old branding/title until a manual hard-refresh). Hashed /assets/*
+    # remain long-cacheable — only the entry documents are no-cache.
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
     @app.get("/manifest.json")
     def serve_manifest():
         try:
@@ -6941,7 +6947,7 @@ if os.path.isdir(static_dir):
                 m = json.load(f)
         except Exception:
             m = {"start_url": "/", "display": "standalone"}
-        return JSONResponse(_branded_manifest(m, *_brand_name_color()))
+        return JSONResponse(_branded_manifest(m, *_brand_name_color()), headers=_NO_CACHE)
 
     @app.get("/{path:path}")
     def serve_spa(path: str):
@@ -6950,8 +6956,9 @@ if os.path.isdir(static_dir):
             raise HTTPException(403, "Forbidden")
         if os.path.isfile(file_path):
             return FileResponse(file_path)
-        # SPA entry: serve index.html with the app name/colour baked in.
+        # SPA entry: serve index.html with the app name/colour baked in, and
+        # never let the browser serve a stale shell after a deploy.
         doc = _spa_index_html()
         if doc is not None:
-            return HTMLResponse(doc)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+            return HTMLResponse(doc, headers=_NO_CACHE)
+        return FileResponse(os.path.join(static_dir, "index.html"), headers=_NO_CACHE)
