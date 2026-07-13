@@ -1,6 +1,6 @@
 {
   "name": "sairo",
-  "version": "3.6.0",
+  "version": "3.6.1",
   "description": "S3-compatible object storage browser with search, versioning, and analytics",
   "private": true,
   "type": "module",

@@ -2,6 +2,15 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [3.6.1] - 2026-07-02
+
+Fixes for the activation metric and white-label branding.
+
+### Fixed
+
+- **Activation instrumentation: `first_search_at` was under-counted.** It recorded only *after* the search endpoint's index-ready 503 gate, while its paired milestone `first_dashboard_open_at` recorded on handler entry — so searches issued during a fresh instance's initial crawl 503'd and never registered, skewing the activation funnel toward a false zero on exactly the new-install cohort. It now records on the search *request* (symmetric with dashboard-open); `first_search_returned_results` still records on the first served search.
+- **Browser tab now follows `APP_NAME`.** White-label deployments that set `APP_NAME` showed the default "Sairo" in the browser tab title regardless; the document title now tracks the configured app name (falling back to "Sairo").
+
 ## [3.6.0] - 2026-06-29
 
 Generic OpenID Connect SSO + a real per-bucket access UI (issue #9).

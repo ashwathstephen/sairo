@@ -646,6 +646,27 @@ class TestAuthSource:
         assert "bucket_count" in admin and isinstance(admin["bucket_count"], int)
 
 
+class TestActivationMilestones:
+    """3.6.1 fix: first_search_at must record on the search REQUEST — symmetric with
+    first_dashboard_open_at — even when the index isn't ready and the search 503s. The old
+    placement (after the 503 gate) under-counted fresh installs and manufactured a false 0%."""
+
+    def test_first_search_records_even_when_index_not_ready(self, app, client, admin_cookies):
+        m = _main_module()
+        # reset any prior recording so we observe this request's effect
+        m._recorded_milestones.discard("first_search_at")
+        with m._get_users_db() as db:
+            db.execute("DELETE FROM instance_meta WHERE key='first_search_at'")
+            db.commit()
+        # a bucket with no index → the search 503s (index not ready) ...
+        resp = client.get("/api/buckets/unindexed-bucket/search",
+                          params={"q": "hello"}, cookies=admin_cookies)
+        assert resp.status_code == 503
+        # ... but the activation milestone must still have recorded (it fires before the gate)
+        assert m._meta_get("first_search_at") is not None, \
+            "first_search_at must record even when the search 503s during indexing"
+
+
 # ── Health Check ─────────────────────────────────────────
 
 class TestHealth:
