@@ -667,6 +667,52 @@ class TestActivationMilestones:
             "first_search_at must record even when the search 503s during indexing"
 
 
+class TestBrandingInjection:
+    """3.6.2 white-label: APP_NAME / PRIMARY_COLOR are injected into the served
+    HTML + manifest server-side, so a branded deployment never leaks "Sairo"
+    (tab title, og:title for link previews, PWA name) and shows no load flash."""
+
+    SAMPLE_HTML = (
+        '<title>Sairo</title>\n'
+        '<meta property="og:title" content="Sairo" />\n'
+        '<meta name="description" content="Sairo — S3-compatible object storage browser" />\n'
+        '<meta name="theme-color" content="#3b82f6" />'
+    )
+
+    def test_html_fields_follow_app_name_and_color(self):
+        m = _main_module()
+        out = m._apply_branding_html(self.SAMPLE_HTML, "Objex", "#e11d48")
+        assert "<title>Objex</title>" in out
+        assert 'property="og:title" content="Objex"' in out            # link/social previews
+        assert 'content="Objex — S3-compatible' in out                 # description
+        assert 'name="theme-color" content="#e11d48"' in out           # tab/PWA colour
+        assert "Sairo" not in out                                      # no leak anywhere
+
+    def test_html_default_keeps_sairo(self):
+        m = _main_module()
+        out = m._apply_branding_html(self.SAMPLE_HTML, "Sairo", "#3b82f6")
+        assert "<title>Sairo</title>" in out                           # vanilla install unchanged
+
+    def test_html_escapes_app_name(self):
+        m = _main_module()
+        out = m._apply_branding_html("<title>Sairo</title>", "A&B<x>", "#000")
+        assert "A&amp;B&lt;x&gt;" in out and "<title>A&B<x></title>" not in out
+
+    def test_manifest_branded(self):
+        m = _main_module()
+        out = m._branded_manifest(
+            {"name": "Sairo", "short_name": "Sairo", "theme_color": "#3b82f6", "start_url": "/"},
+            "Objex", "#e11d48")
+        assert out["name"] == "Objex" and out["short_name"] == "Objex"
+        assert out["theme_color"] == "#e11d48"
+        assert out["start_url"] == "/"   # untouched fields preserved
+
+    def test_manifest_default_keeps_sairo(self):
+        m = _main_module()
+        out = m._branded_manifest({"name": "Sairo", "short_name": "Sairo"}, "Sairo", "#3b82f6")
+        assert out["name"] == "Sairo"
+
+
 # ── Health Check ─────────────────────────────────────────
 
 class TestHealth:

@@ -166,13 +166,17 @@ export default function Login({ onLogin, branding = {} }) {
         <form className="login-form" onSubmit={handleSubmit}>
           <div className="login-branding">
             <div className="login-logo-mark">
-              <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="32" height="32">
-                <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/>
-                <path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/>
-                <path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/>
-                <line x1="12" y1="10" x2="12" y2="30"/>
-                <line x1="28" y1="10" x2="28" y2="30"/>
-              </svg>
+              {branding.app_logo ? (
+                <img src={branding.app_logo} alt={appName} style={{ height: 40, width: "auto" }} />
+              ) : (
+                <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="32" height="32">
+                  <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/>
+                  <path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/>
+                  <path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/>
+                  <line x1="12" y1="10" x2="12" y2="30"/>
+                  <line x1="28" y1="10" x2="28" y2="30"/>
+                </svg>
+              )}
             </div>
             <h1>{appName}</h1>
             <p className="login-subtitle">Object storage, <span className="login-subtitle-fade">beautifully browsed.</span></p>

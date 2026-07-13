@@ -25,7 +25,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Depends, Cookie, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse, JSONResponse, HTMLResponse
 import pyotp
 from passlib.hash import bcrypt
 from pydantic import BaseModel
@@ -294,7 +294,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.6.1"
+SAIRO_VERSION = "3.6.2"
 
 
 def _version_gt(a: str, b: str) -> bool:
@@ -6889,9 +6889,59 @@ def bucket_info_compat(user: dict = Depends(get_current_user)):
 
 
 # ── Serve React SPA ─────────────────────────────────────────────────────────
+# ── White-label branding injection (pure, unit-testable) ─────────────────────
+
+def _brand_name_color():
+    return (os.environ.get("APP_NAME", "Sairo"),
+            os.environ.get("PRIMARY_COLOR", "#3b82f6"))
+
+def _apply_branding_html(doc: str, name: str, color: str) -> str:
+    """Rewrite the brandable fields of index.html — tab title, og:title,
+    description, theme-color — from APP_NAME / PRIMARY_COLOR. Done server-side so
+    a white-label deployment is correct the instant the page loads (no client
+    flash from "Sairo", and correct og:title for link/social previews)."""
+    import re, html as _html
+    n = _html.escape(name, quote=True)
+    c = _html.escape(color, quote=True)
+    doc = re.sub(r"<title>.*?</title>", f"<title>{n}</title>", doc, count=1, flags=re.S)
+    doc = re.sub(r'(<meta property="og:title" content=")[^"]*(")', rf"\g<1>{n}\g<2>", doc)
+    doc = re.sub(r'(<meta name="description" content=")Sairo\b', rf"\g<1>{n}", doc)
+    doc = re.sub(r'(<meta name="theme-color" content=")[^"]*(")', rf"\g<1>{c}\g<2>", doc)
+    return doc
+
+def _branded_manifest(m: dict, name: str, color: str) -> dict:
+    """PWA manifest branded from APP_NAME / PRIMARY_COLOR."""
+    m = dict(m)
+    m["name"] = name
+    m["short_name"] = name
+    if color:
+        m["theme_color"] = color
+    return m
+
+
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+
+    _spa_cache: dict = {}
+
+    def _spa_index_html():
+        if "html" not in _spa_cache:
+            try:
+                with open(os.path.join(static_dir, "index.html"), encoding="utf-8") as f:
+                    _spa_cache["html"] = _apply_branding_html(f.read(), *_brand_name_color())
+            except Exception:
+                _spa_cache["html"] = None
+        return _spa_cache["html"]
+
+    @app.get("/manifest.json")
+    def serve_manifest():
+        try:
+            with open(os.path.join(static_dir, "manifest.json"), encoding="utf-8") as f:
+                m = json.load(f)
+        except Exception:
+            m = {"start_url": "/", "display": "standalone"}
+        return JSONResponse(_branded_manifest(m, *_brand_name_color()))
 
     @app.get("/{path:path}")
     def serve_spa(path: str):
@@ -6900,4 +6950,8 @@ if os.path.isdir(static_dir):
             raise HTTPException(403, "Forbidden")
         if os.path.isfile(file_path):
             return FileResponse(file_path)
+        # SPA entry: serve index.html with the app name/colour baked in.
+        doc = _spa_index_html()
+        if doc is not None:
+            return HTMLResponse(doc)
         return FileResponse(os.path.join(static_dir, "index.html"))
