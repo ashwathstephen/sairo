@@ -2,31 +2,6 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
-## [3.6.3] - 2026-07-13
-
-### Fixed
-
-- **The SPA shell is no longer heuristically cached by browsers.** `index.html` and `/manifest.json` are now served with `Cache-Control: no-cache, must-revalidate`, so a new deploy is picked up on the next load instead of users being stuck on a stale cached bundle (e.g. old branding/title) until a manual hard-refresh. Hashed `/assets/*` remain long-cacheable.
-
-## [3.6.2] - 2026-07-02
-
-White-label branding is now complete and seamless across every surface.
-
-### Fixed
-
-- **The app name follows `APP_NAME` everywhere.** Previously several surfaces showed "Sairo" regardless of `APP_NAME`: the browser tab title, the `og:title` used in link/social previews (e.g. Slack unfurls), the PWA manifest name, the first-run welcome modal, the update banner, and the public share-download page. The title/og/description/theme-color and the manifest are now injected **server-side**, so a branded deployment is correct the instant the page loads — no flash from "Sairo" while the client fetches branding.
-- **`APP_LOGO` is now rendered** (login screen, app headers, and the share page) — it was previously fetched but never displayed.
-- **`PRIMARY_COLOR` is now applied** to the UI accent (primary/hover/focus-ring and the tab theme-color) — previously read but never used.
-
-## [3.6.1] - 2026-07-02
-
-Fixes for the activation metric and white-label branding.
-
-### Fixed
-
-- **Activation instrumentation: `first_search_at` was under-counted.** It recorded only *after* the search endpoint's index-ready 503 gate, while its paired milestone `first_dashboard_open_at` recorded on handler entry — so searches issued during a fresh instance's initial crawl 503'd and never registered, skewing the activation funnel toward a false zero on exactly the new-install cohort. It now records on the search *request* (symmetric with dashboard-open); `first_search_returned_results` still records on the first served search.
-- **Browser tab now follows `APP_NAME`.** White-label deployments that set `APP_NAME` showed the default "Sairo" in the browser tab title regardless; the document title now tracks the configured app name (falling back to "Sairo").
-
 ## [3.6.0] - 2026-06-29
 
 Generic OpenID Connect SSO + a real per-bucket access UI (issue #9).

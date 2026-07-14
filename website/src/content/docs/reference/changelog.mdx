@@ -13,27 +13,6 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
-## v3.6.3
-
-**Fixed** — the SPA shell is no longer heuristically cached
-
-- `index.html` and `/manifest.json` are served with `Cache-Control: no-cache, must-revalidate`, so a new deploy is picked up on the next page load rather than users being stuck on a stale cached bundle (old branding/title) until a manual hard-refresh. Hashed `/assets/*` stay long-cacheable.
-
-## v3.6.2
-
-**White-label branding** is now complete and seamless across every surface
-
-- The app name follows `APP_NAME` **everywhere** — browser tab title, `og:title` for link/social previews, the PWA manifest, the welcome modal, the update banner, and the public share page (previously several showed "Sairo"). Title/OG/manifest are injected **server-side**, so there's no flash from "Sairo" on load.
-- **`APP_LOGO` is now rendered** (login, headers, share page) — previously fetched but unused.
-- **`PRIMARY_COLOR` is now applied** to the UI accent + tab theme-color — previously read but unused.
-
-## v3.6.1
-
-**Fixes** for the activation metric and white-label branding
-
-- **`first_search_at` was under-counted** — it recorded only after the search endpoint's index-ready 503 gate, while its paired `first_dashboard_open_at` recorded on entry, so searches during a fresh instance's initial crawl never registered (false-zero activation on new installs). Now records on the search request, symmetric with dashboard-open.
-- **Browser tab title now follows `APP_NAME`** — white-label deployments no longer show "Sairo" in the tab regardless of the configured app name.
-
 ## v3.6.0
 
 **OpenID Connect SSO + a real per-bucket access UI** (issue #9)
