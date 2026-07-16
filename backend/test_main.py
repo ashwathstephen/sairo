@@ -18,6 +18,7 @@ from unittest.mock import patch, MagicMock
 
 # Set env vars before importing the app
 os.environ.setdefault("S3_ENDPOINT", "http://localhost:9000")
+os.environ["S3_PUBLIC_ENDPOINT"] = "https://public-s3.example.test"
 os.environ.setdefault("S3_ACCESS_KEY", "minioadmin")
 os.environ.setdefault("S3_SECRET_KEY", "minioadmin")
 os.environ.setdefault("S3_REGION", "us-east-1")
@@ -688,6 +689,17 @@ class TestSecurityHeaders:
         assert "default-src 'self'" in csp
         assert "script-src 'self'" in csp
 
+    def test_csp_uses_public_s3_endpoint(self, client):
+        """Direct browser transfers must be allowed to reach the public S3 origin."""
+        m = _main_module()
+        resp = client.get("/healthz")
+        csp = resp.headers["content-security-policy"]
+        from urllib.parse import urlparse
+        public = urlparse(m.S3_PUBLIC_ENDPOINT)
+        origin = f"{public.scheme}://{public.netloc}"
+        assert origin in csp
+        assert f"{public.scheme}://*.{public.netloc}" in csp
+
     def test_x_content_type_options(self, client):
         """All responses should include X-Content-Type-Options: nosniff."""
         resp = client.get("/healthz")
@@ -708,6 +720,139 @@ class TestSecurityHeaders:
         resp = client.get("/api/auth/me", cookies=admin_cookies)
         assert "content-security-policy" in resp.headers
         assert resp.headers.get("x-content-type-options") == "nosniff"
+
+
+# ── Public S3 Endpoint / Presigning ─────────────────────
+
+class TestPublicS3Endpoint:
+    INTERNAL = "http://internal-s3.storage.svc.cluster.local:9000"
+    PUBLIC = "https://s3.example.test"
+
+    def _manager(self, m, public_endpoint):
+        manager = m.S3ClientManager(public_endpoint)
+        manager.register(
+            "default", self.INTERNAL, "server-ak", "server-sk",
+            region="us-east-1", path_style=True,
+        )
+        return manager
+
+    def test_presign_falls_back_to_internal_endpoint(self, app):
+        m = _main_module()
+        manager = self._manager(m, "")
+        from botocore.session import Session
+        session = Session()
+        with patch.object(m.boto3, "client", side_effect=session.create_client):
+            client = manager.get_presign_client("default")
+            url = client.generate_presigned_url(
+                "get_object", Params={"Bucket": "test-bucket", "Key": "folder/file.txt"})
+        assert url.startswith(f"{self.INTERNAL}/test-bucket/folder/file.txt?")
+
+    def test_public_presign_keeps_internal_operations_separate_and_path_style(self, app):
+        m = _main_module()
+        manager = self._manager(m, self.PUBLIC)
+        from botocore.session import Session
+        session = Session()
+        with patch.object(m.boto3, "client", side_effect=session.create_client):
+            internal = manager.get_client("default")
+            presign = manager.get_presign_client("default")
+
+            assert internal.meta.endpoint_url == self.INTERNAL
+            assert presign.meta.endpoint_url == self.PUBLIC
+            assert internal.meta.region_name == presign.meta.region_name == "us-east-1"
+            assert internal.meta.config.signature_version == presign.meta.config.signature_version == "s3v4"
+            assert presign.meta.config.s3["addressing_style"] == "path"
+            from botocore.stub import Stubber
+            with Stubber(internal) as stubber:
+                stubber.add_response("list_buckets", {"Buckets": []})
+                assert internal.list_buckets() == {"Buckets": []}
+            url = presign.generate_presigned_url(
+                "put_object", Params={"Bucket": "test-bucket", "Key": "upload.bin"})
+        assert url.startswith(f"{self.PUBLIC}/test-bucket/upload.bin?")
+
+    def test_s3_auth_presign_uses_current_user_credentials(self, app):
+        m = _main_module()
+        created = []
+
+        def fake_client(service, **kwargs):
+            created.append(kwargs)
+            return MagicMock()
+
+        manager = self._manager(m, self.PUBLIC)
+        token = m._user_creds_ctx.set({"ak": "user-ak", "sk": "user-sk"})
+        try:
+            with patch.object(m.boto3, "client", side_effect=fake_client):
+                manager.get_client("default")
+                manager.get_presign_client("default")
+        finally:
+            m._user_creds_ctx.reset(token)
+
+        assert [call["endpoint_url"] for call in created] == [self.INTERNAL, self.PUBLIC]
+        assert all(call["aws_access_key_id"] == "user-ak" for call in created)
+        assert all(call["aws_secret_access_key"] == "user-sk" for call in created)
+
+    def test_browser_download_upload_and_multipart_use_presign_client(
+            self, client, admin_cookies, app):
+        m = _main_module()
+        presign = MagicMock()
+
+        def signed_url(operation, **kwargs):
+            return f"{self.PUBLIC}/{operation}"
+
+        presign.generate_presigned_url.side_effect = signed_url
+        internal = MagicMock()
+        internal.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+        with patch.object(m._s3_manager, "get_presign_client", return_value=presign), \
+             patch.object(m._s3_manager, "get_client", return_value=internal):
+            download = client.get(
+                "/api/buckets/test-bucket/download?key=file.txt",
+                cookies=admin_cookies, follow_redirects=False)
+            regular = client.get(
+                "/api/buckets/test-bucket/presigned-url?key=file.txt",
+                cookies=admin_cookies)
+            version = client.get(
+                "/api/buckets/test-bucket/version-presigned-url"
+                "?key=file.txt&version_id=v1",
+                cookies=admin_cookies)
+            upload = client.post(
+                "/api/buckets/test-bucket/presigned-upload",
+                json={"keys": ["upload.txt"]}, cookies=admin_cookies)
+            initiate = client.post(
+                "/api/buckets/test-bucket/multipart/initiate",
+                json={"key": "large.bin"}, cookies=admin_cookies)
+            multipart = client.post(
+                "/api/buckets/test-bucket/multipart/sign",
+                json={"key": "large.bin", "upload_id": "upload-1", "part_numbers": [1, 2]},
+                cookies=admin_cookies)
+
+        assert download.headers["location"] == f"{self.PUBLIC}/get_object"
+        assert regular.json()["url"] == f"{self.PUBLIC}/get_object"
+        assert version.json()["url"] == f"{self.PUBLIC}/get_object"
+        assert upload.json()["urls"][0]["url"] == f"{self.PUBLIC}/put_object"
+        assert initiate.json()["upload_id"] == "upload-1"
+        internal.create_multipart_upload.assert_called_once_with(
+            Bucket="test-bucket", Key="large.bin")
+        assert all(item["url"] == f"{self.PUBLIC}/upload_part"
+                   for item in multipart.json()["urls"])
+        operations = [call.args[0] for call in presign.generate_presigned_url.call_args_list]
+        assert operations == ["get_object", "get_object", "get_object", "put_object",
+                              "upload_part", "upload_part"]
+
+    def test_share_link_uses_presign_client(self, client, admin_cookies, app):
+        m = _main_module()
+        created = client.post(
+            "/api/share-links",
+            json={"bucket": "test-bucket", "key": "shared.txt", "expires_hours": 1},
+            cookies=admin_cookies,
+        )
+        token = created.json()["token"]
+        presign = MagicMock()
+        presign.generate_presigned_url.return_value = f"{self.PUBLIC}/shared.txt"
+        with patch.object(m._s3_manager, "get_presign_client", return_value=presign):
+            resolved = client.get(f"/api/share/{token}")
+
+        assert resolved.status_code == 200
+        assert resolved.json()["url"] == f"{self.PUBLIC}/shared.txt"
+        assert presign.generate_presigned_url.call_args.args[0] == "get_object"
 
 
 # ── 2FA Encryption ───────────────────────────────────────

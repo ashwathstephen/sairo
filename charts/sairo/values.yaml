@@ -37,7 +37,8 @@ persistence:
 
 # S3 Configuration (required)
 s3:
-  endpoint: ""         # e.g., https://s3.us-east-1.amazonaws.com
+  endpoint: ""          # Internal/backend endpoint, e.g. http://minio.storage.svc:9000
+  publicEndpoint: ""    # Optional browser-facing endpoint for presigned URLs; defaults to endpoint
   region: ""
   accessKey: ""
   secretKey: ""

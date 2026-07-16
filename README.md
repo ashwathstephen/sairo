@@ -57,6 +57,7 @@ Works with **AWS S3**, **MinIO**, **Ceph**, **Wasabi**, **Cloudflare R2**, **Bac
 ```bash
 docker run -d --name sairo -p 8000:8000 \
   -e S3_ENDPOINT=https://your-s3-endpoint.com \
+  -e S3_PUBLIC_ENDPOINT=https://your-browser-accessible-s3-endpoint.com \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e ADMIN_PASS=choose-a-strong-password \
@@ -128,7 +129,8 @@ Validated read-only against a live production deployment (Leaseweb S3-compatible
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `S3_ENDPOINT` | **(required)** | S3-compatible endpoint URL |
+| `S3_ENDPOINT` | **(required)** | Internal S3-compatible endpoint used by the Sairo backend |
+| `S3_PUBLIC_ENDPOINT` | `S3_ENDPOINT` | Optional browser-accessible endpoint used only to generate presigned upload/download URLs |
 | `S3_ACCESS_KEY` | (required) | S3 access key |
 | `S3_SECRET_KEY` | (required) | S3 secret key |
 | `S3_REGION` | _(empty)_ | S3 region (if required by provider) |

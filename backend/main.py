@@ -80,8 +80,8 @@ def _csp_connect_origins():
     from urllib.parse import urlparse
     origins = set()
     try:
-        for info in list(_s3_manager._endpoints.values()):
-            p = urlparse(info.get("endpoint_url") or "")
+        for endpoint_id in list(_s3_manager._endpoints):
+            p = urlparse(_s3_manager.get_browser_endpoint_url(endpoint_id) or "")
             if p.scheme and p.netloc:
                 origins.add(f"{p.scheme}://{p.netloc}")
                 origins.add(f"{p.scheme}://*.{p.netloc}")
@@ -317,6 +317,7 @@ S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 if not S3_ENDPOINT:
     log.error("S3_ENDPOINT environment variable is required")
     raise SystemExit("S3_ENDPOINT environment variable is required")
+S3_PUBLIC_ENDPOINT = os.environ.get("S3_PUBLIC_ENDPOINT", "").strip() or S3_ENDPOINT
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 DB_DIR = os.environ.get("DB_DIR", "/data")
@@ -394,12 +395,15 @@ _S3_CONFIG = Config(
 # ── Multi-Endpoint S3 Client Manager ──────────────────────────────────────
 
 class S3ClientManager:
-    """Thread-safe cache of boto3 S3 clients keyed by endpoint ID."""
-    def __init__(self):
+    """Thread-safe cache of internal and browser-facing S3 clients."""
+    def __init__(self, default_public_endpoint_url: str = ""):
         self._clients: dict = {}
+        self._presign_clients: dict = {}
         self._lock = threading.Lock()
         self._endpoints: dict = {}  # endpoint_id -> {endpoint_url, access_key, secret_key, region, path_style}
         self._user_clients: dict = {}  # (endpoint_id, access_key_hash) -> client (AUTH_MODE=s3, per-user creds)
+        self._user_presign_clients: dict = {}
+        self._default_public_endpoint_url = default_public_endpoint_url
 
     def register(self, endpoint_id: str, endpoint_url: str, access_key: str, secret_key: str,
                  region: str = "", path_style: bool = False):
@@ -409,15 +413,19 @@ class S3ClientManager:
                 "secret_key": secret_key, "region": region, "path_style": path_style,
             }
             self._clients.pop(endpoint_id, None)  # Invalidate cached client
+            self._presign_clients.pop(endpoint_id, None)
             for k in [k for k in self._user_clients if k[0] == endpoint_id]:
                 self._user_clients.pop(k, None)
+            for k in [k for k in self._user_presign_clients if k[0] == endpoint_id]:
+                self._user_presign_clients.pop(k, None)
 
-    def _build_client(self, info: dict, access_key: str, secret_key: str):
+    def _build_client(self, info: dict, access_key: str, secret_key: str,
+                      endpoint_url: str = ""):
         cfg = _S3_CONFIG
         if info.get("path_style"):
             cfg = _S3_CONFIG.merge(Config(s3={"addressing_style": "path"}))
         kwargs = {
-            "endpoint_url": info["endpoint_url"],
+            "endpoint_url": endpoint_url or info["endpoint_url"],
             "aws_access_key_id": access_key,
             "aws_secret_access_key": secret_key,
             "config": cfg,
@@ -444,27 +452,67 @@ class S3ClientManager:
             self._clients[endpoint_id] = client
             return client
 
-    def _get_user_client(self, endpoint_id: str, access_key: str, secret_key: str):
+    def get_presign_client(self, endpoint_id: str = "default"):
+        """Return a client configured for URLs that the browser will access.
+
+        Only the default endpoint has a separate public URL. Other registered
+        endpoints retain their existing endpoint URL until per-endpoint public URLs
+        are supported. Client creation is local; generating a presigned URL does not
+        connect to the configured public endpoint.
+        """
+        creds = _user_creds_ctx.get(None)
+        if creds and creds.get("ak"):
+            return self._get_user_client(
+                endpoint_id, creds["ak"], creds["sk"], presign=True)
+        with self._lock:
+            if endpoint_id in self._presign_clients:
+                return self._presign_clients[endpoint_id]
+            info = self._endpoints.get(endpoint_id)
+            if not info:
+                raise HTTPException(404, f"S3 endpoint '{endpoint_id}' not found")
+            client = self._build_client(
+                info, info["access_key"], info["secret_key"],
+                self.get_browser_endpoint_url(endpoint_id),
+            )
+            self._presign_clients[endpoint_id] = client
+            return client
+
+    def get_browser_endpoint_url(self, endpoint_id: str = "default"):
+        """Endpoint origin used by browser-facing presigned URLs and CSP."""
+        info = self._endpoints.get(endpoint_id)
+        if not info:
+            return ""
+        if endpoint_id == "default" and self._default_public_endpoint_url:
+            return self._default_public_endpoint_url
+        return info["endpoint_url"]
+
+    def _get_user_client(self, endpoint_id: str, access_key: str, secret_key: str,
+                         presign: bool = False):
         info = self._endpoints.get(endpoint_id) or self._endpoints.get("default")
         if not info:
             raise HTTPException(404, f"S3 endpoint '{endpoint_id}' not found")
         ak_hash = hashlib.sha256(access_key.encode()).hexdigest()[:16]
         key = (endpoint_id, ak_hash)
+        cache = self._user_presign_clients if presign else self._user_clients
         with self._lock:
-            client = self._user_clients.get(key)
+            client = cache.get(key)
             if client is None:
-                if len(self._user_clients) > 256:  # bound the cache; drop oldest insert
-                    self._user_clients.pop(next(iter(self._user_clients)), None)
-                client = self._build_client(info, access_key, secret_key)
-                self._user_clients[key] = client
+                if len(cache) > 256:  # bound the cache; drop oldest insert
+                    cache.pop(next(iter(cache)), None)
+                endpoint_url = self.get_browser_endpoint_url(endpoint_id) if presign else ""
+                client = self._build_client(info, access_key, secret_key, endpoint_url)
+                cache[key] = client
             return client
 
     def invalidate(self, endpoint_id: str):
         with self._lock:
             self._clients.pop(endpoint_id, None)
+            self._presign_clients.pop(endpoint_id, None)
             self._endpoints.pop(endpoint_id, None)
             for k in [k for k in self._user_clients if k[0] == endpoint_id]:
                 self._user_clients.pop(k, None)
+            for k in [k for k in self._user_presign_clients if k[0] == endpoint_id]:
+                self._user_presign_clients.pop(k, None)
 
     def get_endpoint_info(self, endpoint_id: str):
         return self._endpoints.get(endpoint_id)
@@ -472,7 +520,7 @@ class S3ClientManager:
     def get_all_ids(self):
         return list(self._endpoints.keys())
 
-_s3_manager = S3ClientManager()
+_s3_manager = S3ClientManager(S3_PUBLIC_ENDPOINT)
 # Register default endpoint from env vars
 _S3_PATH_STYLE = os.environ.get("S3_PATH_STYLE", "false").lower() in ("true", "1", "yes")
 _S3_REGION = os.environ.get("S3_REGION", "")
@@ -3415,7 +3463,8 @@ def resolve_share_link(token: str, password: str = ""):
         if not password or not bcrypt.verify(password, row["password_hash"]):
             raise HTTPException(401, "Password required")
     # Generate presigned URL
-    url = s3.generate_presigned_url(
+    client = _s3_manager.get_presign_client(_current_endpoint_id())
+    url = client.generate_presigned_url(
         "get_object",
         Params={"Bucket": row["bucket"], "Key": row["key"]},
         ExpiresIn=3600)
@@ -5316,7 +5365,8 @@ def trigger_crawl(bucket: str, user: dict = Depends(require_admin)):
 
 @app.get("/api/buckets/{bucket}/download")
 def download_object(bucket: str, key: str, user: dict = Depends(get_current_user)):
-    url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
+    client = _s3_manager.get_presign_client(_current_endpoint_id())
+    url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
     return RedirectResponse(url)
 
 
@@ -6026,7 +6076,8 @@ def version_presigned_url(bucket: str, key: str, version_id: str, expires: int =
                           user: dict = Depends(get_current_user)):
     """Generate a presigned URL for downloading a specific version."""
     expires = min(max(60, expires), 604800)
-    url = s3.generate_presigned_url(
+    client = _s3_manager.get_presign_client(_current_endpoint_id())
+    url = client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key, "VersionId": version_id},
         ExpiresIn=expires,
@@ -6037,7 +6088,8 @@ def version_presigned_url(bucket: str, key: str, version_id: str, expires: int =
 @app.get("/api/buckets/{bucket}/presigned-url")
 def get_presigned_url(bucket: str, key: str, expires: int = 3600, user: dict = Depends(get_current_user)):
     expires = min(max(60, expires), 604800)  # clamp 1 min to 7 days
-    url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
+    client = _s3_manager.get_presign_client(_current_endpoint_id())
+    url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=expires)
     return {"url": url, "expires_in": expires}
 
 
@@ -6060,6 +6112,7 @@ def presigned_upload(bucket: str, req: PresignedUploadRequest, request: Request,
     expires = 3600  # 1 hour
     eid = _current_endpoint_id()
     client = _s3_manager.get_client(eid)
+    presign_client = _s3_manager.get_presign_client(eid)
 
     # Ensure CORS allows PUT from the browser
     try:
@@ -6070,7 +6123,7 @@ def presigned_upload(bucket: str, req: PresignedUploadRequest, request: Request,
     urls = []
     for raw_key in req.keys:
         key = req.prefix + raw_key if req.prefix else raw_key
-        url = client.generate_presigned_url(
+        url = presign_client.generate_presigned_url(
             "put_object",
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=expires,
@@ -6188,7 +6241,7 @@ def multipart_sign(bucket: str, req: MultipartSignRequest, request: Request, use
     if any(pn < 1 or pn > 10000 for pn in req.part_numbers):
         raise HTTPException(400, "Part numbers must be between 1 and 10000 (S3 limit)")
     eid = _current_endpoint_id()
-    client = _s3_manager.get_client(eid)
+    client = _s3_manager.get_presign_client(eid)
     urls = [
         {"part_number": pn,
          "url": client.generate_presigned_url(

@@ -47,6 +47,8 @@ spec:
             # ── S3 Configuration ──
             - name: S3_ENDPOINT
               value: {{ .Values.s3.endpoint | quote }}
+            - name: S3_PUBLIC_ENDPOINT
+              value: {{ .Values.s3.publicEndpoint | quote }}
             - name: S3_REGION
               value: {{ .Values.s3.region | quote }}
             - name: S3_PATH_STYLE
