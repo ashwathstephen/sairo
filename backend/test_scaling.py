@@ -804,3 +804,33 @@ class TestInitialCrawlSplit:
         with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         assert sorted(listed) == [f"t{i}/" for i in range(10)]
+
+
+class TestChunkedFtsRebuild:
+    def test_chunked_rebuild_indexes_every_row_and_search_works(self):
+        import sys, os, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "fts-chunked"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            m._disable_fts_triggers(db)   # as during an initial crawl
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           [(f"d/{i:05d}/needle-{i}.zip", 1, "2026-01-01T00:00:00+00:00", "e", f"d/{i:05d}/", 2, 1) for i in range(1234)])
+            db.commit()
+            m._enable_fts_triggers(db)
+            assert m._fts_is_empty(db), "index must read as empty before the rebuild (external-content table)"
+            assert m._fts_should_rebuild(bucket, "default", False) is True, "self-heal must trigger on an empty index"
+        with patch.object(m, "FTS_REBUILD_CHUNK", 100):   # force many chunks
+            m._rebuild_fts_async(bucket, "default")
+            for _ in range(200):
+                with m._get_db(bucket, "default") as db:
+                    if db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234: break
+                time.sleep(0.05)
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234
+            assert not m._fts_is_empty(db)
+            assert m._fts_should_rebuild(bucket, "default", False) is False

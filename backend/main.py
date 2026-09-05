@@ -1343,15 +1343,40 @@ def _rebuild_fts_async(bucket, endpoint_id=None):
         t0 = time.monotonic()
         try:
             with _get_db(bucket, eid) as db:
-                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('rebuild')")
+                # The one-shot 'rebuild' command indexes every row in a single transaction; on a
+                # 9.9M-key index that exceeded 1 GiB of RSS and OOM-killed the pod (lab, 2026-09-05),
+                # leaving FTS empty so the next crawl retried and died again. Repopulate in
+                # rowid chunks with a commit each, so memory is bounded by the chunk, not the table.
+                # external-content table (content='objects'): plain DELETE is not the way; 'delete-all' is.
+                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('delete-all')")
                 db.commit()
+                lo = db.execute("SELECT MIN(rowid) FROM objects").fetchone()[0]
+                hi = db.execute("SELECT MAX(rowid) FROM objects").fetchone()[0]
+                if lo is not None:
+                    step = FTS_REBUILD_CHUNK
+                    for start in range(lo, hi + 1, step):
+                        db.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects WHERE rowid BETWEEN ? AND ?",
+                                   (start, start + step - 1))
+                        db.commit()
+                    db.execute("INSERT INTO objects_fts(objects_fts) VALUES('optimize')")
+                    db.commit()
             elapsed = time.monotonic() - t0
-            log.info("[%s:%s] FTS index rebuilt in %.1fs", eid, bucket, elapsed)
+            log.info("[%s:%s] FTS index rebuilt in %.1fs (chunked)", eid, bucket, elapsed)
         except Exception as e:
             log.warning("[%s:%s] Background FTS rebuild failed: %s", eid, bucket, e)
 
     thread = threading.Thread(target=_do_rebuild, name=f"fts-{bucket[:12]}", daemon=True)
     thread.start()
+
+
+def _fts_is_empty(db):
+    """objects_fts is an external-content FTS5 table (content='objects'), so COUNT(*) on it reads the
+    objects table and is never 0. The index's own segments live in the objects_fts_data shadow table:
+    an empty index has only its structure rows. (An OOM-killed rebuild leaves exactly this state.)"""
+    try:
+        return db.execute("SELECT COUNT(*) FROM objects_fts_data").fetchone()[0] <= 2
+    except Exception:
+        return False
 
 
 def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
@@ -1367,8 +1392,7 @@ def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
             obj = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
             if obj == 0:
                 return False
-            fts = db.execute("SELECT COUNT(*) FROM objects_fts").fetchone()[0]
-            return fts == 0
+            return _fts_is_empty(db)
     except Exception:
         return True  # if we can't tell, rebuild to be safe
 
@@ -2105,6 +2129,7 @@ def _is_index_ready(bucket):
             return False
 
 
+FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
 SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))  # drill down this many levels when a bucket has <=3 top-level prefixes
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
 FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
