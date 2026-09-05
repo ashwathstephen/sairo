@@ -1333,42 +1333,43 @@ def _enable_fts_triggers(db):
         log.warning("FTS trigger re-enable failed: %s", e)
 
 
-def _rebuild_fts_async(bucket, endpoint_id=None):
-    """Rebuild FTS index in a background thread so crawl completion is not blocked.
+def _rebuild_fts(bucket, endpoint_id=None):
+    """Rebuild the FTS index synchronously on the calling thread.
 
     During the rebuild, search queries still work — they see the pre-rebuild
     index (WAL mode guarantees readers see a consistent snapshot). After the
     rebuild commits, new search queries use the updated index.
     """
     eid = endpoint_id or "default"
-    def _do_rebuild():
-        t0 = time.monotonic()
-        try:
-            with _get_db(bucket, eid) as db:
-                # The one-shot 'rebuild' command indexes every row in a single transaction; on a
-                # 9.9M-key index that exceeded 1 GiB of RSS and OOM-killed the pod (lab, 2026-09-05),
-                # leaving FTS empty so the next crawl retried and died again. Repopulate in
-                # rowid chunks with a commit each, so memory is bounded by the chunk, not the table.
-                # external-content table (content='objects'): plain DELETE is not the way; 'delete-all' is.
-                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('delete-all')")
-                db.commit()
-                lo = db.execute("SELECT MIN(rowid) FROM objects").fetchone()[0]
-                hi = db.execute("SELECT MAX(rowid) FROM objects").fetchone()[0]
-                if lo is not None:
-                    step = FTS_REBUILD_CHUNK
-                    for start in range(lo, hi + 1, step):
-                        db.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects WHERE rowid BETWEEN ? AND ?",
-                                   (start, start + step - 1))
-                        db.commit()
-                    db.execute("INSERT INTO objects_fts(objects_fts) VALUES('optimize')")
+    t0 = time.monotonic()
+    try:
+        with _get_db(bucket, eid) as db:
+            # The one-shot 'rebuild' command indexes every row in a single transaction; on a
+            # 9.9M-key index that exceeded 1 GiB of RSS and OOM-killed the pod (lab, 2026-09-05),
+            # leaving FTS empty so the next crawl retried and died again. Repopulate in
+            # rowid chunks with a commit each, so memory is bounded by the chunk, not the table.
+            # external-content table (content='objects'): plain DELETE is not the way; 'delete-all' is.
+            db.execute("INSERT INTO objects_fts(objects_fts) VALUES('delete-all')")
+            db.commit()
+            lo = db.execute("SELECT MIN(rowid) FROM objects").fetchone()[0]
+            hi = db.execute("SELECT MAX(rowid) FROM objects").fetchone()[0]
+            if lo is not None:
+                step = FTS_REBUILD_CHUNK
+                for start in range(lo, hi + 1, step):
+                    db.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects WHERE rowid BETWEEN ? AND ?",
+                               (start, start + step - 1))
                     db.commit()
-            elapsed = time.monotonic() - t0
-            log.info("[%s:%s] FTS index rebuilt in %.1fs (chunked)", eid, bucket, elapsed)
-        except Exception as e:
-            log.warning("[%s:%s] Background FTS rebuild failed: %s", eid, bucket, e)
+                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('optimize')")
+                db.commit()
+        elapsed = time.monotonic() - t0
+        log.info("[%s:%s] FTS index rebuilt in %.1fs (chunked)", eid, bucket, elapsed)
+    except Exception as e:
+        log.warning("[%s:%s] Background FTS rebuild failed: %s", eid, bucket, e)
 
-    thread = threading.Thread(target=_do_rebuild, name=f"fts-{bucket[:12]}", daemon=True)
-    thread.start()
+
+def _rebuild_fts_async(bucket, endpoint_id=None):
+    """Run _rebuild_fts on a daemon thread (for callers that must not block)."""
+    threading.Thread(target=_rebuild_fts, args=(bucket, endpoint_id), name=f"fts-{bucket[:12]}", daemon=True).start()
 
 
 def _fts_is_empty(db):
@@ -1845,7 +1846,11 @@ def _run_crawl(bucket, endpoint_id=None):
                                     eid, bucket, step.__name__, step_e)
                 # FTS rebuild LAST, and only when keys actually changed.
                 if _fts_should_rebuild(bucket, eid, fts_needs_rebuild):
-                    _rebuild_fts_async(bucket, eid)
+                    # Synchronous on purpose: this runs on the rebuild pool already, and the
+                    # bucket must stay in _rebuilding until FTS commits — otherwise the 120 s
+                    # delta recrawl collides with a minutes-long rebuild ("database is locked",
+                    # lab Run 4c).
+                    _rebuild_fts(bucket, eid)
                 else:
                     log.info("[%s:%s] FTS rebuild skipped — no key changes this crawl", eid, bucket)
             finally:

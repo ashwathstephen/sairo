@@ -475,7 +475,8 @@ class TestAsyncFTSRebuild:
         source = inspect.getsource(_rebuild_fts_async)
         assert "Thread" in source
         assert "daemon=True" in source
-        assert "VALUES('delete-all')" in source and "FTS_REBUILD_CHUNK" in source   # chunked, bounded-memory rebuild
+        body = inspect.getsource(sys.modules["main"]._rebuild_fts)
+        assert "VALUES('delete-all')" in body and "FTS_REBUILD_CHUNK" in body   # chunked, bounded-memory rebuild
 
     def test_fts_rebuild_runs_in_background(self):
         """Test that _rebuild_fts_async actually rebuilds the FTS index."""

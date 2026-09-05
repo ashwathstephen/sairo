@@ -77,4 +77,49 @@ Second attempt (with the write lock), first 9 minutes: 22 buckets, 17 complete, 
 | hive | 400 `dt=` prefixes × 24 `hour=` × 20 parts | 400 prefixes, 16 threads | 192,000 in **36.3 s** |
 | wide | 20,000 ULID-like top-level prefixes × 10 objects | 20,000 prefixes, 16 threads | 200,000 in **351.7 s** (≈ 57 prefixes/s; 10–17× the other layouts) |
 
-The wide penalty is per-prefix overhead, not listing: one list call, one progress write and, before commit c610c76, a **full `COUNT(*)`/`SUM(size)` scan of the objects table after every completed prefix** (20,000 full scans here; production has a bucket with 3,800+ such prefixes). Fixed on the Phase B branch (time-bounded recount, image `phase-b9`); Run 5b re-measures. Flat buckets remain single-threaded by nature (no delimiter to split on); their ceiling is provider RTT × pages, which only events/inventory can remove.
+The wide penalty is per-prefix overhead, not listing: one list call, one progress write and, before commit c610c76, a **full `COUNT(*)`/`SUM(size)` scan of the objects table after every completed prefix** (20,000 full scans here; production has a bucket with 3,800+ such prefixes). Fixed on the Phase B branch (time-bounded recount, image `phase-b9`); Run 5b re-measures.
+
+## Run 4b — seg-main only, fresh volume, image `phase-b9` (B.6 + write lock + chunked FTS rebuild + time-bounded recount)
+
+| Metric | Value |
+|---|---|
+| `crawl_duration` (listing + writes) | **452.7 s** — 2.0× the 908.6 s single-thread baseline and 2.4× the lock-only Run 4 (1,066 s): the per-prefix recount was the hidden cost even with 40 prefixes |
+| Lock errors / restarts during listing | 0 / 0 |
+| RSS while listing | ≈ 250–260 MB |
+| Post-crawl phase | **OOMKilled again** — last log line was `Crawl complete: 9,900,000 objects … in 452.7s`; no rebuild step ever logged. Index afterwards: `objects` 9,900,000, `folder_stats` **0**, `prefix_children` **0**, FTS empty → the kill is in the *first* rebuild step, before the FTS rebuild even starts |
+
+Flat buckets remain single-threaded by nature (no delimiter to split on); their ceiling is provider RTT × pages, which only events/inventory can remove.
+
+**Root cause of the post-crawl OOM (measured in the pod against the finished 9.9M index):** `_record_storage_snapshot`, `_rebuild_folder_stats` and `_rebuild_prefix_children` each run `… GROUP BY SUBSTR(key,1,INSTR(key,'/'))` over the whole `objects` table. SQLite cannot use an index for that expression, so it sorts all 9.9M rows into a temp b-tree — and every connection set `PRAGMA temp_store = MEMORY`, making that sort a full-table copy in RAM.
+
+| `temp_store` | Same GROUP BY on the 9.9M index | Result |
+|---|---|---|
+| FILE (SQLite default) | 1 group in **30.1 s**, RSS 11 → 328 MB | fine |
+| MEMORY (what the code set) | — | **process killed, exit 137** |
+
+The chunked FTS rebuild (Run 4 diagnosis) was a real problem but not the first one in line; the FTS phase never ran here. Fix: drop the `temp_store = MEMORY` pragma on both connection paths (file-backed temp; the page cache and mmap settings are unchanged). Image `phase-b10`, Run 4c below.
+
+### Production run — layout reality and the restart/resume test (21:38 IST)
+
+* Completed-prefix counts per bucket after 110 min: **62,414 / 23,724 / 8,577 / 405 / 324 / 261 …**; median **2 objects per prefix**, largest single prefix 326,991 objects. The real estate is dominated by *wide* layouts, not the deep Druid shape of the sample bucket.
+* Largest bucket crawled at ≈ **90 objects/s** on the pre-fix code: the per-prefix `COUNT(*)`/`SUM` recount over a 2.6M-row table dominated (tens of thousands of full scans).
+* Restarted the backend on commit c610c76 (recount fix). **Phase A resume at real scale:** 8 buckets resumed; the widest logged `Resuming interrupted crawl (gen 1): 65,958 prefix(es) already complete` and skipped them all. Throughput after restart: ≈ **45 prefix completions/s** (1,874 in the first 42 s) versus ≈ 15/s before — now bounded by provider RTT ÷ 16 threads, as it should be.
+* Process RSS on this workstation reached 3.4 GB at peak during the herd (22 buckets, 16-connection pool), 1.0 GB right after restart.
+
+## Run 4c — seg-main only, fresh volume, image `phase-b10` (b9 + file-backed temp store)
+
+First run at this size to finish the whole pipeline inside the 1 GiB chart default.
+
+| Metric | Value |
+|---|---|
+| `crawl_duration` (listing + writes) | **473.0 s** (452.7 s in 4b — the temp-store change costs nothing on the listing side) |
+| Restarts, whole run | **0** (every previous run at this size was OOMKilled after `Crawl complete`) |
+| RSS while listing | ≈ 250 MB |
+| Post-crawl metadata rebuilds | storage snapshot + folder_stats + prefix_children ≈ 25 s each (three full scans of 9.9M rows, one GROUP BY each); RSS 557–634 MB |
+| Chunked FTS rebuild (40 × 250k rows) | **308.3 s**; process RSS 342 MB during, 280 MB after; cgroup at 1,023 MB of 1,024 MB — that is page cache from the 10 GB file, reclaimable, and the kernel did reclaim it instead of killing |
+| Index after | `objects` 9,900,000 · `folder_stats` 1 · `prefix_children` 1 · `storage_history` 2 · FTS populated (678,784 shadow rows); trigram search `ds_007` → 247,500 hits in **0.18 s** |
+| Index size | 7.3 GB after listing → **10.1 GB** with the trigram index (≈ 1.0 GB per 1M objects at this key length) |
+| One warning | `Delta crawl error: database is locked` — the 120 s auto-recrawl fired a delta crawl while the FTS rebuild held the writer; non-fatal (next interval retries) but a real gap: the scheduler must skip delta crawls while a bucket is in the post-crawl rebuild |
+
+End-to-end wall clock for 9.9M objects at 40 ms/page: **≈ 14 min** (7.9 min listing + 1.3 min metadata + 5.1 min FTS), all within 1 GiB.
+
