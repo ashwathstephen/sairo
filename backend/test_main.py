@@ -933,6 +933,9 @@ class TestCrawlerCorrectness:
         lists only unfinished prefixes, and ends complete with every object present."""
         m = self._main()
         bucket = "resumebkt"
+        for suffix in ("", "-wal", "-shm"):  # fresh DB every run: the shared test DB_DIR may hold a stale/corrupt copy
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
         m._init_db(bucket, "default")
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='crawling', current_crawl_gen=7 WHERE id=1")
