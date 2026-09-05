@@ -8,7 +8,7 @@ DB=$DATA/rca.db
 PORT=8765
 export TELEMETRY=false S3_ENDPOINT=http://localhost:19000 S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin \
        DB_DIR=$DATA ADMIN_USER=admin ADMIN_PASS=rcapass S3_PATH_STYLE=true S3_REGION=us-east-1 \
-       JWT_SECRET=rca-fixed-secret-0123456789abcdef0123456789abcdef RECRAWL_INTERVAL=${RECRAWL_INTERVAL:-15} FULL_CRAWL_INTERVAL=${FULL_CRAWL_INTERVAL:-3600}
+       JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 24)} RECRAWL_INTERVAL=${RECRAWL_INTERVAL:-15} FULL_CRAWL_INTERVAL=${FULL_CRAWL_INTERVAL:-3600}
 start_backend() { # $1 = tag  (exec => $! is uvicorn's real pid, so k8s_stop kills the real process)
   ( cd $REPO/backend && exec nohup .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port $PORT ) > $S/rca/backend_$1.log 2>&1 &
   echo $! > $S/rca/pid
