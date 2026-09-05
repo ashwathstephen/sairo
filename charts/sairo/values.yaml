@@ -2,6 +2,9 @@
 
 replicaCount: 1
 
+# Time a pod gets to flush an in-flight crawl on SIGTERM before SIGKILL.
+terminationGracePeriodSeconds: 30
+
 image:
   repository: stephenjr002/sairo
   tag: "latest"
@@ -33,7 +36,8 @@ persistence:
   enabled: true
   storageClass: ""
   accessMode: ReadWriteOnce
-  size: 5Gi
+  size: 20Gi          # ~1 GB per 1M indexed objects (incl. search index)
+  keep: true          # helm.sh/resource-policy: keep on the PVC (survives uninstall)
 
 # S3 Configuration (required)
 s3:

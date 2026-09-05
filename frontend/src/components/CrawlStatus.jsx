@@ -21,7 +21,8 @@ export default function CrawlStatus({ bucket }) {
 
   if (!status) return null;
 
-  const isCrawling = status.status === "crawling";
+  const isInterrupted = status.status === "interrupted";
+  const isCrawling = status.status === "crawling" || isInterrupted;
   const isComplete = status.status === "complete";
   const isError = status.status?.startsWith("error");
 
@@ -52,7 +53,7 @@ export default function CrawlStatus({ bucket }) {
       >
         {isCrawling && <span className="crawl-dot" />}
         {isCrawling
-          ? `Indexing... ${(status.total_objects || 0).toLocaleString()}`
+          ? `${isInterrupted ? "Resuming index..." : "Indexing..."} ${(status.total_objects || 0).toLocaleString()}`
           : isComplete
           ? `${(status.total_objects || 0).toLocaleString()} objects`
           : isError ? "Index error" : "Not indexed"}

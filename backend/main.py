@@ -6,6 +6,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import shutil
 import time
 import traceback
 import uuid
@@ -927,6 +928,9 @@ def _init_db(bucket, endpoint_id=None):
             current_crawl_gen INTEGER DEFAULT 0
         )
     """)
+    # Per-prefix completion for the running crawl generation: lets an interrupted crawl
+    # (restart, SIGTERM, cancel) resume instead of starting over or being mistaken for complete.
+    conn.execute("CREATE TABLE IF NOT EXISTS crawl_progress (prefix TEXT PRIMARY KEY, gen INTEGER NOT NULL)")
     # Migration: add current_crawl_gen column to existing databases
     try:
         conn.execute("ALTER TABLE crawl_status ADD COLUMN current_crawl_gen INTEGER DEFAULT 0")
@@ -1197,12 +1201,31 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}       # crawl_key -> timestamp when crawl started
+_crawl_futures = {}  # crawl_key -> Future of the running _run_crawl (for cancel/shutdown)
+_crawl_cancel = {}   # crawl_key -> threading.Event requesting a cooperative stop
+_shutting_down = threading.Event()
+MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
+
+
+class CrawlInterrupted(Exception):
+    """Raised inside a crawl when shutdown or cancellation was requested. Progress is in
+    crawl_progress; the next crawl of the bucket resumes from it."""
+
+
+def _disk_low():
+    """True when the index volume has less than MIN_FREE_DISK_PCT free. A full disk makes
+    SQLite writes fail inside best-effort paths and the crawler silently looks 'stale'."""
+    try:
+        u = shutil.disk_usage(DB_DIR)
+        return u.total > 0 and (u.free * 100.0 / u.total) < MIN_FREE_DISK_PCT
+    except Exception:
+        return False
 _rebuilding = set()  # crawl_keys whose post-crawl rebuild is in progress (blocks a colliding recrawl)
 _crawl_lock = threading.Lock()
 _CRAWL_MAX_DURATION = 7200  # 2 hours — if a crawl exceeds this, force-release the lock
 
 
-def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=10000):
+def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=10000, should_stop=None):
     """List all objects under a specific prefix with retry logic.
 
     If batch_callback is provided, calls it with each batch of tuples during S3 pagination
@@ -1217,6 +1240,11 @@ def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callbac
     token = None
     retries = 0
     while True:
+        if should_stop is not None and should_stop():
+            # Shutdown/cancel: persist what we have and stop; the prefix is re-listed on resume.
+            if batch_callback is not None and batch:
+                batch_callback(batch)
+            raise CrawlInterrupted(prefix)
         params = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
         if token:
             params["ContinuationToken"] = token
@@ -1386,17 +1414,42 @@ def _run_crawl(bucket, endpoint_id=None):
 
     _init_db(bucket, eid)
 
+    cancel_ev = _crawl_cancel.get(crawl_key) or threading.Event()
+    stop = lambda: _shutting_down.is_set() or cancel_ev.is_set()  # checked between S3 pages
+
     with _get_db(bucket, eid) as db:
-        db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=?, current_crawl_gen=current_crawl_gen+1 WHERE id=1",
-                    (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        prev = db.execute("SELECT status, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+        prev_status = (prev["status"] if prev else None) or ""
+        prev_gen = (prev["current_crawl_gen"] if prev else 0) or 0
+        # Resume: an interrupted crawl left per-prefix progress for its generation. Keep that
+        # generation and skip the prefixes it already completed instead of starting over.
+        done_prefixes = set()
+        if prev_status in ("crawling", "interrupted") and prev_gen:
+            done_prefixes = {r[0] for r in db.execute("SELECT prefix FROM crawl_progress WHERE gen=?", (prev_gen,))}
+        if done_prefixes:
+            db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=? WHERE id=1",
+                       (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        else:
+            db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=?, current_crawl_gen=current_crawl_gen+1 WHERE id=1",
+                       (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+            db.execute("DELETE FROM crawl_progress")
         db.commit()
         crawl_gen = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()[0]
         initial_count = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
         # Disable FTS triggers during bulk crawl for performance
         _disable_fts_triggers(db)
+    if done_prefixes:
+        log.info("[%s:%s] Resuming interrupted crawl (gen %d): %d prefix(es) already complete",
+                 eid, bucket, crawl_gen, len(done_prefixes))
+
+    def _mark_prefix_done(p):
+        with _get_db(bucket, eid) as _db:
+            _db.execute("INSERT OR REPLACE INTO crawl_progress (prefix, gen) VALUES (?, ?)", (p, crawl_gen))
+            _db.commit()
 
     crawl_start = time.monotonic()
     crawl_ok = False
+    interrupted = False
     fts_needs_rebuild = True  # safe default; refined below once we know what changed
     stale_count = 0
     try:
@@ -1497,7 +1550,7 @@ def _run_crawl(bucket, endpoint_id=None):
                             [row + (crawl_gen,) for row in batch])
                     db.commit()
 
-            total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb)
+            total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb, should_stop=stop)
             with _get_db(bucket, eid) as db:
                 # Remove stale keys: anything with crawl_gen > 0 but older than current gen
                 stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
@@ -1561,8 +1614,9 @@ def _run_crawl(bucket, endpoint_id=None):
         with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
             futures = {
                 pool.submit(_crawl_prefix, bucket, p, endpoint_id=eid,
-                            batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen)): p
-                for p in sorted(known_prefixes)
+                            batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen),
+                            should_stop=stop): p
+                for p in sorted(known_prefixes) if p not in done_prefixes
             }
             for future in futures:
                 p = futures[future]
@@ -1571,8 +1625,11 @@ def _run_crawl(bucket, endpoint_id=None):
                     prefix_timeout = max(900, 900 + existing_count // 5000)
                     count = future.result(timeout=prefix_timeout)
                     total_new += count
+                    _mark_prefix_done(p)
                     log.info("[%s:%s] Prefix '%s': %s objects",
                              eid, bucket, p[:40], f"{count:,}")
+                except CrawlInterrupted:
+                    interrupted = True
                 except Exception as e:
                     failed_prefixes.append(p)
                     log.warning("[%s:%s] Prefix '%s' failed: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
@@ -1582,6 +1639,9 @@ def _run_crawl(bucket, endpoint_id=None):
                     row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
                     db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                     db.commit()
+
+        if interrupted:
+            raise CrawlInterrupted(bucket)
 
         # Retry any prefixes that failed — typically transient SQLite write contention under heavy
         # parallelism ("database is locked"). Re-crawl them sequentially (no contention) so a transient
@@ -1593,9 +1653,13 @@ def _run_crawl(bucket, endpoint_id=None):
             for p in retry:
                 try:
                     count = _crawl_prefix(bucket, p, endpoint_id=eid,
-                                          batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen))
+                                          batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen),
+                                          should_stop=stop)
                     total_new += count
+                    _mark_prefix_done(p)
                     log.info("[%s:%s] Prefix '%s' (retry): %s objects", eid, bucket, p[:40], f"{count:,}")
+                except CrawlInterrupted:
+                    raise
                 except Exception as e:
                     failed_prefixes.append(p)
                     log.warning("[%s:%s] Prefix '%s' failed on retry: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
@@ -1645,6 +1709,17 @@ def _run_crawl(bucket, endpoint_id=None):
 
     except _CrawlDone:
         crawl_ok = True
+    except CrawlInterrupted:
+        crawl_ok = False
+        try:
+            with _get_db(bucket, eid) as db:
+                _enable_fts_triggers(db)
+                db.execute("UPDATE crawl_status SET status='interrupted' WHERE id=1")
+                db.commit()
+        except Exception:
+            pass
+        log.info("[%s:%s] Crawl interrupted (%s); progress saved, will resume",
+                 eid, bucket, "shutdown" if _shutting_down.is_set() else "cancelled")
     except BaseException as e:
         crawl_ok = False
         log.error("[%s:%s] Crawl error: %s\n%s", eid, bucket, e, traceback.format_exc())
@@ -1663,6 +1738,8 @@ def _run_crawl(bucket, endpoint_id=None):
         # rebuild with "database is locked", leaving folder_stats empty).
         with _crawl_lock:
             _crawling.pop(crawl_key, None)
+            _crawl_futures.pop(crawl_key, None)
+            _crawl_cancel.pop(crawl_key, None)
             if crawl_ok:
                 _rebuilding.add(crawl_key)
                 # Record full-crawl timing so the scheduler can decide between a
@@ -2140,7 +2217,7 @@ def _delta_crawl(bucket, endpoint_id):
     # queryable throughout because _is_index_ready treats any bucket with
     # total_objects>0 as ready. The caller resets status/last_crawl_end when done.
     with _get_db(bucket, eid) as db:
-        db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=? WHERE id=1",
+        db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=? WHERE id=1 AND status <> 'interrupted'",
                    (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
         db.commit()
 
@@ -2224,7 +2301,8 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
             # reflects that the index was just refreshed (even on a no-change delta).
             try:
                 with _get_db(bucket, eid) as db:
-                    db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=? WHERE id=1",
+                    # A delta refreshes hot prefixes only; it must not relabel an interrupted full crawl as complete.
+                    db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=? WHERE id=1 AND status <> 'interrupted'",
                                (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
                     db.commit()
             except Exception:
@@ -2246,14 +2324,35 @@ def _queue_crawl(bucket, endpoint_id=None):
             return False
         started_at = _crawling.get(crawl_key)
         if started_at:
-            # Force-release stale locks (OOM kill, thread death, etc.)
-            if now - started_at > _CRAWL_MAX_DURATION:
-                log.warning("Force-releasing stale crawl lock for %s (started %.0f min ago)", crawl_key, (now - started_at) / 60)
-                del _crawling[crawl_key]
-            else:
+            # `True` marks a non-crawl owner (version purge); never time it out.
+            if started_at is True or now - started_at <= _CRAWL_MAX_DURATION:
                 return False
+            fut = _crawl_futures.get(crawl_key)
+            if fut is not None and not fut.done():
+                # Over the limit but still running: never start a second crawl of the same
+                # bucket (they would fight over the single SQLite writer). Ask it to stop; it
+                # exits 'interrupted' and the scheduler resumes it from crawl_progress.
+                ev = _crawl_cancel.get(crawl_key)
+                if ev is not None and not ev.is_set():
+                    ev.set()
+                    log.warning("Crawl for %s exceeded %d min; cancellation requested (will resume)",
+                                crawl_key, _CRAWL_MAX_DURATION // 60)
+                return False
+            # Thread is gone (OOM kill, executor death): the lock really is stale.
+            log.warning("Force-releasing stale crawl lock for %s (started %.0f min ago, thread gone)", crawl_key, (now - started_at) / 60)
+            del _crawling[crawl_key]
+        if _disk_low():
+            log.warning("Crawl for %s skipped: less than %d%% free on %s", crawl_key, MIN_FREE_DISK_PCT, DB_DIR)
+            try:
+                with _get_db(bucket, eid) as db:
+                    db.execute("UPDATE crawl_status SET status=? WHERE id=1", (f"error: disk below {MIN_FREE_DISK_PCT}% free",))
+                    db.commit()
+            except Exception:
+                pass
+            return False
         _crawling[crawl_key] = now  # Store timestamp, not bool
-    _crawl_pool.submit(_run_crawl, bucket, eid)
+        _crawl_cancel[crawl_key] = threading.Event()
+    _crawl_futures[crawl_key] = _crawl_pool.submit(_run_crawl, bucket, eid)
     return True
 
 
@@ -2343,16 +2442,24 @@ def startup():
                     # then trigger a redundant (multi-minute) full re-crawl. The scheduler
                     # keeps it fresh via fast delta crawls and a periodic full reconcile.
                     seeded = False
+                    prev_status = ""
                     try:
                         with _get_db(name, eid) as db:
-                            row = db.execute("SELECT total_objects, crawl_duration FROM crawl_status WHERE id=1").fetchone()
+                            row = db.execute("SELECT total_objects, crawl_duration, status FROM crawl_status WHERE id=1").fetchone()
                             total = (row["total_objects"] if row else 0) or 0
                             if total == 0:  # counters can lag an interrupted crawl — trust the table
                                 total = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
                             dur = (row["crawl_duration"] if row else 0) or 0.0
-                        if total > 0:
-                            if not dur and total > 50000:  # estimate large-ness until a full crawl records a duration
-                                dur = LARGE_BUCKET_SECONDS + 1
+                            prev_status = (row["status"] if row else None) or ""
+                            if prev_status == "crawling":
+                                # The previous process died mid-crawl. Say so; the queued crawl resumes it.
+                                db.execute("UPDATE crawl_status SET status='interrupted' WHERE id=1")
+                                db.commit()
+                                prev_status = "interrupted"
+                        # Seed only from a COMPLETED full crawl (one that recorded a duration). Seeding
+                        # an interrupted index marked it "fresh" and left large buckets delta-only for
+                        # FULL_CRAWL_INTERVAL while a third of the data was missing.
+                        if total > 0 and dur > 0 and prev_status != "interrupted":
                             _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
                             seeded = True
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
@@ -2361,7 +2468,8 @@ def startup():
                         pass
                     if not seeded:
                         _queue_crawl(name, eid)
-                        log.info("Queued crawl for %s:%s", eid, name)
+                        log.info("Queued %s crawl for %s:%s",
+                                 "resume of interrupted" if prev_status == "interrupted" else "initial", eid, name)
             except Exception as e:
                 log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
     threading.Thread(target=_startup_crawl, daemon=True).start()
@@ -2808,6 +2916,19 @@ def _telemetry_shutdown():
     """Record a clean shutdown so the next boot doesn't mis-count this as a crash."""
     if TELEMETRY:
         _tel_mark_clean_exit()
+
+
+@app.on_event("shutdown")
+def _crawl_shutdown():
+    """SIGTERM (every rollout): ask running crawls to stop at the next page and wait briefly so
+    they flush their batch and record 'interrupted'; the next boot resumes from crawl_progress."""
+    _shutting_down.set()
+    deadline = time.monotonic() + 20
+    for fut in list(_crawl_futures.values()):
+        try:
+            fut.result(timeout=max(0.1, deadline - time.monotonic()))
+        except Exception:
+            pass
 
 
 _telemetry_lockfile = None  # held for the process lifetime by the elected pinger
@@ -4105,7 +4226,7 @@ def healthz():
     # Liveness: just confirm the process is responsive.
     # Storage checks belong in readiness, not liveness — killing the pod
     # on a transient Longhorn unmount just causes a restart loop.
-    return {"status": "ok"}
+    return {"status": "ok", "disk_low": _disk_low()}
 
 
 @app.get("/readyz")
@@ -5300,7 +5421,15 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
         return {"status": "not_indexed", "total_objects": 0, "total_size": 0}
     with _get_db(bucket) as db:
         row = db.execute("SELECT * FROM crawl_status WHERE id=1").fetchone()
-    return dict(row) if row else {"status": "unknown"}
+    if not row:
+        return {"status": "unknown"}
+    d = dict(row)
+    st = d.get("status") or ""
+    # True only when a full crawl has finished and nothing since has interrupted one.
+    d["full_crawl_complete"] = bool(d.get("crawl_duration")) and st != "interrupted" and not st.startswith("error")
+    started = _crawling.get(f"{_current_endpoint_id()}:{bucket}")
+    d["crawl_elapsed"] = round(time.time() - started, 1) if isinstance(started, float) else None
+    return d
 
 
 @app.post("/api/buckets/{bucket}/crawl")

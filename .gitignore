@@ -59,3 +59,7 @@ auth-state.json
 benchmark/results/prod-*.json
 benchmark/results/qlbench-*.json
 benchmark/validate_full.py
+
+# restart harness output
+benchmark/restart_harness/out/
+benchmark/restart_harness/out_driver.log

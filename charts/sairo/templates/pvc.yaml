@@ -3,6 +3,11 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-data
+  {{- if .Values.persistence.keep }}
+  annotations:
+    # Survive `helm uninstall`/reinstall: the index takes hours to rebuild at scale.
+    helm.sh/resource-policy: keep
+  {{- end }}
 spec:
   accessModes:
     {{- if gt (int .Values.replicaCount) 1 }}

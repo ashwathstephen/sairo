@@ -76,6 +76,7 @@ def register(mcp):
 
                     status_display = {
                         "crawling": "Currently indexing...",
+                        "interrupted": "Index interrupted by a restart — resuming (serving last valid index)",
                         "complete": "Up to date",
                         "idle": "Up to date",
                     }.get(status, status)

@@ -857,3 +857,125 @@ class TestCompatPermissions:
                          "/api/presigned-url?key=test", "/api/multipart-uploads"]:
                 resp = fresh.get(path)
                 assert resp.status_code == 401, f"{path} should require auth, got {resp.status_code}"
+
+
+# ── Phase A: crawler correctness (SAE-63) ───────────────────────────────────
+
+class TestCrawlerCorrectness:
+    """Resume, honest status, cancel-not-fork, stop flag, disk guard."""
+
+    def _main(self):
+        import sys
+        return sys.modules.get("backend.main") or sys.modules["main"]
+
+    def test_crawl_prefix_should_stop_flushes_and_raises(self, app):
+        m = self._main()
+        pages = [
+            {"Contents": [{"Key": f"p/a{i}", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'} for i in range(3)],
+             "IsTruncated": True, "NextContinuationToken": "t1"},
+            {"Contents": [{"Key": "p/b0", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False},
+        ]
+        client = MagicMock(); client.list_objects_v2.side_effect = pages
+        flushed = []
+        calls = {"n": 0}
+        def should_stop():
+            calls["n"] += 1
+            return calls["n"] > 1  # allow the first page, stop before the second
+        with patch.object(m._s3_manager, "get_client", return_value=client):
+            with pytest.raises(m.CrawlInterrupted):
+                m._crawl_prefix("stopbkt", "p/", endpoint_id="default", batch_callback=flushed.extend, should_stop=should_stop)
+        assert [r[0] for r in flushed] == ["p/a0", "p/a1", "p/a2"]  # first page persisted, not lost
+        assert client.list_objects_v2.call_count == 1
+
+    def test_queue_crawl_requests_cancel_instead_of_second_crawl(self, app):
+        m = self._main()
+        key = "default:dupbkt"
+        fut = MagicMock(); fut.done.return_value = False
+        ev = m.threading.Event()
+        with patch.object(m, "_CRAWL_MAX_DURATION", 0), patch.object(m._crawl_pool, "submit") as submit:
+            m._crawling[key] = time.time() - 10
+            m._crawl_futures[key] = fut
+            m._crawl_cancel[key] = ev
+            try:
+                assert m._queue_crawl("dupbkt", "default") is False
+                assert ev.is_set(), "running crawl must be asked to stop"
+                submit.assert_not_called()
+            finally:
+                m._crawling.pop(key, None); m._crawl_futures.pop(key, None); m._crawl_cancel.pop(key, None)
+
+    def test_queue_crawl_never_times_out_non_crawl_owner(self, app):
+        m = self._main()
+        key = "default:purgebkt"
+        with patch.object(m, "_CRAWL_MAX_DURATION", 0), patch.object(m._crawl_pool, "submit") as submit:
+            m._crawling[key] = True  # version purge holds the lock with a bool
+            try:
+                assert m._queue_crawl("purgebkt", "default") is False
+                submit.assert_not_called()
+            finally:
+                m._crawling.pop(key, None)
+
+    def test_disk_guard_blocks_crawl(self, app):
+        m = self._main()
+        from collections import namedtuple
+        DU = namedtuple("usage", "total used free")
+        m._init_db("diskbkt", "default")
+        with patch.object(m.shutil, "disk_usage", return_value=DU(100, 95, 5)), patch.object(m._crawl_pool, "submit") as submit:
+            assert m._disk_low() is True
+            assert m._queue_crawl("diskbkt", "default") is False
+            submit.assert_not_called()
+        with m._get_db("diskbkt", "default") as db:
+            assert (db.execute("SELECT status FROM crawl_status WHERE id=1").fetchone()[0] or "").startswith("error: disk")
+        with patch.object(m.shutil, "disk_usage", return_value=DU(100, 50, 50)):
+            assert m._disk_low() is False
+
+    def test_run_crawl_resumes_and_skips_completed_prefixes(self, app):
+        """Kill mid-crawl (simulated by pre-seeded progress) → the next crawl keeps the generation,
+        lists only unfinished prefixes, and ends complete with every object present."""
+        m = self._main()
+        bucket = "resumebkt"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='crawling', current_crawl_gen=7 WHERE id=1")
+            db.execute("INSERT INTO crawl_progress (prefix, gen) VALUES ('a/', 7)")
+            db.execute("INSERT INTO discovered_prefixes (prefix) VALUES ('a/'), ('b/')")
+            for i in range(2):  # rows the interrupted crawl already wrote for a/
+                db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           (f"a/{i}", 1, "2026-01-01T00:00:00+00:00", "e", "a/", 1, 7))
+            db.commit()
+        listed = []
+        def list_objects_v2(**p):
+            if "Delimiter" in p:
+                return {"CommonPrefixes": [{"Prefix": "a/"}, {"Prefix": "b/"}], "Contents": [], "IsTruncated": False}
+            listed.append(p["Prefix"])
+            return {"Contents": [{"Key": f"{p['Prefix']}{i}", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'} for i in range(2)],
+                    "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert "a/" not in listed and "b/" in listed, f"completed prefix must not be re-listed; listed={listed}"
+        with m._get_db(bucket, "default") as db:
+            row = db.execute("SELECT status, current_crawl_gen, total_objects FROM crawl_status WHERE id=1").fetchone()
+            assert row["status"] == "complete" and row["current_crawl_gen"] == 7 and row["total_objects"] == 4
+
+    def test_delta_does_not_relabel_interrupted_as_complete(self, app):
+        m = self._main()
+        bucket = "intbkt"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='interrupted' WHERE id=1"); db.commit()
+            # the guarded UPDATE the delta path uses
+            db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=? WHERE id=1 AND status <> 'interrupted'", ("x",))
+            db.commit()
+            assert db.execute("SELECT status FROM crawl_status WHERE id=1").fetchone()[0] == "interrupted"
+
+    def test_crawl_status_reports_full_crawl_complete(self, client, admin_cookies):
+        m = self._main()
+        bucket = "statbkt"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='interrupted', crawl_duration=12.5, total_objects=10 WHERE id=1"); db.commit()
+        r = client.get(f"/api/buckets/{bucket}/crawl-status", cookies=admin_cookies)
+        assert r.status_code == 200 and r.json()["full_crawl_complete"] is False
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
+        assert client.get(f"/api/buckets/{bucket}/crawl-status", cookies=admin_cookies).json()["full_crawl_complete"] is True

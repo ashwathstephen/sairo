@@ -1,0 +1,30 @@
+name: Restart Harness (nightly)
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m venv backend/.venv && backend/.venv/bin/pip install -q -r backend/requirements.txt
+      - run: sudo apt-get install -y -q sqlite3 bc
+      - run: docker compose -f benchmark/restart_harness/docker-compose.yml up -d
+      - name: Run the 4-phase restart reproduction and assert the Phase A gates
+        run: cd benchmark/restart_harness && ./driver.sh
+      - if: always()
+        run: cat benchmark/restart_harness/out/rca/REPORT.txt || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: restart-harness-report, path: benchmark/restart_harness/out/rca/ }
+      - if: always()
+        run: docker compose -f benchmark/restart_harness/docker-compose.yml down -v

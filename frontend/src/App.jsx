@@ -111,7 +111,8 @@ function MainApp() {
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [indexed, setIndexed] = useState(false);
-  const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling")
+  const [indexing, setIndexing] = useState(false); // current bucket's first crawl in progress (crawl-status === "crawling" | "interrupted")
+  const [indexInterrupted, setIndexInterrupted] = useState(false); // a previous crawl was cut off by a restart; the index is partial until it resumes
   const [indexCount, setIndexCount] = useState(0);  // objects indexed so far (drives the search-hint bar)
   const [hideSearchHint, setHideSearchHint] = useState(() => !!localStorage.getItem("sairo-search-hint-dismissed"));
   const [highlightKey, setHighlightKey] = useState(null); // file to scroll-to + highlight after "reveal in folder"
@@ -254,7 +255,7 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
-    getCrawlStatus(b).then((s) => { setIndexing(s?.status === "crawling"); setIndexCount(s?.total_objects || 0); }).catch(() => {});
+    getCrawlStatus(b).then((s) => { setIndexing(s?.status === "crawling" || s?.status === "interrupted"); setIndexInterrupted(s?.status === "interrupted"); setIndexCount(s?.total_objects || 0); }).catch(() => {});
     crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
     let firstPage = true;
@@ -296,7 +297,7 @@ function MainApp() {
     // actually changed since the last load. Avoids re-downloading an unchanged folder
     // every 30s — the previous behavior re-streamed the whole listing each tick.
     getCrawlStatus(b).then((status) => {
-      setIndexing(status?.status === "crawling");
+      setIndexing(status?.status === "crawling" || status?.status === "interrupted"); setIndexInterrupted(status?.status === "interrupted");
       setIndexCount(status?.total_objects || 0);
       const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
       if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
@@ -753,7 +754,7 @@ function MainApp() {
           {indexing ? (
             <span className="shb-text">
               <span className="spinner shb-spinner" />
-              Indexing your bucket{indexCount > 0 ? ` — ${indexCount.toLocaleString()} objects so far` : "…"} — search will be ready in a moment.
+              {indexInterrupted ? "Finishing an interrupted index" : "Indexing your bucket"}{indexCount > 0 ? ` — ${indexCount.toLocaleString()} objects so far` : "…"} — {indexInterrupted ? "some folders may be incomplete until it finishes." : "search will be ready in a moment."}
             </span>
           ) : (
             <>
