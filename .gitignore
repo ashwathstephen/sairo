@@ -66,3 +66,4 @@ benchmark/restart_harness/out_driver.log
 benchmark/prodlab/out/
 benchmark/prodlab/spec-smoke.json
 benchmark/prodlab/out_*/
+frontend/vite.prodtest.config.js

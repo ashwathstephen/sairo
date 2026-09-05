@@ -1,0 +1,6 @@
+{"buckets": [
+  {"name": "lay-druid", "layout": "druid", "datasources": 4,    "intervals": 500,  "partitions": 100},
+  {"name": "lay-wide",  "layout": "wide",  "datasources": 20000,"intervals": 10,   "partitions": 1},
+  {"name": "lay-hive",  "layout": "hive",  "datasources": 400,  "intervals": 24,   "partitions": 20},
+  {"name": "lay-flat",  "layout": "flat",  "datasources": 200,  "intervals": 100,  "partitions": 10}
+]}

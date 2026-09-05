@@ -29,9 +29,25 @@ class Bucket:
         self.ds, self.iv, self.pt = int(spec["datasources"]), int(spec["intervals"]), int(spec["partitions"])
         self.n = self.ds * self.iv * self.pt
         self.size_p50 = int(spec.get("size_p50", 17 * 1024 * 1024))
-        self._iv_str = [self._interval(j) for j in range(self.iv)]   # precomputed once: interval strings
-        self._ds_str = [f"druid/segments/ds_{i:03d}/" for i in range(self.ds)]
-        self._pt_str = [f"/{VERSION}/{k:04d}/index.zip" for k in range(self.pt)]
+        self.layout = spec.get("layout", "druid")
+        if self.layout == "druid":      # deep: druid/segments/<ds>/<interval>/<version>/<partition>/index.zip (1 object per leaf)
+            self._ds_str = [f"druid/segments/ds_{i:03d}/" for i in range(self.ds)]
+            self._iv_str = [self._interval(j) for j in range(self.iv)]
+            self._pt_str = [f"/{VERSION}/{k:04d}/index.zip" for k in range(self.pt)]
+        elif self.layout == "wide":     # wide & shallow: thousands of ULID-like top-level prefixes, a few objects each
+            self._ds_str = [f"01K{i:023d}/" for i in range(self.ds)]
+            self._iv_str = [f"{j:04d}" for j in range(self.iv)]
+            self._pt_str = [f"-{k:03d}.dat" for k in range(self.pt)]
+        elif self.layout == "hive":     # time partitions: dt=YYYY-MM-DD/hour=HH/part-NNNNN.parquet
+            self._ds_str = [f"dt={(EPOCH + dt.timedelta(days=i)).isoformat()}/" for i in range(self.ds)]
+            self._iv_str = [f"hour={j:02d}/" for j in range(self.iv)]
+            self._pt_str = [f"part-{k:05d}.parquet" for k in range(self.pt)]
+        elif self.layout == "flat":     # no delimiter at all: obj-<n>.bin at the bucket root
+            self._ds_str = [f"obj-{i:04d}" for i in range(self.ds)]
+            self._iv_str = [f"{j:04d}" for j in range(self.iv)]
+            self._pt_str = [f"{k:04d}.bin" for k in range(self.pt)]
+        else:
+            raise ValueError(f"unknown layout {self.layout}")
         self.deleted = set()          # generated keys removed via admin
         self.added = []               # sorted extra keys added via admin (key, size)
         self.lock = threading.Lock()
@@ -63,11 +79,14 @@ class Bucket:
         h = f"{hv:016x}{hv:016x}"
         size = self.size_p50 // 2 + (hv & 0xFFFFFF) % self.size_p50  # 0.5x .. 1.5x p50
         # LastModified follows the interval date so "recent" partitions look recent
+        lm = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(minutes=(hv >> 8) % (400 * 24 * 60))
         try:
-            day = key.split("/")[3][:10]
-            lm = dt.datetime.fromisoformat(day).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=6)
+            if self.layout == "druid":
+                lm = dt.datetime.fromisoformat(key.split("/")[3][:10]).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=6)
+            elif self.layout == "hive":
+                lm = dt.datetime.fromisoformat(key[3:13]).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=int(key.split("hour=")[1][:2]))
         except Exception:
-            lm = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+            pass
         return key, size, lm.strftime("%Y-%m-%dT%H:%M:%S.000Z"), h
 
     def truth_count(self):
