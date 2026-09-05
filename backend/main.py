@@ -2376,6 +2376,7 @@ DELTA_NEWEST_K = int(os.environ.get("DELTA_NEWEST_K", "2"))             # partit
 DELTA_MAX_DEPTH = int(os.environ.get("DELTA_MAX_DEPTH", "12"))          # safety cap on walk depth
 DELTA_LIST_CONCURRENCY = int(os.environ.get("DELTA_LIST_CONCURRENCY", "16"))  # parallel S3 list calls per level
 DELTA_MAX_NODES = int(os.environ.get("DELTA_MAX_NODES", "2000"))        # safety cap on folders visited per delta
+DELTA_ROOT_MAX_PAGES = int(os.environ.get("DELTA_ROOT_MAX_PAGES", "200"))  # root listing pages per delta before the delta is degraded (200k entries; production has 62k-prefix roots)
 
 
 def _natural_key(prefix):
@@ -2464,7 +2465,28 @@ def _delta_crawl(bucket, endpoint_id):
     eid = endpoint_id or "default"
     client = _s3_manager.get_client(eid)
     hot = _hot_target_prefixes(bucket, eid)
-    if not hot:
+    failed_targets = []
+
+    # One delimiter listing of the bucket root per delta. Hot prefixes are derived from what is
+    # already indexed, so without this a new root-level object or a brand-new top-level prefix stayed
+    # invisible until the hourly reconcile while last_crawl_end advanced (reproduced: a flat bucket
+    # returned "clean" without a single LIST call). Bounded: past DELTA_ROOT_MAX_PAGES the root is
+    # too big to vouch for in a delta, so the delta is degraded rather than silently partial.
+    root_objs = []
+    new_tops = set()
+    try:
+        kids = _list_children(client, bucket, "", max_pages=DELTA_ROOT_MAX_PAGES, contents=root_objs)
+        if kids is None:
+            failed_targets.append("root")   # oversized root listing: what we saw is ingested, but not certified
+        else:
+            with _get_db(bucket, eid) as db:
+                known = {r[0] for r in db.execute("SELECT prefix FROM discovered_prefixes")}
+            new_tops = set(kids) - known
+    except Exception as e:
+        log.warning("[%s:%s] delta root listing failed: %s", eid, bucket, e)
+        failed_targets.append("root")
+    root_objs = [o for o in root_objs if not o["Key"].endswith("/")]
+    if not hot and not root_objs and not new_tops and not failed_targets:
         return 0, []
 
     # Surface delta activity to the UI (status + last_crawl_start). The index stays
@@ -2484,7 +2506,6 @@ def _delta_crawl(bucket, endpoint_id):
         tops = [r[0] for r in db.execute("SELECT prefix FROM folder_stats WHERE prefix != ''").fetchall() if r[0]]
         row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
         gen = (row[0] if row else 0) or 0
-    failed_targets = []
     try:
         discovered = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
     except Exception as e:
@@ -2493,23 +2514,24 @@ def _delta_crawl(bucket, endpoint_id):
         log.warning("[%s:%s] delta target discovery failed: %s", eid, bucket, e)
         discovered = set()
         failed_targets.append("discovery")
-    targets = _minimal_prefixes(set(hot) | discovered)
+    targets = _minimal_prefixes(set(hot) | discovered | new_tops)   # new top-level prefixes are listed in full
 
     # List all targets in parallel (the hot set is small; this keeps a delta fast
     # even when several partitions are active).
-    all_objs = []
+    all_objs = list(root_objs)   # direct root-level objects from the root listing above
     def _list_or_fail(tp):
         try:
             return tp, _delta_list_prefix(client, bucket, tp)
         except Exception as e:   # one failed target degrades the delta; it must not fake a full refresh
             log.warning("[%s:%s] delta target '%s' failed: %s", eid, bucket, tp[:60], e)
             return tp, None
-    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
-        for tp, objs in ex.map(_list_or_fail, targets):
-            if objs is None:
-                failed_targets.append(tp)
-            else:
-                all_objs.extend(objs)
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
+            for tp, objs in ex.map(_list_or_fail, targets):
+                if objs is None:
+                    failed_targets.append(tp)
+                else:
+                    all_objs.extend(objs)
 
     changed = 0
     with _get_db(bucket, eid) as db:
@@ -2530,6 +2552,8 @@ def _delta_crawl(bucket, endpoint_id):
             db.executemany(
                 "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) "
                 "VALUES (?,?,?,?,?,?,?)", batch)
+        if new_tops:
+            db.executemany("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES (?)", [(t,) for t in new_tops])
         db.commit()
 
     if changed:
