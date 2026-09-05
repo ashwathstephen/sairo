@@ -7,8 +7,8 @@ HERE=$(cd "$(dirname "$0")" && pwd); OUT=$HERE/out; mkdir -p "$OUT"
 FOR=7200; INT=30
 while [ $# -gt 0 ]; do case "$1" in --for) FOR=$2; shift 2;; --interval) INT=$2; shift 2;; *) shift;; esac; done
 NS=lab; PORT=18000
-kubectl -n $NS port-forward svc/sairo $PORT:8000 >/dev/null 2>&1 & PF=$!; trap 'kill $PF 2>/dev/null' EXIT
-for i in $(seq 1 30); do curl -sf http://127.0.0.1:$PORT/healthz >/dev/null && break; sleep 1; done
+kubectl -n $NS port-forward deploy/sairo $PORT:8000 >/dev/null 2>&1 & PF=$!; trap 'kill $PF 2>/dev/null' EXIT
+for i in $(seq 1 30); do curl -sf http://127.0.0.1:$PORT/healthz >/dev/null && break; sleep 1; [ $i -eq 30 ] && { echo "backend unreachable via port-forward"; exit 1; }; done
 CJ=$OUT/cj; curl -s -c $CJ -X POST http://127.0.0.1:$PORT/api/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"labpass123"}' >/dev/null
 api() { curl -s -b $CJ "http://127.0.0.1:$PORT$1"; }
 BUCKETS=$(api /api/buckets | python3 -c 'import sys,json; d=json.load(sys.stdin); bs=d if isinstance(d,list) else d.get("buckets",d); print(" ".join((b["name"] if isinstance(b,dict) else b) for b in bs))')
