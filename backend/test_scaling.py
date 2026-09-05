@@ -1335,3 +1335,59 @@ class TestTruthfulStates:
             row = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
         assert row["last_crawl_end"] == end0 and row["status"] == "complete" and "1 delta target" in row["last_error"], row
 
+    def test_unreadable_status_before_delta_is_never_promoted(self):
+        """If the status cannot be read before a delta, nothing is promoted: only the attempt is recorded."""
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta-unknown"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='degraded', last_error='x'"); db.commit()
+            before = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        real_get_db = m._get_db
+        calls = {"n": 0}
+        from contextlib import contextmanager
+        @contextmanager
+        def flaky_get_db(b, e=None):
+            calls["n"] += 1
+            if calls["n"] == 1:          # the status read right before the delta fails
+                raise RuntimeError("disk hiccup")
+            with real_get_db(b, e) as db:
+                yield db
+        with patch.object(m, "_get_db", flaky_get_db), patch.object(m, "_delta_crawl", return_value=(4, [])), \
+             patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            assert m._queue_delta_crawl(bucket, "default") is True
+        with m._get_db(bucket, "default") as db:
+            after = dict(db.execute("SELECT status, last_crawl_end, last_error, last_attempt_at FROM crawl_status").fetchone())
+        assert after["status"] == before["status"] == "degraded" and after["last_crawl_end"] == before["last_crawl_end"], (before, after)
+        assert after["last_error"] == "x" and after["last_attempt_at"], after
+
+    def test_recovery_after_failed_discovery_advances_success_only_on_the_clean_retry(self):
+        import sys, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta-recover"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        with m._get_db(bucket, "default") as db:
+            end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+        time.sleep(1.1)
+        with patch.object(m, "_delta_crawl", return_value=(2, ["discovery"])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            m._queue_delta_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            mid = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        assert mid["last_crawl_end"] == end0 and mid["last_error"] and mid["status"] == "complete", mid
+        with patch.object(m, "_delta_crawl", return_value=(0, [])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            m._queue_delta_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            after = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        assert after["last_crawl_end"] > end0 and after["last_error"] is None and after["status"] == "complete", after
+
