@@ -134,3 +134,14 @@ End-to-end wall clock for 9.9M objects at 40 ms/page: **≈ 14 min** (7.9 min li
 
 Restarts 0, lock errors 0, FTS rebuilt after each bucket. The wide layout is still 4–7× the others: the remaining per-prefix cost is one list call (40 ms simulated, ≈ 50 s floor across 16 threads for 20k prefixes), one progress-table write and one INFO log line per prefix (20,000 lines here; a production bucket with 62k prefixes logs 62k lines per crawl). Batching the per-prefix progress write and demoting the per-prefix log line are the next levers for wide buckets; the true fix for wide layouts is not listing them prefix by prefix at all (events/inventory in Phase C).
 
+## Run 6 — skew layout (`spec-skew.json`: 6 top-level prefixes, `big/` holds 200k of 210k objects), image `phase-b12`, `SUBPREFIX_SPLIT_MIN_OBJECTS=50000`
+
+Motivated by production: the 4.45M-row bucket has 6 top-level prefixes with one holding ~90 %; the ≤3-prefix rule never fired, so that prefix was listed by one thread, was the resume unit (a restart re-listed all of it) and froze the UI counter for its whole duration (stuck at 3,895,445 while the table held 4,454,082).
+
+| Crawl | Decision | Threads on `big/` | `crawl_duration` |
+|---|---|---|---|
+| 1st (empty index — nothing to count yet) | 6 prefixes, no split | 1 | 17.0 s |
+| 2nd (120 s later, 210k rows indexed) | `Skew split: 1 heavy prefix(es) → 100 sub-prefixes` → 105 prefixes | 16 | **8.3 s** (and this one is the incremental/upsert path) |
+
+The heavy-prefix signal is a primary-key range count per top-level prefix over the rows already indexed (≈ 1 s per million rows, only when the bucket exceeds the threshold and has ≤ 64 top-level prefixes), so it also works for a bucket whose first crawl never completed — exactly the production case. The 100 children are now the resume units and the progress counter refreshes on time from inside long prefixes.
+
