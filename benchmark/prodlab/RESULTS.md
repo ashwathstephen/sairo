@@ -123,3 +123,14 @@ First run at this size to finish the whole pipeline inside the 1 GiB chart defau
 
 End-to-end wall clock for 9.9M objects at 40 ms/page: **≈ 14 min** (7.9 min listing + 1.3 min metadata + 5.1 min FTS), all within 1 GiB.
 
+## Run 5b — layout matrix (`spec-layouts.json`, ~200k objects each), image `phase-b11` (time-bounded recount, file-backed temp store, synchronous FTS rebuild)
+
+| Layout | Run 5 (`phase-b7`) | Run 5b (`phase-b11`) | Change |
+|---|---|---|---|
+| druid (deep, split 1 → 4) | 20.6 s | **19.4 s** | — |
+| flat (200k root keys, 1 thread) | 28.0 s | **27.9 s** | — |
+| hive (400 prefixes) | 36.3 s | **30.4 s** | −16 % |
+| wide (20,000 prefixes × 10 objects) | 351.7 s | **134.3 s** | **−62 % (2.6×)** |
+
+Restarts 0, lock errors 0, FTS rebuilt after each bucket. The wide layout is still 4–7× the others: the remaining per-prefix cost is one list call (40 ms simulated, ≈ 50 s floor across 16 threads for 20k prefixes), one progress-table write and one INFO log line per prefix (20,000 lines here; a production bucket with 62k prefixes logs 62k lines per crawl). Batching the per-prefix progress write and demoting the per-prefix log line are the next levers for wide buckets; the true fix for wide layouts is not listing them prefix by prefix at all (events/inventory in Phase C).
+
