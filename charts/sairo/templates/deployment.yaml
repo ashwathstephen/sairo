@@ -45,6 +45,9 @@ spec:
             - containerPort: {{ .Values.service.targetPort }}
               name: http
           env:
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             # ── S3 Configuration ──
             - name: S3_ENDPOINT
               value: {{ .Values.s3.endpoint | quote }}
