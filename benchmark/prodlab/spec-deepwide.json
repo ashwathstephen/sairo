@@ -1,0 +1,3 @@
+{"buckets": [
+  {"name": "lay-deepwide", "layout": "deepwide", "datasources": 200000, "intervals": 1, "partitions": 1}
+]}

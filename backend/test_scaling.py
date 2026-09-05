@@ -129,8 +129,9 @@ class TestPRAGMATuning:
         _init_db("pragma-test-temp")
         with _get_db("pragma-test-temp") as db:
             val = db.execute("PRAGMA temp_store").fetchone()[0]
-            # temp_store: 0=default, 1=file, 2=memory
-            assert val == 2, f"Expected temp_store=2 (MEMORY), got {val}"
+            # temp_store: 0=default, 1=file, 2=memory. Must NOT be memory: the post-crawl rebuilds GROUP BY a
+            # computed expression over the whole objects table, and an in-memory sort of 9.9M rows is OOM-killed.
+            assert val != 2, f"temp_store must be file-backed, got {val}"
 
     def test_get_db_sets_mmap_size(self):
         _init_db("pragma-test-mmap")
@@ -424,6 +425,7 @@ class TestPrefixChildrenRebuild:
         """Files at root level (no prefix) should not appear in prefix_children."""
         _init_db("pc-root-excl-test")
         with _get_db("pc-root-excl-test") as db:
+            db.execute("DELETE FROM objects")   # shared test DB_DIR may already hold this bucket
             # Insert root-level files (prefix='')
             for i in range(10):
                 db.execute(
@@ -473,7 +475,8 @@ class TestAsyncFTSRebuild:
         source = inspect.getsource(_rebuild_fts_async)
         assert "Thread" in source
         assert "daemon=True" in source
-        assert "VALUES('rebuild')" in source
+        body = inspect.getsource(sys.modules["main"]._rebuild_fts)
+        assert "objects_fts_new" in body and "RENAME TO objects_fts" in body and "FTS_REBUILD_CHUNK" in body   # shadow-table, bounded-memory rebuild
 
     def test_fts_rebuild_runs_in_background(self):
         """Test that _rebuild_fts_async actually rebuilds the FTS index."""
@@ -547,8 +550,8 @@ class TestSubPrefixSplitting:
         import inspect
         source = inspect.getsource(sys.modules["main"]._run_crawl)
         assert "Sub-prefix split" in source, "Sub-prefix splitting code not found"
-        assert "len(known_prefixes) <= 3" in source, "Threshold check not found"
-        assert "existing_count > 500_000" in source, "Object count threshold not found"
+        assert "len(known_prefixes) > 3" in source, "Threshold check not found"
+        assert "SUBPREFIX_SPLIT_LEVELS" in source, "multi-level split (B.6) not found"
 
     def test_sub_prefix_expands_on_large_single_prefix(self):
         """Verify the sub-prefix logic would expand a single-prefix bucket."""
@@ -641,6 +644,7 @@ class TestFullIntegration:
         _seed_bucket(bucket, 500)
 
         with _get_db(bucket) as db:
+            db.execute("DELETE FROM storage_history")   # shared test DB_DIR may already hold earlier snapshots
             # Simulate two snapshots on the same day:
             # Snapshot 1: 500 objects, 1000000 bytes (the "peak")
             db.execute(
@@ -744,3 +748,232 @@ class TestFullIntegration:
             )
 
         print(f"  folder_stats verified: {len(actual_dict)} prefixes match exactly")
+
+
+class TestInitialCrawlSplit:
+    """B.6: a single-top-prefix bucket is split into sub-prefixes on the FIRST crawl (empty index)."""
+
+    def test_empty_index_single_prefix_is_split_for_parallelism(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-initial"
+        for suffix in ("", "-wal", "-shm"):
+            try: __import__("os").remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":
+                    return {"CommonPrefixes": [{"Prefix": "druid/segments/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/segments/":
+                    return {"CommonPrefixes": [{"Prefix": f"druid/segments/ds_{i:03d}/"} for i in range(40)], "Contents": [], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}{i}/index.zip", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'} for i in range(3)],
+                    "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert len(listed) == 40 and all(p.startswith("druid/segments/ds_") for p in listed), f"expected 40 ds prefixes, got {len(listed)}: {listed[:3]}"
+        with m._get_db(bucket, "default") as db:
+            row = db.execute("SELECT status, total_objects FROM crawl_status WHERE id=1").fetchone()
+            assert row["status"] == "complete" and row["total_objects"] == 120
+
+    def test_many_top_level_prefixes_not_split(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-none"
+        for suffix in ("", "-wal", "-shm"):
+            try: __import__("os").remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim and pre == "":
+                return {"CommonPrefixes": [{"Prefix": f"t{i}/"} for i in range(10)], "Contents": [], "IsTruncated": False}
+            if delim:
+                raise AssertionError("no sub-prefix discovery expected for 10 top-level prefixes")
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}a", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert sorted(listed) == [f"t{i}/" for i in range(10)]
+
+
+class TestChunkedFtsRebuild:
+    def test_chunked_rebuild_indexes_every_row_and_search_works(self):
+        import sys, os, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "fts-chunked"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            m._disable_fts_triggers(db)   # as during an initial crawl
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           [(f"d/{i:05d}/needle-{i}.zip", 1, "2026-01-01T00:00:00+00:00", "e", f"d/{i:05d}/", 2, 1) for i in range(1234)])
+            db.commit()
+            m._enable_fts_triggers(db)
+            assert m._fts_is_empty(db), "index must read as empty before the rebuild (external-content table)"
+            assert m._fts_should_rebuild(bucket, "default", False) is True, "self-heal must trigger on an empty index"
+        with m._get_db(bucket, "default") as db:   # a crash mid-build leaves a stale shadow table behind
+            db.execute("CREATE VIRTUAL TABLE objects_fts_new USING fts5(key, content='objects', content_rowid='rowid', tokenize='trigram')")
+            db.commit()
+        with patch.object(m, "FTS_REBUILD_CHUNK", 100):   # force many chunks
+            m._rebuild_fts(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234
+            assert not m._fts_is_empty(db)
+            assert m._fts_should_rebuild(bucket, "default", False) is False
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objects_fts_new'").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'objects_fts_a_'").fetchone()[0] == 3
+            # sync triggers survive the swap: a new key is searchable immediately
+            db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES ('z/haystack.zip',1,'2026-01-01T00:00:00+00:00','e','z/',1,1)")
+            db.commit()
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'haystack'").fetchone()[0] == 1
+
+    def test_rebuild_keeps_old_index_searchable_until_the_swap(self):
+        """Readers must never see an empty or partial index: the build goes into a shadow table."""
+        import sys, os
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "fts-shadow"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           [(f"a/needle-{i}.zip", 1, "2026-01-01T00:00:00+00:00", "e", "a/", 1, 1) for i in range(300)])
+            db.commit()
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 300
+        seen = []
+        import sqlite3
+        reader = sqlite3.connect(m._db_path(bucket, "default"))
+        orig_get_db = m._get_db
+        from contextlib import contextmanager
+        class Spy:
+            """Delegates to the builder's connection; after every commit, reads the live index from a second connection."""
+            def __init__(self, conn): self._c = conn
+            def __getattr__(self, name): return getattr(self._c, name)
+            def commit(self):
+                self._c.commit()
+                seen.append(reader.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0])
+        @contextmanager
+        def spy_get_db(b, e=None):
+            with orig_get_db(b, e) as db:
+                yield Spy(db)
+        from unittest.mock import patch
+        with patch.object(m, "_get_db", spy_get_db), patch.object(m, "FTS_REBUILD_CHUNK", 50):
+            m._rebuild_fts(bucket, "default")
+        assert seen and all(n == 300 for n in seen), f"live index dipped during the rebuild: {seen}"
+
+
+class TestSkewSplit:
+    def test_heavy_top_level_prefix_is_drilled_even_when_bucket_has_many_prefixes(self):
+        """6 top-level prefixes (so the ≤3 rule does not fire), one of them heavy by indexed-row count
+        → only that one is expanded; the light ones are listed as they are."""
+        import sys, os
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-skew"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            # rows already indexed under big/ (e.g. from a crawl that never finished); none under small*/
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,1,'2026-01-01T00:00:00+00:00','e','big/',1,1)",
+                           [(f"big/x{i}",) for i in range(3)])
+            db.commit()
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "big/"}] + [{"Prefix": f"small{i}/"} for i in range(5)], "Contents": [], "IsTruncated": False}
+                if pre == "big/":
+                    return {"CommonPrefixes": [{"Prefix": f"big/part{i}/"} for i in range(20)], "Contents": [], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}k", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m, "SUBPREFIX_SPLIT_MIN_OBJECTS", 0), patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert "big/" not in listed, "the heavy prefix must be split, not listed whole"
+        assert sum(p.startswith("big/part") for p in listed) == 20 and sum(p.startswith("small") for p in listed) == 5, listed
+
+
+class TestSplitFanoutCap:
+    def test_prefix_with_huge_fanout_is_listed_whole(self):
+        """One top-level prefix whose only child has 2,500 tiny sub-prefixes: the split must stop
+        at the cap and list the child whole (1 list unit), not dispatch 2,500 list calls."""
+        import sys, os
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-fanout"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim, tok = p.get("Prefix", ""), p.get("Delimiter"), p.get("ContinuationToken")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":
+                    return {"CommonPrefixes": [{"Prefix": "druid/logs/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/logs/":   # 2,500 children over 3 pages
+                    page = int(tok or 0)
+                    lo, hi = page * 1000, min((page + 1) * 1000, 2500)
+                    return {"CommonPrefixes": [{"Prefix": f"druid/logs/q{i:05d}/"} for i in range(lo, hi)],
+                            "Contents": [], "IsTruncated": hi < 2500, "NextContinuationToken": str(page + 1)}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}k", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert listed == ["druid/logs/"], listed
+        delimiter_calls = [c.kwargs for c in client.list_objects_v2.call_args_list if c.kwargs.get("Delimiter") and c.kwargs.get("Prefix") == "druid/logs/"]
+        assert len(delimiter_calls) <= 2, "enumeration must stop once the cap is exceeded"
+
+
+class TestSplitKeepsDirectObjects:
+    def test_objects_directly_under_a_split_prefix_are_indexed_and_not_pruned(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-direct"
+        m._init_db(bucket, "default")
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":   # a README next to the sub-folders: only a delimiter listing of druid/ ever sees it
+                    return {"CommonPrefixes": [{"Prefix": "druid/segments/"}],
+                            "Contents": [{"Key": "druid/README.md", "Size": 7, "LastModified": lm, "ETag": '"r"'}], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            return {"Contents": [{"Key": f"{pre}part-1.zip", "Size": 1, "LastModified": lm, "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")           # initial crawl
+            m._run_crawl(bucket, "default")           # incremental recrawl runs the stale-key prune
+        with m._get_db(bucket, "default") as db:
+            keys = sorted(r[0] for r in db.execute("SELECT key FROM objects"))
+        assert keys == ["druid/README.md", "druid/segments/part-1.zip"], keys
+

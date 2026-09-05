@@ -887,21 +887,25 @@ class TestCrawlerCorrectness:
         assert [r[0] for r in flushed] == ["p/a0", "p/a1", "p/a2"]  # first page persisted, not lost
         assert client.list_objects_v2.call_count == 1
 
-    def test_queue_crawl_requests_cancel_instead_of_second_crawl(self, app):
+    def test_queue_crawl_requests_cancel_only_when_stalled(self, app):
         m = self._main()
         key = "default:dupbkt"
         fut = MagicMock(); fut.done.return_value = False
         ev = m.threading.Event()
-        with patch.object(m, "_CRAWL_MAX_DURATION", 0), patch.object(m._crawl_pool, "submit") as submit:
-            m._crawling[key] = time.time() - 10
+        with patch.object(m, "_CRAWL_STALL_SECONDS", 60), patch.object(m._crawl_pool, "submit") as submit:
+            m._crawling[key] = time.time() - 7200          # running for 2h ...
             m._crawl_futures[key] = fut
             m._crawl_cancel[key] = ev
+            m._crawl_progress_ts[key] = time.time() - 5    # ... but made progress 5s ago
             try:
                 assert m._queue_crawl("dupbkt", "default") is False
-                assert ev.is_set(), "running crawl must be asked to stop"
-                submit.assert_not_called()
+                assert not ev.is_set(), "a long crawl that is progressing must not be cancelled"
+                m._crawl_progress_ts[key] = time.time() - 120  # now stalled beyond the threshold
+                assert m._queue_crawl("dupbkt", "default") is False
+                assert ev.is_set(), "a stalled crawl must be asked to stop"
+                submit.assert_not_called()                    # never a second crawl
             finally:
-                m._crawling.pop(key, None); m._crawl_futures.pop(key, None); m._crawl_cancel.pop(key, None)
+                for d in (m._crawling, m._crawl_futures, m._crawl_cancel, m._crawl_progress_ts): d.pop(key, None)
 
     def test_queue_crawl_never_times_out_non_crawl_owner(self, app):
         m = self._main()
@@ -938,11 +942,12 @@ class TestCrawlerCorrectness:
             except FileNotFoundError: pass
         m._init_db(bucket, "default")
         with m._get_db(bucket, "default") as db:
+            db.execute("DELETE FROM objects"); db.execute("DELETE FROM crawl_progress"); db.execute("DELETE FROM discovered_prefixes")  # idempotent across runs (shared test DB_DIR)
             db.execute("UPDATE crawl_status SET status='crawling', current_crawl_gen=7 WHERE id=1")
-            db.execute("INSERT INTO crawl_progress (prefix, gen) VALUES ('a/', 7)")
-            db.execute("INSERT INTO discovered_prefixes (prefix) VALUES ('a/'), ('b/')")
+            db.execute("INSERT OR REPLACE INTO crawl_progress (prefix, gen) VALUES ('a/', 7)")
+            db.execute("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES ('a/'), ('b/')")
             for i in range(2):  # rows the interrupted crawl already wrote for a/
-                db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
                            (f"a/{i}", 1, "2026-01-01T00:00:00+00:00", "e", "a/", 1, 7))
             db.commit()
         listed = []

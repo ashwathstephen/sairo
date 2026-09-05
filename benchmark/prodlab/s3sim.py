@@ -14,7 +14,7 @@ Run:  python3 s3sim.py --spec spec.json --port 9000 --admin-port 9001 --latency-
 Spec: {"buckets": [{"name": "segments-a", "datasources": 40, "intervals": 2500, "partitions": 99}, ...]}
       objects = datasources × intervals × partitions  (40 × 2500 × 99 = 9,900,000)
 """
-import argparse, base64, bisect, datetime as dt, hashlib, json, random, threading, time
+import argparse, base64, bisect, datetime as dt, json, os, random, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.sax.saxutils import escape
@@ -29,18 +29,48 @@ class Bucket:
         self.ds, self.iv, self.pt = int(spec["datasources"]), int(spec["intervals"]), int(spec["partitions"])
         self.n = self.ds * self.iv * self.pt
         self.size_p50 = int(spec.get("size_p50", 17 * 1024 * 1024))
+        self.layout = spec.get("layout", "druid")
+        if self.layout == "druid":      # deep: druid/segments/<ds>/<interval>/<version>/<partition>/index.zip (1 object per leaf)
+            self._ds_str = [f"druid/segments/ds_{i:03d}/" for i in range(self.ds)]
+            self._iv_str = [self._interval(j) for j in range(self.iv)]
+            self._pt_str = [f"/{VERSION}/{k:04d}/index.zip" for k in range(self.pt)]
+        elif self.layout == "wide":     # wide & shallow: thousands of ULID-like top-level prefixes, a few objects each
+            self._ds_str = [f"01K{i:023d}/" for i in range(self.ds)]
+            self._iv_str = [f"{j:04d}" for j in range(self.iv)]
+            self._pt_str = [f"-{k:03d}.dat" for k in range(self.pt)]
+        elif self.layout == "hive":     # time partitions: dt=YYYY-MM-DD/hour=HH/part-NNNNN.parquet
+            self._ds_str = [f"dt={(EPOCH + dt.timedelta(days=i)).isoformat()}/" for i in range(self.ds)]
+            self._iv_str = [f"hour={j:02d}/" for j in range(self.iv)]
+            self._pt_str = [f"part-{k:05d}.parquet" for k in range(self.pt)]
+        elif self.layout == "skew":     # several top-level prefixes, one holding ~95 % of the objects (production shape)
+            # datasources 0..ds-6 live under big/pNNN/, the last 5 are small top-level prefixes → 6 top-level prefixes.
+            self._ds_str = [f"big/p{i:03d}/" for i in range(self.ds - 5)] + [f"small{i}/" for i in range(5)]
+            self._iv_str = [f"{j:04d}/" for j in range(self.iv)]
+            self._pt_str = [f"part-{k:05d}.bin" for k in range(self.pt)]
+        elif self.layout == "deepwide": # one top-level prefix whose child has a huge fan-out of tiny prefixes (production: 629k)
+            self._ds_str = [f"druid/indexing-logs/query-{i:07d}/" for i in range(self.ds)]
+            self._iv_str = [f"{j:02d}" for j in range(self.iv)]
+            self._pt_str = [f"-{k:02d}.log" for k in range(self.pt)]
+        elif self.layout == "flat":     # no delimiter at all: obj-<n>.bin at the bucket root
+            self._ds_str = [f"obj-{i:04d}" for i in range(self.ds)]
+            self._iv_str = [f"{j:04d}" for j in range(self.iv)]
+            self._pt_str = [f"{k:04d}.bin" for k in range(self.pt)]
+        else:
+            raise ValueError(f"unknown layout {self.layout}")
         self.deleted = set()          # generated keys removed via admin
         self.added = []               # sorted extra keys added via admin (key, size)
         self.lock = threading.Lock()
 
     # position <-> key (monotonic: zero-padded components keep nested-loop order == lexicographic)
+    @staticmethod
+    def _interval(j):
+        d0 = EPOCH + dt.timedelta(days=j); d1 = d0 + dt.timedelta(days=1)
+        return f"{d0.isoformat()}T00:00:00.000Z_{d1.isoformat()}T00:00:00.000Z"
+
     def key(self, n):
         i, r = divmod(n, self.iv * self.pt)
         j, k = divmod(r, self.pt)
-        d0 = EPOCH + dt.timedelta(days=j)
-        d1 = d0 + dt.timedelta(days=1)
-        return (f"druid/segments/ds_{i:03d}/{d0.isoformat()}T00:00:00.000Z_{d1.isoformat()}T00:00:00.000Z/"
-                f"{VERSION}/{k:04d}/index.zip")
+        return self._ds_str[i] + self._iv_str[j] + self._pt_str[k]
 
     def first_ge(self, s):
         """Smallest position whose key >= s (binary search over the monotonic key space)."""
@@ -54,14 +84,18 @@ class Bucket:
         return lo
 
     def obj(self, key):
-        h = hashlib.md5(key.encode()).hexdigest()
-        size = self.size_p50 // 2 + int(h[:6], 16) % self.size_p50  # 0.5x .. 1.5x p50
+        hv = (zlib.crc32(key.encode()) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF   # deterministic across processes (hash() is salted per process)
+        h = f"{hv:016x}{hv:016x}"
+        size = self.size_p50 // 2 + (hv & 0xFFFFFF) % self.size_p50  # 0.5x .. 1.5x p50
         # LastModified follows the interval date so "recent" partitions look recent
+        lm = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(minutes=(hv >> 8) % (400 * 24 * 60))
         try:
-            day = key.split("/")[3][:10]
-            lm = dt.datetime.fromisoformat(day).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=6)
+            if self.layout == "druid":
+                lm = dt.datetime.fromisoformat(key.split("/")[3][:10]).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=6)
+            elif self.layout == "hive":
+                lm = dt.datetime.fromisoformat(key[3:13]).replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=int(key.split("hour=")[1][:2]))
         except Exception:
-            lm = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+            pass
         return key, size, lm.strftime("%Y-%m-%dT%H:%M:%S.000Z"), h
 
     def truth_count(self):

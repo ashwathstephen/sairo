@@ -62,6 +62,10 @@ auth:
 telemetry:
   enabled: true
 
+# Extra environment variables for the backend container (crawler tuning knobs such as
+# SUBPREFIX_SPLIT_MIN_OBJECTS, RECRAWL_INTERVAL, ...), in Kubernetes env syntax.
+extraEnv: []
+
 # Crawler Configuration
 crawler:
   recrawlInterval: 120
