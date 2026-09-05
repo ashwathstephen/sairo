@@ -2,6 +2,30 @@
 
 All notable changes to Sairo are documented here. This project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**Upgrade note (Helm):** the default `persistence.size` moved from 5Gi to 20Gi. An existing release's PVC is patched in place, which only works when the StorageClass allows volume expansion; otherwise pass your current size (`--set persistence.size=5Gi`). The PVC now carries `helm.sh/resource-policy: keep`, so `helm uninstall` no longer deletes the index.
+
+Crawler correctness (Core program, Phase A — SAE-63).
+
+### Fixed
+
+- **A restart during a crawl no longer leaves a partial index that reports itself complete.** Completed prefixes are recorded per crawl generation (`crawl_progress`); on boot an unfinished crawl is marked `interrupted` and **resumed**, skipping finished prefixes, instead of being seeded as "fully crawled" and left delta-only for an hour. Delta crawls can no longer flip an interrupted index to `complete`. `crawl-status` gains `full_crawl_complete` and `crawl_elapsed`; the UI shows "Finishing an interrupted index".
+- **A crawl running past the 2-hour limit is asked to stop and resumed, never duplicated.** The old force-release started a second concurrent crawl of the same bucket.
+- **Graceful SIGTERM.** Running crawls stop at the next page, flush their batch and record progress; the chart sets `terminationGracePeriodSeconds: 30`.
+- **Version-purge lock is never timed out** (it stored a boolean the timeout arithmetic misread as epoch 1).
+
+### Changed
+
+- Helm: the data PVC carries `helm.sh/resource-policy: keep` (`persistence.keep: true`) so `helm uninstall`/reinstall keeps the index; default `persistence.size` is now **20Gi** (≈1 GB per 1M objects). Existing PVCs keep their size.
+- Crawls refuse to start when the index volume has under `MIN_FREE_DISK_PCT` (10) percent free; `/healthz` reports `disk_low`.
+- MCP `get_crawl_status` / bucket discovery label the new `interrupted` state.
+- Helm: new `telemetry.enabled` value (default `true`) sets the `TELEMETRY` env var; the chart previously offered no way to opt out of the anonymous heartbeat.
+
+### Upgrade note
+
+Buckets left in `crawling` by an earlier restart are marked `interrupted` on first boot and re-crawled once (resuming where progress exists). Expect one full-ish crawl per such bucket after upgrading.
+
 ## [3.6.0] - 2026-06-29
 
 Generic OpenID Connect SSO + a real per-bucket access UI (issue #9).

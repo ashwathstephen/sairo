@@ -1,0 +1,21 @@
+{"buckets": [
+  {"name": "seg-main",  "datasources": 40, "intervals": 2500, "partitions": 99},
+  {"name": "seg-b1", "datasources": 10, "intervals": 1000, "partitions": 100},
+  {"name": "seg-b2", "datasources": 10, "intervals": 1000, "partitions": 100},
+  {"name": "seg-b3", "datasources": 10, "intervals": 1000, "partitions": 100},
+  {"name": "seg-c1", "datasources": 6, "intervals": 500, "partitions": 100},
+  {"name": "seg-c2", "datasources": 6, "intervals": 500, "partitions": 100},
+  {"name": "seg-c3", "datasources": 6, "intervals": 500, "partitions": 100},
+  {"name": "seg-c4", "datasources": 6, "intervals": 500, "partitions": 100},
+  {"name": "seg-c5", "datasources": 6, "intervals": 500, "partitions": 100},
+  {"name": "seg-d01", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d02", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d03", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d04", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d05", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d06", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d07", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d08", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d09", "datasources": 5, "intervals": 220, "partitions": 100},
+  {"name": "seg-d10", "datasources": 5, "intervals": 220, "partitions": 100}
+]}

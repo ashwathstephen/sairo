@@ -1,0 +1,3 @@
+# gitleaks fingerprints to ignore (commit:file:rule:line)
+# Test-only JWT constant in the restart harness; replaced by a per-run random value in 238041c.
+4762ec6ded7f7a2f79c761d43631f338967736ff:benchmark/restart_harness/lib.sh:generic-api-key:11
