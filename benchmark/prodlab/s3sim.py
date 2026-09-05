@@ -47,6 +47,10 @@ class Bucket:
             self._ds_str = [f"big/p{i:03d}/" for i in range(self.ds - 5)] + [f"small{i}/" for i in range(5)]
             self._iv_str = [f"{j:04d}/" for j in range(self.iv)]
             self._pt_str = [f"part-{k:05d}.bin" for k in range(self.pt)]
+        elif self.layout == "deepwide": # one top-level prefix whose child has a huge fan-out of tiny prefixes (production: 629k)
+            self._ds_str = [f"druid/indexing-logs/query-{i:07d}/" for i in range(self.ds)]
+            self._iv_str = [f"{j:02d}" for j in range(self.iv)]
+            self._pt_str = [f"-{k:02d}.log" for k in range(self.pt)]
         elif self.layout == "flat":     # no delimiter at all: obj-<n>.bin at the bucket root
             self._ds_str = [f"obj-{i:04d}" for i in range(self.ds)]
             self._iv_str = [f"{j:04d}" for j in range(self.iv)]
