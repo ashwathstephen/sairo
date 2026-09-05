@@ -18,6 +18,7 @@ Crawler correctness (Core program, Phase A — SAE-63).
 - Helm: the data PVC carries `helm.sh/resource-policy: keep` (`persistence.keep: true`) so `helm uninstall`/reinstall keeps the index; default `persistence.size` is now **20Gi** (≈1 GB per 1M objects). Existing PVCs keep their size.
 - Crawls refuse to start when the index volume has under `MIN_FREE_DISK_PCT` (10) percent free; `/healthz` reports `disk_low`.
 - MCP `get_crawl_status` / bucket discovery label the new `interrupted` state.
+- Helm: new `telemetry.enabled` value (default `true`) sets the `TELEMETRY` env var; the chart previously offered no way to opt out of the anonymous heartbeat.
 
 ### Upgrade note
 

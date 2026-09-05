@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: s3sim }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: s3sim } }
+  template:
+    metadata: { labels: { app: s3sim } }
+    spec:
+      containers:
+        - name: s3sim
+          image: python:3.12-slim
+          command: ["python3", "/app/s3sim.py", "--spec", "/app/spec.json", "--port", "9000", "--admin-port", "9001", "--latency-ms", "40"]
+          ports: [{ containerPort: 9000 }, { containerPort: 9001 }]
+          volumeMounts: [{ name: app, mountPath: /app }]
+          resources: { requests: { cpu: "1", memory: 256Mi }, limits: { cpu: "3", memory: 512Mi } }
+      volumes: [{ name: app, configMap: { name: s3sim } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: s3sim }
+spec:
+  selector: { app: s3sim }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000 }
+    - { name: admin, port: 9001, targetPort: 9001 }

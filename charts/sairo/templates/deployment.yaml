@@ -86,6 +86,9 @@ spec:
               value: {{ .Values.crawler.recrawlInterval | quote }}
             # ── Telemetry: tell the app whether its storage is ephemeral, so anonymous
             #    telemetry can report id_persistence accurately (emptyDir → ephemeral). ──
+            # ── Telemetry (anonymous, aggregate-only heartbeat; set telemetry.enabled=false to opt out) ──
+            - name: TELEMETRY
+              value: {{ if and .Values.telemetry (eq (toString .Values.telemetry.enabled) "false") }}"false"{{ else }}"true"{{ end }}
             - name: SAIRO_STORAGE_EPHEMERAL
               value: {{ not .Values.persistence.enabled | quote }}
             # ── Rate Limiting ──
