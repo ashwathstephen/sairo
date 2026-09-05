@@ -755,6 +755,9 @@ class TestInitialCrawlSplit:
         from datetime import datetime, timezone
         m = sys.modules.get("backend.main") or sys.modules["main"]
         bucket = "split-initial"
+        for suffix in ("", "-wal", "-shm"):
+            try: __import__("os").remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
         m._init_db(bucket, "default")
         listed = []
         def list_objects_v2(**p):
@@ -784,6 +787,9 @@ class TestInitialCrawlSplit:
         from datetime import datetime, timezone
         m = sys.modules.get("backend.main") or sys.modules["main"]
         bucket = "split-none"
+        for suffix in ("", "-wal", "-shm"):
+            try: __import__("os").remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
         m._init_db(bucket, "default")
         listed = []
         def list_objects_v2(**p):
