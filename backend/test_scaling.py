@@ -129,8 +129,9 @@ class TestPRAGMATuning:
         _init_db("pragma-test-temp")
         with _get_db("pragma-test-temp") as db:
             val = db.execute("PRAGMA temp_store").fetchone()[0]
-            # temp_store: 0=default, 1=file, 2=memory
-            assert val == 2, f"Expected temp_store=2 (MEMORY), got {val}"
+            # temp_store: 0=default, 1=file, 2=memory. Must NOT be memory: the post-crawl rebuilds GROUP BY a
+            # computed expression over the whole objects table, and an in-memory sort of 9.9M rows is OOM-killed.
+            assert val != 2, f"temp_store must be file-backed, got {val}"
 
     def test_get_db_sets_mmap_size(self):
         _init_db("pragma-test-mmap")
@@ -424,6 +425,7 @@ class TestPrefixChildrenRebuild:
         """Files at root level (no prefix) should not appear in prefix_children."""
         _init_db("pc-root-excl-test")
         with _get_db("pc-root-excl-test") as db:
+            db.execute("DELETE FROM objects")   # shared test DB_DIR may already hold this bucket
             # Insert root-level files (prefix='')
             for i in range(10):
                 db.execute(
@@ -473,7 +475,7 @@ class TestAsyncFTSRebuild:
         source = inspect.getsource(_rebuild_fts_async)
         assert "Thread" in source
         assert "daemon=True" in source
-        assert "VALUES('rebuild')" in source
+        assert "VALUES('delete-all')" in source and "FTS_REBUILD_CHUNK" in source   # chunked, bounded-memory rebuild
 
     def test_fts_rebuild_runs_in_background(self):
         """Test that _rebuild_fts_async actually rebuilds the FTS index."""
@@ -547,8 +549,8 @@ class TestSubPrefixSplitting:
         import inspect
         source = inspect.getsource(sys.modules["main"]._run_crawl)
         assert "Sub-prefix split" in source, "Sub-prefix splitting code not found"
-        assert "len(known_prefixes) <= 3" in source, "Threshold check not found"
-        assert "existing_count > 500_000" in source, "Object count threshold not found"
+        assert "len(known_prefixes) > 3" in source, "Threshold check not found"
+        assert "SUBPREFIX_SPLIT_LEVELS" in source, "multi-level split (B.6) not found"
 
     def test_sub_prefix_expands_on_large_single_prefix(self):
         """Verify the sub-prefix logic would expand a single-prefix bucket."""
@@ -641,6 +643,7 @@ class TestFullIntegration:
         _seed_bucket(bucket, 500)
 
         with _get_db(bucket) as db:
+            db.execute("DELETE FROM storage_history")   # shared test DB_DIR may already hold earlier snapshots
             # Simulate two snapshots on the same day:
             # Snapshot 1: 500 objects, 1000000 bytes (the "peak")
             db.execute(
@@ -835,17 +838,3 @@ class TestChunkedFtsRebuild:
             assert not m._fts_is_empty(db)
             assert m._fts_should_rebuild(bucket, "default", False) is False
 
-
-class TestTempStoreIsFileBacked:
-    def test_connections_do_not_force_in_memory_temp_store(self):
-        # The post-crawl rebuilds GROUP BY a computed expression over the whole objects table; with
-        # temp_store=MEMORY that sort is a full-table copy in RAM (OOMKilled at 9.9M rows under 1Gi).
-        import sys, os
-        m = sys.modules.get("backend.main") or sys.modules["main"]
-        bucket = "temp-store-check"
-        for suffix in ("", "-wal", "-shm"):
-            try: os.remove(m._db_path(bucket, "default") + suffix)
-            except FileNotFoundError: pass
-        m._init_db(bucket, "default")
-        with m._get_db(bucket, "default") as db:
-            assert db.execute("PRAGMA temp_store").fetchone()[0] != 2   # 2 = MEMORY
