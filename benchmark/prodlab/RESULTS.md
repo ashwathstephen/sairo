@@ -160,3 +160,14 @@ Live confirmation on the production bucket: the same log line, then the prefix l
 
 A Python-level thread dump (temporary local patch, never committed — the faulthandler variant segfaulted the process and was reverted the same night) showed the truth: the skewed bucket's 46 sub-prefixes had all completed except **two**, each on one thread blocked in an SSL read of a list page, while the same process had **28 more delimiter listings in flight** from three delta crawls (`_discover_delta_targets`) plus the other buckets' prefix threads, all through one 16-connection pool (1,143 "connection pool is full" warnings). Not a hang: a throughput collapse at the provider under ~30 concurrent listings from one client — the case for a provider-wide list budget (SAE-75, B.4), now with evidence. Two smaller gaps fixed on the branch: the stall detector was blind during discovery (it now sees every listed page), and the heavy child (327k objects) stayed a single unit because the skew loop stopped at 16 children instead of re-checking which children are heavy.
 
+## Run 8 — seg-main only (9.9M), fresh volume, image `phase-b14` = PR #31 head (cabda73): shadow-table FTS rebuild
+
+| Metric | Value |
+|---|---|
+| `crawl_duration` | **454.8 s** (4b: 452.7 s, 4c: 473.0 s — unchanged) |
+| Restarts, whole run | **0** |
+| Post-crawl metadata rebuilds | prefix_children 32.7 s (file-backed sort, `SQLITE_TMPDIR` on the data volume) |
+| FTS rebuild into `objects_fts_new` + atomic swap | **310.1 s** (4c: 308.3 s with the in-place chunked variant) — same cost, but the old index stays searchable throughout and a kill mid-build leaves it intact |
+| Process RSS after | 345 MB |
+| Index size | 10.06 GB (the shadow table needs the old index's space only until the swap) |
+
