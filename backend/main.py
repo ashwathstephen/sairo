@@ -1648,6 +1648,7 @@ def _run_crawl(bucket, endpoint_id=None):
 
         progress_rows = [0]
         progress_lock = threading.Lock()
+        last_recount = [time.monotonic()]
 
         wlock = _write_lock(crawl_key)
 
@@ -1694,11 +1695,17 @@ def _run_crawl(bucket, endpoint_id=None):
                     failed_prefixes.append(p)
                     log.warning("[%s:%s] Prefix '%s' failed: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
 
-                # Update progress after each prefix
-                with wlock, _get_db(bucket, eid) as db:
-                    row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
-                    db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
-                    db.commit()
+                # Update progress after each prefix. A full COUNT(*)/SUM over the objects table per
+                # prefix is O(rows) each time: a bucket with thousands of small prefixes (wide layouts;
+                # production has one with 3,800+) paid thousands of full scans. Initial crawls already
+                # publish rows written per batch; for incremental crawls refresh the exact totals at most
+                # every PROGRESS_RECOUNT_SECONDS (and once at the end, below).
+                if incremental and time.monotonic() - last_recount[0] >= PROGRESS_RECOUNT_SECONDS:
+                    with wlock, _get_db(bucket, eid) as db:
+                        row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                        db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
+                        db.commit()
+                    last_recount[0] = time.monotonic()
 
         if interrupted:
             raise CrawlInterrupted(bucket)
@@ -2129,6 +2136,7 @@ def _is_index_ready(bucket):
             return False
 
 
+PROGRESS_RECOUNT_SECONDS = int(os.environ.get("PROGRESS_RECOUNT_SECONDS", "15"))  # incremental-crawl progress refresh cadence
 FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
 SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))  # drill down this many levels when a bucket has <=3 top-level prefixes
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
