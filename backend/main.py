@@ -44,12 +44,6 @@ from pricing import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sairo")
 
-# Operational debug knob: `kill -USR1 <pid>` dumps every thread's Python stack to stderr.
-# Cheap, always on; the only way to see what a stalled crawler thread is doing in place.
-import faulthandler as _faulthandler, signal as _signal
-if hasattr(_signal, "SIGUSR1"):
-    _faulthandler.register(_signal.SIGUSR1, all_threads=True, chain=False)
-
 
 class _HealthCheckFilter(logging.Filter):
     """Suppress noisy health check access logs from HAProxy/k8s probes."""
