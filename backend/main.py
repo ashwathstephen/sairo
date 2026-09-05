@@ -1383,14 +1383,66 @@ def _rebuild_fts(bucket, endpoint_id=None):
 
 
 def _rebuild_fts_async(bucket, endpoint_id=None, done=None):
-    """Run _rebuild_fts on a daemon thread; `done()` runs when it finishes, success or not."""
+    """Run _rebuild_fts on a daemon thread; `done()` runs when it finishes, success or not. Returns the thread."""
     def _run():
         try:
             _rebuild_fts(bucket, endpoint_id)
         finally:
             if done is not None:
                 done()
-    threading.Thread(target=_run, name=f"fts-{bucket[:12]}", daemon=True).start()
+    t = threading.Thread(target=_run, name=f"fts-{bucket[:12]}", daemon=True)
+    t.start()
+    return t
+
+
+def _ensure_fts_ready(bucket, endpoint_id=None):
+    """Startup repair for a served index whose search generation is absent or stale.
+
+    Databases from before fts_ready_gen existed have NULL: if their index is healthy it was built by the
+    previous release's post-crawl rebuild, so the marker is backfilled (verified, not assumed). A
+    marker behind the current generation, or an unhealthy index, means a rebuild never committed:
+    repair it now instead of reporting `rebuilding` until the next full reconcile. Returns the
+    rebuild thread when one was started, else None."""
+    eid = endpoint_id or "default"
+    crawl_key = f"{eid}:{bucket}"
+    try:
+        with _get_db(bucket, eid) as db:
+            row = db.execute("SELECT status, fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+            if not row or row["status"] not in ("complete", "degraded"):
+                return None
+            ready, gen = row["fts_ready_gen"], (row["current_crawl_gen"] or 0)
+            healthy = _fts_healthy(db)
+            if ready == gen and healthy:
+                return None
+            if ready is None and healthy:
+                db.execute("UPDATE crawl_status SET fts_ready_gen=? WHERE id=1", (gen,))
+                db.commit()
+                log.info("[%s:%s] Search index verified; readiness marker backfilled for generation %d", eid, bucket, gen)
+                return None
+    except Exception as e:
+        log.warning("[%s:%s] Could not check search readiness: %s", eid, bucket, e)
+        return None
+    log.info("[%s:%s] Search index generation %s behind catalogue generation %d (or unhealthy) — repairing now", eid, bucket, ready, gen)
+    with _crawl_lock:
+        _rebuilding.add(crawl_key)
+    def _release():
+        with _crawl_lock:
+            _rebuilding.discard(crawl_key)
+    return _rebuild_fts_async(bucket, eid, done=_release)
+
+
+def _fts_healthy(db):
+    """The search index exists, is readable and is not empty while objects exist. A generation
+    marker alone is not proof: a missing or unreadable FTS table must never read as ready."""
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects_fts'").fetchone():
+            return False
+        db.execute("SELECT rowid FROM objects_fts LIMIT 1").fetchall()
+        if db.execute("SELECT COUNT(*) FROM objects").fetchone()[0] == 0:
+            return True
+        return not _fts_is_empty(db)
+    except Exception:
+        return False
 
 
 def _fts_is_empty(db):
@@ -1416,7 +1468,7 @@ def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
             obj = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
             if obj == 0:
                 return False
-            if _fts_is_empty(db):
+            if not _fts_healthy(db):
                 return True
             # The index is only known-good if the previous generation's rebuild committed
             # (a process killed mid-rebuild leaves the old index, still valid for its own generation).
@@ -2508,14 +2560,17 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
             try:
                 now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 with _get_db(bucket, eid) as db:
-                    if delta_error is None and prev_status not in ("interrupted", "degraded"):
+                    # Only an already-complete catalogue is promotable by a delta: a hot-prefix refresh
+                    # cannot make a degraded, interrupted or errored full crawl whole.
+                    restore = prev_status if prev_status != "crawling" else "complete"
+                    if delta_error is None and prev_status == "complete":
                         db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL WHERE id=1",
                                    (now_iso, now_iso))
                     elif delta_error is None:
-                        db.execute("UPDATE crawl_status SET status=?, last_attempt_at=? WHERE id=1", (prev_status, now_iso))
+                        db.execute("UPDATE crawl_status SET status=?, last_attempt_at=? WHERE id=1", (restore, now_iso))
                     else:
                         db.execute("UPDATE crawl_status SET status=?, last_attempt_at=?, last_error=? WHERE id=1",
-                                   (prev_status if prev_status != "crawling" else "complete", now_iso, delta_error))
+                                   (restore, now_iso, delta_error))
                     db.commit()
             except Exception:
                 pass
@@ -2686,6 +2741,7 @@ def startup():
                         if total > 0 and dur > 0 and prev_status not in ("interrupted", "degraded"):
                             _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
                             seeded = True
+                            _ensure_fts_ready(name, eid)   # legacy NULL marker → verify and backfill; stale → repair now
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
                                      eid, name, f"{total:,}")
                     except Exception:
@@ -5645,12 +5701,13 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
         return {"status": "not_indexed", "total_objects": 0, "total_size": 0}
     with _get_db(bucket) as db:
         row = db.execute("SELECT * FROM crawl_status WHERE id=1").fetchone()
+        fts_ok = _fts_healthy(db) if row else False
     if not row:
         return {"status": "unknown"}
     d = dict(row)
     st = d.get("status") or ""
-    # True only when a full crawl has finished and nothing since has interrupted one.
-    d["full_crawl_complete"] = bool(d.get("crawl_duration")) and st != "interrupted" and not st.startswith("error")
+    # 4. the name means what it says: the last full crawl finished whole.
+    d["full_crawl_complete"] = st == "complete"
     crawl_key = f"{_current_endpoint_id()}:{bucket}"
     started = _crawling.get(crawl_key)
     d["crawl_elapsed"] = round(time.time() - started, 1) if isinstance(started, float) else None
@@ -5659,7 +5716,8 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
     # skipped as unnecessary) compared with the current generation — not an in-memory flag that a
     # restart would lose.
     served = st in ("complete", "degraded")
-    d["search_ready"] = served and d.get("fts_ready_gen") is not None and d["fts_ready_gen"] == (d.get("current_crawl_gen") or 0)
+    d["search_ready"] = (served and fts_ok and d.get("fts_ready_gen") is not None
+                         and d["fts_ready_gen"] == (d.get("current_crawl_gen") or 0))
     d["rebuilding"] = served and not d["search_ready"]
     return d
 

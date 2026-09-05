@@ -1166,3 +1166,101 @@ class TestTruthfulStates:
             row = dict(db.execute("SELECT status, last_error, last_attempt_at, last_crawl_end FROM crawl_status").fetchone())
         assert row["status"] == "complete" and row["last_error"] is None and row["last_attempt_at"] and row["last_crawl_end"], row
 
+    # ── review round 2: the four remaining blockers ──────────────────────────────────────
+
+    def test_delta_cannot_promote_an_errored_full_crawl(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta-error"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        with m._get_db(bucket, "default") as db:
+            end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+            db.execute("UPDATE crawl_status SET status='error: AccessDenied', last_error='AccessDenied'"); db.commit()
+        with patch.object(m, "_delta_crawl", return_value=(5, [])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            assert m._queue_delta_crawl(bucket, "default") is True
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_error, last_crawl_end, last_attempt_at FROM crawl_status").fetchone())
+        assert row["status"] == "error: AccessDenied" and row["last_error"] == "AccessDenied", row
+        assert row["last_crawl_end"] == end0 and row["last_attempt_at"], row
+        assert m.crawl_status(bucket, user={})["full_crawl_complete"] is False
+
+    def test_startup_repairs_absent_or_stale_search_generation(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-startup-fts"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        # legacy database: the previous release built the index at completion but knew no marker.
+        # Simulate: healthy index, fts_ready_gen NULL → verified backfill, no rebuild.
+        m._rebuild_fts(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET fts_ready_gen = NULL"); db.commit()
+            assert m._fts_healthy(db)
+        assert m._ensure_fts_ready(bucket, "default") is None
+        d = m.crawl_status(bucket, user={})
+        assert d["fts_ready_gen"] == d["current_crawl_gen"] and d["search_ready"] is True and d["rebuilding"] is False, d
+        # stale marker (a rebuild that never committed) → repaired immediately, readiness restored
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen - 2"); db.commit()
+        t = m._ensure_fts_ready(bucket, "default")
+        assert t is not None
+        t.join(30)
+        d = m.crawl_status(bucket, user={})
+        assert d["fts_ready_gen"] == d["current_crawl_gen"] and d["search_ready"] is True, d
+        assert f"default:{bucket}" not in m._rebuilding
+
+    def test_generation_marker_alone_never_reports_search_ready(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-fts-invalid"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        m._rebuild_fts(bucket, "default")
+        assert m.crawl_status(bucket, user={})["search_ready"] is True
+        # marker says ready, but the index has been emptied underneath it
+        with m._get_db(bucket, "default") as db:
+            db.execute("INSERT INTO objects_fts(objects_fts) VALUES('delete-all')"); db.commit()
+            assert not m._fts_healthy(db)
+        d = m.crawl_status(bucket, user={})
+        assert d["fts_ready_gen"] == d["current_crawl_gen"] and d["search_ready"] is False and d["rebuilding"] is True, d
+        assert m._fts_should_rebuild(bucket, "default", False) is True
+        # marker says ready, but the table is gone
+        with m._get_db(bucket, "default") as db:
+            for trg in ("objects_fts_ai", "objects_fts_ad", "objects_fts_au"):
+                db.execute(f"DROP TRIGGER IF EXISTS {trg}")
+            db.execute("DROP TABLE objects_fts"); db.commit()
+            assert not m._fts_healthy(db)
+        assert m.crawl_status(bucket, user={})["search_ready"] is False
+        assert m._fts_should_rebuild(bucket, "default", False) is True
+        m._rebuild_fts(bucket, "default")   # and the rebuild recreates the table + triggers
+        with m._get_db(bucket, "default") as db:
+            assert m._fts_healthy(db)
+        assert m.crawl_status(bucket, user={})["search_ready"] is True
+
+    def test_full_crawl_complete_is_false_for_degraded(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-fcc"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert m.crawl_status(bucket, user={})["full_crawl_complete"] is True
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket, fail_prefix="c/")), patch.object(m._rebuild_pool, "submit"), patch.object(m.time, "sleep"):
+            m._run_crawl(bucket, "default")
+        d = m.crawl_status(bucket, user={})
+        assert d["status"] == "degraded" and d["full_crawl_complete"] is False and d["crawl_duration"], d
+
