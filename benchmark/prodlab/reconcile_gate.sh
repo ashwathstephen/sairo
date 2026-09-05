@@ -70,5 +70,10 @@ say "after cycle 3: $(snapshot)"
 check '[ "$(field rows)" = "$(truth)" ]' "cycle 3 rows == truth after kill+resume" '$(field rows) vs $(truth)'
 check '[[ "$(field last_crawl_end)" > "$END2" ]]' "cycle 3 advanced last_crawl_end only after the resumed crawl completed" '$(field last_crawl_end)'
 check '[ "$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")" = 0 ]' "no unplanned container restarts (OOM/crash)" '$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")'
-check '[ "$(kubectl -n lab logs deploy/sairo --tail=50000 2>/dev/null | grep -cE "database is locked|Traceback" )" = 0 ]' "zero lock errors / tracebacks" ''
+# Operational failures only. "Prefix ... failed after N retries" (ERROR level) is the EXPECTED outcome of the injected
+# LIST failures in cycle 1, and every pod logs one trapped passlib/bcrypt version traceback at startup.
+LOGS=$(kubectl -n lab logs deploy/sairo --tail=50000 2>/dev/null)
+OPS=$(echo "$LOGS" | grep -cE "database is locked|Crawl error:|Delta crawl error|FTS rebuild failed|Post-crawl .* failed")
+TB=$(( $(echo "$LOGS" | grep -c "^Traceback") - $(echo "$LOGS" | grep -A3 "^Traceback" | grep -c "module 'bcrypt'") ))
+check '[ "$OPS" = 0 ] && [ "$TB" -le 0 ]' "zero lock errors, crawl/delta errors, rebuild failures, or unexpected tracebacks" '"ops=$OPS tracebacks=$TB"'
 say "RESULT: $FAILS failure(s)"; exit $FAILS
