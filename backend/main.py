@@ -942,7 +942,7 @@ def _init_db(bucket, endpoint_id=None):
         pass  # Column already exists
     # Truthful state: last_crawl_end is stamped on SUCCESS only; a failed attempt records
     # last_attempt_at + last_error instead, so freshness is never faked by a failure.
-    for col in ("last_error TEXT", "last_attempt_at TEXT"):
+    for col in ("last_error TEXT", "last_attempt_at TEXT", "fts_ready_gen INTEGER"):
         try:
             conn.execute(f"ALTER TABLE crawl_status ADD COLUMN {col}")
         except Exception:
@@ -1374,6 +1374,8 @@ def _rebuild_fts(bucket, endpoint_id=None):
             db.execute("DROP TABLE IF EXISTS objects_fts")
             db.execute("ALTER TABLE objects_fts_new RENAME TO objects_fts")
             _create_fts_triggers(db)
+            # Persisted readiness: the search index now covers this generation (survives restarts).
+            db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen WHERE id=1")
             db.commit()
         log.info("[%s:%s] FTS index rebuilt in %.1fs (shadow table, %d-row chunks)", eid, bucket, time.monotonic() - t0, FTS_REBUILD_CHUNK)
     except Exception as e:
@@ -1414,7 +1416,13 @@ def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
             obj = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
             if obj == 0:
                 return False
-            return _fts_is_empty(db)
+            if _fts_is_empty(db):
+                return True
+            # The index is only known-good if the previous generation's rebuild committed
+            # (a process killed mid-rebuild leaves the old index, still valid for its own generation).
+            row = db.execute("SELECT fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+            ready, gen = (row[0] if row else None), ((row[1] if row else 0) or 0)
+            return ready is None or ready < gen - 1
     except Exception:
         return True  # if we can't tell, rebuild to be safe
 
@@ -1470,6 +1478,7 @@ def _run_crawl(bucket, endpoint_id=None):
     # Set thread-local so _db_path picks up the right endpoint
     _s3_context.endpoint_id = eid
     client = _s3_manager.get_client(eid)
+    failed_prefixes = []   # read in `finally`: a degraded finish must not be scheduled as a success
 
     _init_db(bucket, eid)
 
@@ -1483,7 +1492,8 @@ def _run_crawl(bucket, endpoint_id=None):
         # Resume: an interrupted crawl left per-prefix progress for its generation. Keep that
         # generation and skip the prefixes it already completed instead of starting over.
         done_prefixes = set()
-        if prev_status in ("crawling", "interrupted") and prev_gen:
+        if prev_status in ("crawling", "interrupted", "degraded") and prev_gen:
+            # 'degraded' = last attempt finished with failed prefixes: retry only those.
             done_prefixes = {r[0] for r in db.execute("SELECT prefix FROM crawl_progress WHERE gen=?", (prev_gen,))}
         if done_prefixes:
             db.execute("UPDATE crawl_status SET status='crawling', last_crawl_start=? WHERE id=1",
@@ -1666,9 +1676,10 @@ def _run_crawl(bucket, endpoint_id=None):
                     db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
                     log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
                 row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 db.execute(
-                    "UPDATE crawl_status SET status='complete', last_crawl_end=?, total_objects=?, total_size=? WHERE id=1",
-                    (time.strftime("%Y-%m-%dT%H:%M:%SZ"), row[0], row[1]))
+                    "UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL, total_objects=?, total_size=? WHERE id=1",
+                    (now_iso, now_iso, row[0], row[1]))
                 db.commit()
             # Re-enable FTS triggers (instant)
             with _get_db(bucket, eid) as db:
@@ -1847,7 +1858,8 @@ def _run_crawl(bucket, endpoint_id=None):
         try:
             with _get_db(bucket, eid) as db:
                 _enable_fts_triggers(db)
-                db.execute("UPDATE crawl_status SET status='interrupted' WHERE id=1")
+                db.execute("UPDATE crawl_status SET status='interrupted', last_attempt_at=? WHERE id=1",
+                           (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
                 db.commit()
         except Exception:
             pass
@@ -1859,7 +1871,8 @@ def _run_crawl(bucket, endpoint_id=None):
         try:
             with _get_db(bucket, eid) as db:
                 _enable_fts_triggers(db)  # Always re-enable even on error
-                db.execute("UPDATE crawl_status SET status=? WHERE id=1", (f"error: {e}",))
+                db.execute("UPDATE crawl_status SET status=?, last_attempt_at=?, last_error=? WHERE id=1",
+                           (f"error: {e}", time.strftime("%Y-%m-%dT%H:%M:%SZ"), str(e)[:200]))
                 db.commit()
         except Exception as inner_e:
             log.warning("Failed to write crawl error status for %s: %s", bucket, inner_e)
@@ -1880,8 +1893,15 @@ def _run_crawl(bucket, endpoint_id=None):
                 # Record full-crawl timing so the scheduler can decide between a
                 # cheap full recrawl (small buckets) and fast delta crawls (large).
                 m = _crawl_meta.setdefault(crawl_key, {})
-                m["last_full"] = time.time()
                 m["duration"] = time.monotonic() - crawl_start
+                if failed_prefixes:
+                    # Degraded: not a success. No last_full (so no delta-only period), a cooldown
+                    # instead, after which the scheduler resumes the unfinished prefixes.
+                    m.pop("last_full", None)
+                    m["degraded_at"] = time.time()
+                else:
+                    m.pop("degraded_at", None)
+                    m["last_full"] = time.time()
                 try:
                     with _get_db(bucket, eid) as _db:
                         _db.execute("UPDATE crawl_status SET crawl_duration=? WHERE id=1", (m["duration"],))
@@ -1921,6 +1941,9 @@ def _run_crawl(bucket, endpoint_id=None):
                     _rebuild_fts_async(bucket, eid, done=_release)
                     handed_off = True
                 else:
+                    with _get_db(bucket, eid) as db:   # unchanged index is valid for this generation too
+                        db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen WHERE id=1")
+                        db.commit()
                     log.info("[%s:%s] FTS rebuild skipped — no key changes this crawl", eid, bucket)
             finally:
                 if not handed_off:
@@ -2367,12 +2390,12 @@ def _delta_crawl(bucket, endpoint_id):
     """Fast incremental crawl: re-list ONLY the narrow hot prefixes (where new data
     lands) plus any brand-new sibling partitions, in PARALLEL, and incremental-upsert.
     FTS triggers stay enabled so search updates per row (no full trigram rebuild).
-    Avoids re-listing the whole bucket. Returns #new/changed objects."""
+    Avoids re-listing the whole bucket. Returns (#new/changed objects, [targets whose listing failed])."""
     eid = endpoint_id or "default"
     client = _s3_manager.get_client(eid)
     hot = _hot_target_prefixes(bucket, eid)
     if not hot:
-        return 0
+        return 0, []
 
     # Surface delta activity to the UI (status + last_crawl_start). The index stays
     # queryable throughout because _is_index_ready treats any bucket with
@@ -2400,10 +2423,19 @@ def _delta_crawl(bucket, endpoint_id):
 
     # List all targets in parallel (the hot set is small; this keeps a delta fast
     # even when several partitions are active).
-    all_objs = []
+    all_objs, failed_targets = [], []
+    def _list_or_fail(tp):
+        try:
+            return tp, _delta_list_prefix(client, bucket, tp)
+        except Exception as e:   # one failed target degrades the delta; it must not fake a full refresh
+            log.warning("[%s:%s] delta target '%s' failed: %s", eid, bucket, tp[:60], e)
+            return tp, None
     with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
-        for objs in ex.map(lambda tp: _delta_list_prefix(client, bucket, tp), targets):
-            all_objs.extend(objs)
+        for tp, objs in ex.map(_list_or_fail, targets):
+            if objs is None:
+                failed_targets.append(tp)
+            else:
+                all_objs.extend(objs)
 
     changed = 0
     with _get_db(bucket, eid) as db:
@@ -2433,7 +2465,7 @@ def _delta_crawl(bucket, endpoint_id):
                 step(bucket, eid)
             except Exception as e:
                 log.warning("[%s:%s] delta post-step %s failed: %s", eid, bucket, getattr(step, "__name__", step), e)
-    return changed
+    return changed, failed_targets
 
 
 def _queue_delta_crawl(bucket, endpoint_id=None):
@@ -2447,33 +2479,43 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
 
     def _run():
         t0 = time.monotonic()
+        delta_error = None
+        try:
+            with _get_db(bucket, eid) as db:   # _delta_crawl shows 'crawling' meanwhile; restore this afterwards
+                row = db.execute("SELECT status FROM crawl_status WHERE id=1").fetchone()
+                prev_status = (row[0] if row else None) or "complete"
+        except Exception:
+            prev_status = "complete"
         try:
             _s3_context.endpoint_id = eid
-            n = _delta_crawl(bucket, eid)
+            n, failed_targets = _delta_crawl(bucket, eid)
             with _crawl_lock:
                 _crawl_meta.setdefault(crawl_key, {})["last_delta"] = time.time()
-            log.info("[%s:%s] Delta crawl: %d new/changed in %.1fs", eid, bucket, n, time.monotonic() - t0)
+            if failed_targets:
+                delta_error = f"{len(failed_targets)} delta target(s) failed to list"
+                log.warning("[%s:%s] Delta crawl degraded: %d new/changed, %s in %.1fs", eid, bucket, n, delta_error, time.monotonic() - t0)
+            else:
+                log.info("[%s:%s] Delta crawl: %d new/changed in %.1fs", eid, bucket, n, time.monotonic() - t0)
         except Exception as e:
             log.warning("[%s:%s] Delta crawl error: %s", eid, bucket, e)
             delta_error = str(e)[:200]
-        else:
-            delta_error = None
         finally:
             with _crawl_lock:
                 _crawling.pop(crawl_key, None)
-            # Success stamps the success time. A failed delta records the attempt and the error and
-            # leaves status and last_crawl_end alone: monitoring must not see freshness that did not happen.
+            # Only a clean delta on a complete index stamps last_crawl_end. A degraded or failed delta,
+            # or a delta over an interrupted/degraded index, records the attempt (and the error) and
+            # restores the previous status: monitoring must not see freshness that did not happen.
             try:
                 now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 with _get_db(bucket, eid) as db:
-                    if delta_error is None:
-                        # A delta refreshes hot prefixes only; it must not relabel an interrupted or degraded full crawl as complete.
-                        db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL "
-                                   "WHERE id=1 AND status NOT IN ('interrupted', 'degraded')", (now_iso, now_iso))
-                        db.execute("UPDATE crawl_status SET last_crawl_end=?, last_attempt_at=? WHERE id=1 AND status IN ('interrupted', 'degraded')",
+                    if delta_error is None and prev_status not in ("interrupted", "degraded"):
+                        db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL WHERE id=1",
                                    (now_iso, now_iso))
+                    elif delta_error is None:
+                        db.execute("UPDATE crawl_status SET status=?, last_attempt_at=? WHERE id=1", (prev_status, now_iso))
                     else:
-                        db.execute("UPDATE crawl_status SET last_attempt_at=?, last_error=? WHERE id=1", (now_iso, delta_error))
+                        db.execute("UPDATE crawl_status SET status=?, last_attempt_at=?, last_error=? WHERE id=1",
+                                   (prev_status if prev_status != "crawling" else "complete", now_iso, delta_error))
                     db.commit()
             except Exception:
                 pass
@@ -2556,8 +2598,11 @@ def _auto_recrawl():
                         key = f"{eid}:{name}"
                         meta = _crawl_meta.get(key)
                         if not meta or "last_full" not in meta:
+                            degraded_at = (meta or {}).get("degraded_at")
+                            if degraded_at and now - degraded_at < RECRAWL_INTERVAL:
+                                continue   # degraded: retry the unfinished prefixes after the cooldown
                             if _queue_crawl(name, eid):
-                                log.info("Full crawl queued for %s (initial)", key)
+                                log.info("Full crawl queued for %s (%s)", key, "retry of unfinished prefixes" if degraded_at else "initial")
                             continue
                         if (now - meta["last_full"]) > FULL_CRAWL_INTERVAL:
                             if _queue_crawl(name, eid):
@@ -2638,7 +2683,7 @@ def startup():
                         # Seed only from a COMPLETED full crawl (one that recorded a duration). Seeding
                         # an interrupted index marked it "fresh" and left large buckets delta-only for
                         # FULL_CRAWL_INTERVAL while a third of the data was missing.
-                        if total > 0 and dur > 0 and prev_status != "interrupted":
+                        if total > 0 and dur > 0 and prev_status not in ("interrupted", "degraded"):
                             _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
                             seeded = True
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
@@ -2648,7 +2693,7 @@ def startup():
                     if not seeded:
                         _queue_crawl(name, eid)
                         log.info("Queued %s crawl for %s:%s",
-                                 "resume of interrupted" if prev_status == "interrupted" else "initial", eid, name)
+                                 f"resume of {prev_status}" if prev_status in ("interrupted", "degraded") else "initial", eid, name)
             except Exception as e:
                 log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
     threading.Thread(target=_startup_crawl, daemon=True).start()
@@ -5609,10 +5654,13 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
     crawl_key = f"{_current_endpoint_id()}:{bucket}"
     started = _crawling.get(crawl_key)
     d["crawl_elapsed"] = round(time.time() - started, 1) if isinstance(started, float) else None
-    # 'complete' means the catalogue rows are in; folder stats and the search index are rebuilt
-    # afterwards (minutes at 10M keys). Say so instead of letting clients infer it.
-    d["rebuilding"] = crawl_key in _rebuilding
-    d["search_ready"] = st in ("complete", "degraded") and not d["rebuilding"]
+    # 'complete' means the catalogue rows are in; the search index is rebuilt afterwards (minutes at
+    # 10M keys). Readiness is the persisted fts_ready_gen (stamped when a rebuild commits or is
+    # skipped as unnecessary) compared with the current generation — not an in-memory flag that a
+    # restart would lose.
+    served = st in ("complete", "degraded")
+    d["search_ready"] = served and d.get("fts_ready_gen") is not None and d["fts_ready_gen"] == (d.get("current_crawl_gen") or 0)
+    d["rebuilding"] = served and not d["search_ready"]
     return d
 
 

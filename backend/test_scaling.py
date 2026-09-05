@@ -1046,7 +1046,8 @@ class TestTruthfulStates:
         assert after["last_crawl_end"] == before["last_crawl_end"], "a failed delta must not stamp a success time"
         assert after["last_error"] == "SlowDown" and after["last_attempt_at"]
 
-    def test_crawl_status_reports_rebuilding_and_search_readiness(self):
+    def test_search_readiness_is_persisted_per_generation(self):
+        """search_ready comes from fts_ready_gen == current_crawl_gen in the DB, never from an in-memory set."""
         import sys
         from unittest.mock import patch
         m = sys.modules.get("backend.main") or sys.modules["main"]
@@ -1054,13 +1055,114 @@ class TestTruthfulStates:
         m._init_db(bucket, "default")
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
-        key = f"default:{bucket}"
-        try:
-            d = m.crawl_status(bucket, user={})
-            assert d["status"] == "complete" and d["rebuilding"] is True and d["search_ready"] is False, d   # rebuild pool was mocked: still marked rebuilding
-        finally:
-            with m._crawl_lock:
-                m._rebuilding.discard(key)
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
         d = m.crawl_status(bucket, user={})
-        assert d["rebuilding"] is False and d["search_ready"] is True, d
+        assert d["status"] == "complete" and d["fts_ready_gen"] is None and d["rebuilding"] is True and d["search_ready"] is False, d
+        assert m._fts_should_rebuild(bucket, "default", False) is True, "no committed rebuild for this generation → rebuild"
+        m._rebuild_fts(bucket, "default")
+        d = m.crawl_status(bucket, user={})
+        assert d["fts_ready_gen"] == d["current_crawl_gen"] and d["search_ready"] is True and d["rebuilding"] is False, d
+        assert m._fts_should_rebuild(bucket, "default", False) is False
+        with m._get_db(bucket, "default") as db:   # a rebuild lost two generations ago must be redone even with no key changes
+            db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen - 2"); db.commit()
+        assert m._fts_should_rebuild(bucket, "default", False) is True
+        with m._get_db(bucket, "default") as db:   # the previous generation's rebuild is enough when keys did not change
+            db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen - 1"); db.commit()
+        assert m._fts_should_rebuild(bucket, "default", False) is False
+
+    def test_degraded_is_resumed_and_retries_only_unfinished_prefixes(self):
+        import sys, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-resume"
+        key = f"default:{bucket}"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket, fail_prefix="c/")), patch.object(m._rebuild_pool, "submit"), patch.object(m.time, "sleep"):
+            m._run_crawl(bucket, "default")
+        meta = m._crawl_meta.get(key, {})
+        assert "last_full" not in meta and meta.get("degraded_at"), meta   # scheduler retries after RECRAWL_INTERVAL, no delta-only period
+        with m._crawl_lock:
+            m._rebuilding.discard(key)
+        healthy = self._mk(m, bucket)
+        with patch.object(m._s3_manager, "get_client", return_value=healthy), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        listed = [c.kwargs.get("Prefix") for c in healthy.list_objects_v2.call_args_list if not c.kwargs.get("Delimiter")]
+        assert listed == ["c/"], f"only the unfinished prefix must be re-listed, got {listed}"
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_error FROM crawl_status").fetchone())
+        assert row["status"] == "complete" and row["last_error"] is None, row
+        assert "last_full" in m._crawl_meta[key] and "degraded_at" not in m._crawl_meta[key]
+
+    def test_degraded_delta_and_delta_over_degraded_index_do_not_advance_last_crawl_end(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta2"
+        key = f"default:{bucket}"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(key)
+        with m._get_db(bucket, "default") as db:
+            end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+        # degraded delta: one target failed
+        with patch.object(m, "_delta_crawl", return_value=(3, ["a/"])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            assert m._queue_delta_crawl(bucket, "default") is True
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        assert row == {"status": "complete", "last_crawl_end": end0, "last_error": "1 delta target(s) failed to list"}, row
+        # clean delta over a degraded index: status stays degraded, no success stamp
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='degraded', last_error='2 prefix(es) failed to list'"); db.commit()
+        with patch.object(m, "_delta_crawl", return_value=(0, [])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            assert m._queue_delta_crawl(bucket, "default") is True
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_crawl_end, last_attempt_at FROM crawl_status").fetchone())
+        assert row["status"] == "degraded" and row["last_crawl_end"] == end0 and row["last_attempt_at"], row
+
+    def test_delta_crawl_reports_failed_targets_and_keeps_good_ones(self):
+        import sys
+        from unittest.mock import patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta3"
+        m._init_db(bucket, "default")
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        def listing(client, b, tp):
+            if tp == "b/":
+                raise ConnectionError("provider went away")
+            return [{"Key": f"{tp}new", "Size": 1, "LastModified": lm, "ETag": '"n"'}]
+        with patch.object(m, "_hot_target_prefixes", return_value=["a/", "b/"]), patch.object(m, "_discover_delta_targets", return_value=set()), \
+             patch.object(m, "_delta_list_prefix", side_effect=listing), patch.object(m._s3_manager, "get_client", return_value=object()):
+            changed, failed = m._delta_crawl(bucket, "default")
+        assert (changed, failed) == (1, ["b/"])
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects WHERE key='a/new'").fetchone()[0] == 1
+
+    def test_fatal_and_simple_paths_record_attempt_and_error(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # fatal: the root listing itself explodes
+        bucket = "truth-fatal"; m._init_db(bucket, "default")
+        client = MagicMock(); client.list_objects_v2.side_effect = RuntimeError("AccessDenied")
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"), patch.object(m.time, "sleep"):
+            m._run_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_error, last_attempt_at, last_crawl_end FROM crawl_status").fetchone())
+        assert row["status"].startswith("error") and "AccessDenied" in row["last_error"] and row["last_attempt_at"] and row["last_crawl_end"] is None, row
+        # simple path: root-level files only
+        bucket = "truth-simple"; m._init_db(bucket, "default")
+        client = MagicMock(); client.list_objects_v2.side_effect = lambda **p: {"Contents": [{"Key": "root.txt", "Size": 1, "LastModified": lm, "ETag": '"e"'}], "CommonPrefixes": [], "IsTruncated": False}
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_error, last_attempt_at, last_crawl_end FROM crawl_status").fetchone())
+        assert row["status"] == "complete" and row["last_error"] is None and row["last_attempt_at"] and row["last_crawl_end"], row
 
