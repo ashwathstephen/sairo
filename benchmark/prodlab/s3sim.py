@@ -42,6 +42,11 @@ class Bucket:
             self._ds_str = [f"dt={(EPOCH + dt.timedelta(days=i)).isoformat()}/" for i in range(self.ds)]
             self._iv_str = [f"hour={j:02d}/" for j in range(self.iv)]
             self._pt_str = [f"part-{k:05d}.parquet" for k in range(self.pt)]
+        elif self.layout == "skew":     # several top-level prefixes, one holding ~95 % of the objects (production shape)
+            # datasources 0..ds-6 live under big/pNNN/, the last 5 are small top-level prefixes → 6 top-level prefixes.
+            self._ds_str = [f"big/p{i:03d}/" for i in range(self.ds - 5)] + [f"small{i}/" for i in range(5)]
+            self._iv_str = [f"{j:04d}/" for j in range(self.iv)]
+            self._pt_str = [f"part-{k:05d}.bin" for k in range(self.pt)]
         elif self.layout == "flat":     # no delimiter at all: obj-<n>.bin at the bucket root
             self._ds_str = [f"obj-{i:04d}" for i in range(self.ds)]
             self._iv_str = [f"{j:04d}" for j in range(self.iv)]

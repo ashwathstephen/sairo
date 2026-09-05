@@ -839,3 +839,39 @@ class TestChunkedFtsRebuild:
             assert not m._fts_is_empty(db)
             assert m._fts_should_rebuild(bucket, "default", False) is False
 
+
+class TestSkewSplit:
+    def test_heavy_top_level_prefix_is_drilled_even_when_bucket_has_many_prefixes(self):
+        """6 top-level prefixes (so the ≤3 rule does not fire), one of them heavy by indexed-row count
+        → only that one is expanded; the light ones are listed as they are."""
+        import sys, os
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-skew"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            # rows already indexed under big/ (e.g. from a crawl that never finished); none under small*/
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,1,'2026-01-01T00:00:00+00:00','e','big/',1,1)",
+                           [(f"big/x{i}",) for i in range(3)])
+            db.commit()
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "big/"}] + [{"Prefix": f"small{i}/"} for i in range(5)], "Contents": [], "IsTruncated": False}
+                if pre == "big/":
+                    return {"CommonPrefixes": [{"Prefix": f"big/part{i}/"} for i in range(20)], "Contents": [], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}k", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m, "SUBPREFIX_SPLIT_MIN_OBJECTS", 0), patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert "big/" not in listed, "the heavy prefix must be split, not listed whole"
+        assert sum(p.startswith("big/part") for p in listed) == 20 and sum(p.startswith("small") for p in listed) == 5, listed
+

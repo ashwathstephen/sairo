@@ -1551,11 +1551,10 @@ def _run_crawl(bucket, endpoint_id=None):
         # crawl (and every crawl after a volume wipe) of a 9.9M-object single-prefix bucket
         # was sequential (measured: 9,900 pages at provider RTT). Cost: one delimiter listing
         # per prefix per level.
-        for _level in range(SUBPREFIX_SPLIT_LEVELS):
-            if not known_prefixes or len(known_prefixes) > 3:
-                break
+        def _expand_prefixes(prefixes):
+            """One delimiter listing per prefix → the set of their children (a prefix with none stays)."""
             expanded = set()
-            for p in list(known_prefixes):
+            for p in list(prefixes):
                 try:
                     sub_token = None
                     sub_found = set()
@@ -1578,6 +1577,12 @@ def _run_crawl(bucket, endpoint_id=None):
                 except Exception as e:
                     expanded.add(p)  # Keep original on error
                     log.warning("[%s:%s] Sub-prefix discovery failed for '%s': %s", eid, bucket, p, e)
+            return expanded
+
+        for _level in range(SUBPREFIX_SPLIT_LEVELS):
+            if not known_prefixes or len(known_prefixes) > 3:
+                break
+            expanded = _expand_prefixes(known_prefixes)
             if len(expanded) > len(known_prefixes):
                 log.info("[%s:%s] Expanded %d prefixes → %d sub-prefixes for better parallelism",
                          eid, bucket, len(known_prefixes), len(expanded))
@@ -1586,6 +1591,28 @@ def _run_crawl(bucket, endpoint_id=None):
                 break  # nothing deeper to split
             else:
                 known_prefixes = expanded  # same count, one level deeper (e.g. druid/ → druid/segments/)
+
+        # Skew split. The ≤3 rule misses the other production shape: several top-level prefixes
+        # where ONE holds most of the objects (seen live: 6 prefixes, one with ~90 % of 4.4M rows).
+        # That prefix was listed by a single thread, was the resume unit (a restart re-listed all
+        # of it) and never refreshed the UI counter. Use last crawl's level-1 counts to drill into
+        # heavy prefixes only, counted over the rows already indexed (a PK range count per prefix,
+        # ≈1 s per million rows) — so it also works for a bucket whose first crawl never finished.
+        # Empty indexes have nothing to count and keep the ≤3 rule above.
+        if existing_count > SUBPREFIX_SPLIT_MIN_OBJECTS and 0 < len(known_prefixes) <= 64:
+            with _get_db(bucket, eid) as db:
+                heavy = {p for p in known_prefixes if db.execute(
+                    "SELECT COUNT(*) FROM objects WHERE key >= ? AND key < ?",
+                    (p, p[:-1] + chr(ord(p[-1]) + 1))).fetchone()[0] > SUBPREFIX_SPLIT_MIN_OBJECTS}
+            for _level in range(SUBPREFIX_SPLIT_LEVELS):
+                if not heavy or len(heavy) > 16:
+                    break
+                expanded = _expand_prefixes(heavy)
+                if expanded == heavy:
+                    break
+                log.info("[%s:%s] Skew split: %d heavy prefix(es) → %d sub-prefixes", eid, bucket, len(heavy), len(expanded))
+                known_prefixes = (known_prefixes - heavy) | expanded
+                heavy = expanded
 
         if not known_prefixes and not root_files:
             # Small bucket — just do a simple full list with streaming inserts
@@ -1661,6 +1688,13 @@ def _run_crawl(bucket, endpoint_id=None):
                 with wlock, _get_db(b, e) as db:
                     if incremental:
                         _incremental_upsert(db, batch, gen)
+                        # A single heavy prefix can run for an hour without completing; refresh the
+                        # counter on time here as well, not only in the completion loop (live: frozen
+                        # at 3.9M while the table held 4.45M).
+                        if time.monotonic() - last_recount[0] >= PROGRESS_RECOUNT_SECONDS:
+                            row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                            db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
+                            last_recount[0] = time.monotonic()
                     else:
                         db.executemany(
                             "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
@@ -2145,7 +2179,8 @@ def _is_index_ready(bucket):
 
 PROGRESS_RECOUNT_SECONDS = int(os.environ.get("PROGRESS_RECOUNT_SECONDS", "15"))  # incremental-crawl progress refresh cadence
 FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
-SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))  # drill down this many levels when a bucket has <=3 top-level prefixes
+SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))
+SUBPREFIX_SPLIT_MIN_OBJECTS = int(os.environ.get("SUBPREFIX_SPLIT_MIN_OBJECTS", "500000"))  # drill into any top-level prefix with more indexed rows than this  # drill down this many levels when a bucket has <=3 top-level prefixes
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
 FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
 LARGE_BUCKET_SECONDS = int(os.environ.get("LARGE_BUCKET_SECONDS", "60"))  # if a full crawl took longer than this, keep fresh via delta crawls

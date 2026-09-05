@@ -1,0 +1,3 @@
+{"buckets": [
+  {"name": "lay-skew", "layout": "skew", "datasources": 105, "intervals": 20, "partitions": 100}
+]}
