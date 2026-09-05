@@ -145,3 +145,18 @@ Motivated by production: the 4.45M-row bucket has 6 top-level prefixes with one 
 
 The heavy-prefix signal is a primary-key range count per top-level prefix over the rows already indexed (≈ 1 s per million rows, only when the bucket exceeds the threshold and has ≤ 64 top-level prefixes), so it also works for a bucket whose first crawl never completed — exactly the production case. The 100 children are now the resume units and the progress counter refreshes on time from inside long prefixes.
 
+## Run 7 — deep-then-wide layout (`spec-deepwide.json`: `druid/indexing-logs/` holds 200,000 one-object prefixes), fan-out cap
+
+Motivated by production: the ≤3-prefix rule drilled `druid/` → `druid/indexing-logs/`, which has **629,643 children holding ~300k objects**, turning one 300-page listing into 630k list calls (hours at provider RTT; the read-only run showed ≈50 completions/s).
+
+| Image | Decision | Initial crawl of 200k objects |
+|---|---|---|
+| `phase-b12` (no cap) | `Expanded 1 → 200,000 sub-prefixes` | **1,096.4 s** |
+| `phase-b13` (`SUBPREFIX_SPLIT_MAX_CHILDREN=1000`) | `Sub-prefix split 'druid/indexing-logs/' skipped: more than 1000 children, listing it whole` | **17.3 s** (63×) |
+
+Live confirmation on the production bucket: the same log line, then the prefix listed whole at ≈1,500 objects/s on one thread (3.7M → 7.3M rows in 40 min) instead of ≈50 prefixes/s.
+
+### Production run — the "silent 12 minutes" on the skewed bucket, explained (23:40 IST)
+
+A Python-level thread dump (temporary local patch, never committed — the faulthandler variant segfaulted the process and was reverted the same night) showed the truth: the skewed bucket's 46 sub-prefixes had all completed except **two**, each on one thread blocked in an SSL read of a list page, while the same process had **28 more delimiter listings in flight** from three delta crawls (`_discover_delta_targets`) plus the other buckets' prefix threads, all through one 16-connection pool (1,143 "connection pool is full" warnings). Not a hang: a throughput collapse at the provider under ~30 concurrent listings from one client — the case for a provider-wide list budget (SAE-75, B.4), now with evidence. Two smaller gaps fixed on the branch: the stall detector was blind during discovery (it now sees every listed page), and the heavy child (327k objects) stayed a single unit because the skew loop stopped at 16 children instead of re-checking which children are heavy.
+

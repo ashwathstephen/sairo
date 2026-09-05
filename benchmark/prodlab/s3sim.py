@@ -14,7 +14,7 @@ Run:  python3 s3sim.py --spec spec.json --port 9000 --admin-port 9001 --latency-
 Spec: {"buckets": [{"name": "segments-a", "datasources": 40, "intervals": 2500, "partitions": 99}, ...]}
       objects = datasources × intervals × partitions  (40 × 2500 × 99 = 9,900,000)
 """
-import argparse, base64, bisect, datetime as dt, hashlib, json, os, random, threading, time
+import argparse, base64, bisect, datetime as dt, json, os, random, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.sax.saxutils import escape
@@ -84,7 +84,7 @@ class Bucket:
         return lo
 
     def obj(self, key):
-        hv = hash(key) & 0xFFFFFFFFFFFFFFFF          # process-stable enough for a run; cheap
+        hv = (zlib.crc32(key.encode()) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF   # deterministic across processes (hash() is salted per process)
         h = f"{hv:016x}{hv:016x}"
         size = self.size_p50 // 2 + (hv & 0xFFFFFF) % self.size_p50  # 0.5x .. 1.5x p50
         # LastModified follows the interval date so "recent" partitions look recent
@@ -177,7 +177,7 @@ def xml_list(bucket, prefix, delimiter, max_keys, contents, cps, next_token, tok
     if next_token:
         parts.append(f"<NextContinuationToken>{escape(next_token)}</NextContinuationToken>")
     for key, size, lm, etag in contents:
-        parts.append(f"<Contents><Key>{key}</Key><LastModified>{lm}</LastModified>"
+        parts.append(f"<Contents><Key>{escape(key)}</Key><LastModified>{lm}</LastModified>"
                      f'<ETag>"{etag}"</ETag><Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>')
     for cp in cps:
         parts.append(f"<CommonPrefixes><Prefix>{escape(cp)}</Prefix></CommonPrefixes>")
@@ -316,7 +316,6 @@ def make_admin(state):
 
 
 def main():
-    os.environ.setdefault("PYTHONHASHSEED", "0")
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True); ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--admin-port", type=int, default=9001); ap.add_argument("--latency-ms", type=float, default=0)

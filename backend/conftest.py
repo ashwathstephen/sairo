@@ -1,5 +1,11 @@
+import os
 import sys
+import tempfile
 import pytest
+
+# One fresh index directory per test session: both test modules used to share /tmp/sairo-test across
+# runs, so every crawl test had to unlink its own DB files first and results depended on run order.
+os.environ["DB_DIR"] = tempfile.mkdtemp(prefix="sairo-test-")
 
 
 @pytest.fixture(autouse=True)

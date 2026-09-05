@@ -321,6 +321,9 @@ if not S3_ENDPOINT:
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 DB_DIR = os.environ.get("DB_DIR", "/data")
+# SQLite spills big sorts (the post-crawl GROUP BYs over every row) to temp files. In the chart /tmp is a
+# 100Mi emptyDir on a read-only root, so point them at the data volume unless the operator chose otherwise.
+os.environ.setdefault("SQLITE_TMPDIR", DB_DIR)
 
 # ── Validate DB_DIR is writable at startup ───────────────────────────────────
 try:
@@ -1004,23 +1007,9 @@ def _init_db(bucket, endpoint_id=None):
                 tokenize='trigram'
             )
         """)
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ai AFTER INSERT ON objects BEGIN
-            INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
-        END""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ad AFTER DELETE ON objects BEGIN
-            INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
-        END""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_au AFTER UPDATE ON objects BEGIN
-            INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
-            INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
-        END""")
-        # One-time rebuild: populate FTS from existing objects data
-        obj_count = conn.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
-        if obj_count > 0:
-            fts_count = conn.execute("SELECT COUNT(*) FROM objects_fts").fetchone()[0]
-            if fts_count == 0:
-                conn.execute("INSERT INTO objects_fts(objects_fts) VALUES('rebuild')")
-                log.info("[%s] FTS index rebuilt for %d objects", bucket, obj_count)
+        _create_fts_triggers(conn)
+        # An empty index on a populated table is repaired by the post-crawl self-heal
+        # (_fts_should_rebuild → _fts_is_empty), never here: the one-shot 'rebuild' is unbounded.
     except Exception as fts_e:
         log.warning("FTS5 setup skipped (SQLite may lack FTS5 support): %s", fts_e)
     conn.commit()
@@ -1266,6 +1255,7 @@ def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callbac
         try:
             resp = client.list_objects_v2(**params)
             retries = 0
+            _crawl_progress_ts[f"{eid}:{bucket}"] = time.time()   # every page is progress (stall detector)
         except Exception as e:
             retries += 1
             if retries <= max_retries:
@@ -1315,61 +1305,81 @@ def _disable_fts_triggers(db):
         pass
 
 
+def _create_fts_triggers(db):
+    """The three sync triggers that keep objects_fts in step with objects (no commit)."""
+    db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ai AFTER INSERT ON objects BEGIN
+        INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
+    END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ad AFTER DELETE ON objects BEGIN
+        INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
+    END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_au AFTER UPDATE ON objects BEGIN
+        INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
+        INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
+    END""")
+
+
 def _enable_fts_triggers(db):
     """Re-enable FTS sync triggers (without blocking rebuild)."""
     try:
-        db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ai AFTER INSERT ON objects BEGIN
-            INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
-        END""")
-        db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_ad AFTER DELETE ON objects BEGIN
-            INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
-        END""")
-        db.execute("""CREATE TRIGGER IF NOT EXISTS objects_fts_au AFTER UPDATE ON objects BEGIN
-            INSERT INTO objects_fts(objects_fts, rowid, key) VALUES('delete', old.rowid, old.key);
-            INSERT INTO objects_fts(rowid, key) VALUES (new.rowid, new.key);
-        END""")
+        _create_fts_triggers(db)
         db.commit()
     except Exception as e:
         log.warning("FTS trigger re-enable failed: %s", e)
 
 
 def _rebuild_fts(bucket, endpoint_id=None):
-    """Rebuild the FTS index synchronously on the calling thread.
+    """Rebuild the FTS index into a shadow table, then swap it in atomically.
 
-    During the rebuild, search queries still work — they see the pre-rebuild
-    index (WAL mode guarantees readers see a consistent snapshot). After the
-    rebuild commits, new search queries use the updated index.
+    Searches keep using the old index for the whole build, and a crash mid-build leaves it
+    intact (the stale objects_fts_new is dropped on the next attempt). Memory is bounded by
+    FTS_REBUILD_CHUNK rows per transaction: the one-shot 'rebuild' exceeded 1 GiB at 9.9M keys
+    (lab, 2026-09-05). Rows added while building are caught up at the swap; a row deleted
+    meanwhile leaves an entry that the search JOIN on objects filters out until the next rebuild.
     """
     eid = endpoint_id or "default"
     t0 = time.monotonic()
     try:
         with _get_db(bucket, eid) as db:
-            # The one-shot 'rebuild' command indexes every row in a single transaction; on a
-            # 9.9M-key index that exceeded 1 GiB of RSS and OOM-killed the pod (lab, 2026-09-05),
-            # leaving FTS empty so the next crawl retried and died again. Repopulate in
-            # rowid chunks with a commit each, so memory is bounded by the chunk, not the table.
-            # external-content table (content='objects'): plain DELETE is not the way; 'delete-all' is.
-            db.execute("INSERT INTO objects_fts(objects_fts) VALUES('delete-all')")
+            db.execute("DROP TABLE IF EXISTS objects_fts_new")
+            db.execute("CREATE VIRTUAL TABLE objects_fts_new USING fts5(key, content='objects', content_rowid='rowid', tokenize='trigram')")
             db.commit()
-            lo = db.execute("SELECT MIN(rowid) FROM objects").fetchone()[0]
-            hi = db.execute("SELECT MAX(rowid) FROM objects").fetchone()[0]
-            if lo is not None:
-                step = FTS_REBUILD_CHUNK
-                for start in range(lo, hi + 1, step):
-                    db.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects WHERE rowid BETWEEN ? AND ?",
-                               (start, start + step - 1))
-                    db.commit()
-                db.execute("INSERT INTO objects_fts(objects_fts) VALUES('optimize')")
+            start_max = db.execute("SELECT COALESCE(MAX(rowid), 0) FROM objects").fetchone()[0]
+            last = 0
+            while True:   # keyset paging: rowid space is sparse after months of INSERT OR REPLACE churn
+                ids = db.execute("SELECT rowid FROM objects WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+                                 (last, start_max, FTS_REBUILD_CHUNK)).fetchall()
+                if not ids:
+                    break
+                hi = ids[-1][0]
+                db.execute("INSERT INTO objects_fts_new(rowid, key) SELECT rowid, key FROM objects WHERE rowid > ? AND rowid <= ?",
+                           (last, hi))
                 db.commit()
-        elapsed = time.monotonic() - t0
-        log.info("[%s:%s] FTS index rebuilt in %.1fs (chunked)", eid, bucket, elapsed)
+                last = hi
+            # One transaction: catch up rows added during the build, swap the tables, recreate the sync
+            # triggers (they name objects_fts, so the table cannot be dropped underneath them).
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO objects_fts_new(rowid, key) SELECT rowid, key FROM objects WHERE rowid > ?", (start_max,))
+            for trg in ("objects_fts_ai", "objects_fts_ad", "objects_fts_au"):
+                db.execute(f"DROP TRIGGER IF EXISTS {trg}")
+            db.execute("DROP TABLE IF EXISTS objects_fts")
+            db.execute("ALTER TABLE objects_fts_new RENAME TO objects_fts")
+            _create_fts_triggers(db)
+            db.commit()
+        log.info("[%s:%s] FTS index rebuilt in %.1fs (shadow table, %d-row chunks)", eid, bucket, time.monotonic() - t0, FTS_REBUILD_CHUNK)
     except Exception as e:
-        log.warning("[%s:%s] Background FTS rebuild failed: %s", eid, bucket, e)
+        log.warning("[%s:%s] FTS rebuild failed (old index kept): %s", eid, bucket, e)
 
 
-def _rebuild_fts_async(bucket, endpoint_id=None):
-    """Run _rebuild_fts on a daemon thread (for callers that must not block)."""
-    threading.Thread(target=_rebuild_fts, args=(bucket, endpoint_id), name=f"fts-{bucket[:12]}", daemon=True).start()
+def _rebuild_fts_async(bucket, endpoint_id=None, done=None):
+    """Run _rebuild_fts on a daemon thread; `done()` runs when it finishes, success or not."""
+    def _run():
+        try:
+            _rebuild_fts(bucket, endpoint_id)
+        finally:
+            if done is not None:
+                done()
+    threading.Thread(target=_run, name=f"fts-{bucket[:12]}", daemon=True).start()
 
 
 def _fts_is_empty(db):
@@ -1551,43 +1561,37 @@ def _run_crawl(bucket, endpoint_id=None):
         # crawl (and every crawl after a volume wipe) of a 9.9M-object single-prefix bucket
         # was sequential (measured: 9,900 pages at provider RTT). Cost: one delimiter listing
         # per prefix per level.
+        direct_files = []   # objects sitting directly under a prefix that gets replaced by its children
+
         def _expand_prefixes(prefixes):
-            """One delimiter listing per prefix → the set of their children (a prefix with none stays)."""
+            """One delimiter listing per prefix → the set of their children. A prefix keeps its place when
+            it has no children, when it has more than SUBPREFIX_SPLIT_MAX_CHILDREN (live: 629,643 children
+            holding 300k objects — listing it whole is 300 pages, not 629k calls) or when its listing runs
+            past a few pages (a flat prefix is not worth enumerating twice). Objects directly under a
+            replaced prefix are collected here: no child unit would list them, and the stale-key prune
+            would then delete them from the index."""
             expanded = set()
             for p in list(prefixes):
+                direct = []
                 try:
-                    sub_token = None
-                    sub_found = set()
-                    too_many = False
-                    while True:
-                        sub_params = {"Bucket": bucket, "Prefix": p, "Delimiter": "/", "MaxKeys": 1000}
-                        if sub_token:
-                            sub_params["ContinuationToken"] = sub_token
-                        sub_resp = client.list_objects_v2(**sub_params)
-                        for cp in sub_resp.get("CommonPrefixes", []):
-                            sub_found.add(cp["Prefix"])
-                        # A prefix with a huge fan-out of tiny children (live: 629,643 children
-                        # holding 300k objects) must NOT become 629k list calls; listing it whole
-                        # is 300 pages. Stop enumerating and keep the parent as one unit.
-                        if len(sub_found) > SUBPREFIX_SPLIT_MAX_CHILDREN:
-                            too_many = True
-                            break
-                        if not sub_resp.get("IsTruncated", False):
-                            break
-                        sub_token = sub_resp.get("NextContinuationToken")
-                    if too_many:
-                        expanded.add(p)
-                        log.info("[%s:%s] Sub-prefix split '%s' skipped: more than %d children, listing it whole",
-                                 eid, bucket, p, SUBPREFIX_SPLIT_MAX_CHILDREN)
-                    elif sub_found:
-                        expanded.update(sub_found)
-                        log.info("[%s:%s] Sub-prefix split '%s' → %d children",
-                                 eid, bucket, p, len(sub_found))
-                    else:
-                        expanded.add(p)  # Keep the original if no children
+                    kids = _list_children(client, bucket, p, max_children=SUBPREFIX_SPLIT_MAX_CHILDREN,
+                                          max_pages=3, contents=direct)
                 except Exception as e:
                     expanded.add(p)  # Keep original on error
                     log.warning("[%s:%s] Sub-prefix discovery failed for '%s': %s", eid, bucket, p, e)
+                    continue
+                _crawl_progress_ts[crawl_key] = time.time()   # discovery is progress too (stall detector)
+                if kids is None:
+                    expanded.add(p)
+                    log.info("[%s:%s] Sub-prefix split '%s' skipped: more than %d children or a flat prefix, listing it whole",
+                             eid, bucket, p, SUBPREFIX_SPLIT_MAX_CHILDREN)
+                elif kids:
+                    expanded.update(kids)
+                    direct_files.extend(direct)
+                    log.info("[%s:%s] Sub-prefix split '%s' → %d children (%d direct objects kept)",
+                             eid, bucket, p, len(kids), len(direct))
+                else:
+                    expanded.add(p)  # Keep the original if no children
             return expanded
 
         for _level in range(SUBPREFIX_SPLIT_LEVELS):
@@ -1610,11 +1614,14 @@ def _run_crawl(bucket, endpoint_id=None):
         # heavy prefixes only, counted over the rows already indexed (a PK range count per prefix,
         # ≈1 s per million rows) — so it also works for a bucket whose first crawl never finished.
         # Empty indexes have nothing to count and keep the ≤3 rule above.
-        if existing_count > SUBPREFIX_SPLIT_MIN_OBJECTS and 0 < len(known_prefixes) <= 64:
+        def _heavy_prefixes(prefixes):
             with _get_db(bucket, eid) as db:
-                heavy = {p for p in known_prefixes if db.execute(
+                return {p for p in prefixes if db.execute(
                     "SELECT COUNT(*) FROM objects WHERE key >= ? AND key < ?",
-                    (p, p[:-1] + chr(ord(p[-1]) + 1))).fetchone()[0] > SUBPREFIX_SPLIT_MIN_OBJECTS}
+                    (p, _prefix_upper(p))).fetchone()[0] > SUBPREFIX_SPLIT_MIN_OBJECTS}
+
+        if existing_count > SUBPREFIX_SPLIT_MIN_OBJECTS and 0 < len(known_prefixes) <= 64:
+            heavy = _heavy_prefixes(known_prefixes)
             for _level in range(SUBPREFIX_SPLIT_LEVELS):
                 if not heavy or len(heavy) > 16:
                     break
@@ -1623,7 +1630,10 @@ def _run_crawl(bucket, endpoint_id=None):
                     break
                 log.info("[%s:%s] Skew split: %d heavy prefix(es) → %d sub-prefixes", eid, bucket, len(heavy), len(expanded))
                 known_prefixes = (known_prefixes - heavy) | expanded
-                heavy = expanded
+                heavy = _heavy_prefixes(expanded - heavy)   # drill further only into children that are themselves heavy
+
+        if direct_files:
+            root_files.extend(direct_files)   # indexed together with the root-level files below
 
         if not known_prefixes and not root_files:
             # Small bucket — just do a simple full list with streaming inserts
@@ -1687,43 +1697,45 @@ def _run_crawl(bucket, endpoint_id=None):
                             root_batch)
                     db.commit()
 
-        progress_rows = [0]
-        progress_lock = threading.Lock()
-        last_recount = [time.monotonic()]
+        progress_rows, progress_bytes = 0, 0     # initial crawl: rows/bytes written so far (mutated under wlock)
+        last_recount = time.monotonic()
 
         wlock = _write_lock(crawl_key)
 
-        def _make_prefix_batch_cb(b, e, gen):
-            """Create a batch callback that inserts directly into DB from the crawl thread."""
-            def _cb(batch):
-                with wlock, _get_db(b, e) as db:
-                    if incremental:
-                        _incremental_upsert(db, batch, gen)
-                        # A single heavy prefix can run for an hour without completing; refresh the
-                        # counter on time here as well, not only in the completion loop (live: frozen
-                        # at 3.9M while the table held 4.45M).
-                        if time.monotonic() - last_recount[0] >= PROGRESS_RECOUNT_SECONDS:
-                            row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
-                            db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
-                            last_recount[0] = time.monotonic()
-                    else:
-                        db.executemany(
-                            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
-                            [row + (gen,) for row in batch])
-                        # Initial crawl: publish rows written after every batch. Progress used to be
-                        # recorded per completed prefix, so a single-prefix bucket showed 0 objects
-                        # in the UI for its entire first crawl.
-                        with progress_lock:
-                            progress_rows[0] += len(batch)
-                            db.execute("UPDATE crawl_status SET total_objects=? WHERE id=1", (progress_rows[0],))
+        def _prefix_batch_cb(batch):
+            """Write one listed batch from a crawl thread and publish progress."""
+            nonlocal progress_rows, progress_bytes, last_recount
+            with wlock, _get_db(bucket, eid) as db:
+                if incremental:
+                    _incremental_upsert(db, batch, crawl_gen)
+                else:
+                    db.executemany(
+                        "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                        [row + (crawl_gen,) for row in batch])
+                    # Initial crawl: publish what was written after every batch (a single-prefix bucket
+                    # used to show 0 objects for its whole first crawl). Rows written, not distinct keys:
+                    # a prefix re-listed by the retry pass counts twice until the exact recount at the end.
+                    progress_rows += len(batch)
+                    progress_bytes += sum(row[1] for row in batch)
+                    db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (progress_rows, progress_bytes))
+                db.commit()
+            _crawl_progress_ts[crawl_key] = time.time()
+            # Incremental crawl: exact totals at most every PROGRESS_RECOUNT_SECONDS. A recount per
+            # completed prefix cost thousands of full scans on wide layouts, and a heavy prefix can run
+            # an hour without completing, so this is timed. The scan runs OUTSIDE the write lock (WAL
+            # readers never block the writer); only the UPDATE takes it.
+            if incremental and time.monotonic() - last_recount >= PROGRESS_RECOUNT_SECONDS:
+                last_recount = time.monotonic()
+                with _get_db(bucket, eid) as db:
+                    row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+                with wlock, _get_db(bucket, eid) as db:
+                    db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                     db.commit()
-                _crawl_progress_ts[crawl_key] = time.time()
-            return _cb
 
         with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
             futures = {
                 pool.submit(_crawl_prefix, bucket, p, endpoint_id=eid,
-                            batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen),
+                            batch_callback=_prefix_batch_cb,
                             should_stop=stop): p
                 for p in sorted(known_prefixes) if p not in done_prefixes
             }
@@ -1743,17 +1755,6 @@ def _run_crawl(bucket, endpoint_id=None):
                     failed_prefixes.append(p)
                     log.warning("[%s:%s] Prefix '%s' failed: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
 
-                # Update progress after each prefix. A full COUNT(*)/SUM over the objects table per
-                # prefix is O(rows) each time: a bucket with thousands of small prefixes (wide layouts;
-                # production has one with 3,800+) paid thousands of full scans. Initial crawls already
-                # publish rows written per batch; for incremental crawls refresh the exact totals at most
-                # every PROGRESS_RECOUNT_SECONDS (and once at the end, below).
-                if incremental and time.monotonic() - last_recount[0] >= PROGRESS_RECOUNT_SECONDS:
-                    with wlock, _get_db(bucket, eid) as db:
-                        row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
-                        db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
-                        db.commit()
-                    last_recount[0] = time.monotonic()
 
         if interrupted:
             raise CrawlInterrupted(bucket)
@@ -1768,7 +1769,7 @@ def _run_crawl(bucket, endpoint_id=None):
             for p in retry:
                 try:
                     count = _crawl_prefix(bucket, p, endpoint_id=eid,
-                                          batch_callback=_make_prefix_batch_cb(bucket, eid, crawl_gen),
+                                          batch_callback=_prefix_batch_cb,
                                           should_stop=stop)
                     total_new += count
                     _mark_prefix_done(p)
@@ -1877,6 +1878,10 @@ def _run_crawl(bucket, endpoint_id=None):
     # independently so a transient failure in one doesn't skip the others.
     if crawl_ok:
         def _do_rebuilds():
+            def _release():
+                with _crawl_lock:
+                    _rebuilding.discard(crawl_key)
+            handed_off = False
             try:
                 # Run the fast metadata rebuilds FIRST and grab the writer quickly.
                 # The FTS trigram rebuild can hold the single SQLite writer for tens
@@ -1891,16 +1896,18 @@ def _run_crawl(bucket, endpoint_id=None):
                                     eid, bucket, step.__name__, step_e)
                 # FTS rebuild LAST, and only when keys actually changed.
                 if _fts_should_rebuild(bucket, eid, fts_needs_rebuild):
-                    # Synchronous on purpose: this runs on the rebuild pool already, and the
-                    # bucket must stay in _rebuilding until FTS commits — otherwise the 120 s
-                    # delta recrawl collides with a minutes-long rebuild ("database is locked",
-                    # lab Run 4c).
-                    _rebuild_fts(bucket, eid)
+                    # Own daemon thread, not this 4-worker pool: the build takes minutes at 10M keys
+                    # (other buckets' metadata rebuilds must not queue behind it, and shutdown must not
+                    # wait on it — readers keep the old index, so a kill mid-build is harmless). The
+                    # bucket stays in _rebuilding until the swap commits, so the 120 s delta recrawl
+                    # cannot collide with the rebuild ("database is locked", lab Run 4c).
+                    _rebuild_fts_async(bucket, eid, done=_release)
+                    handed_off = True
                 else:
                     log.info("[%s:%s] FTS rebuild skipped — no key changes this crawl", eid, bucket)
             finally:
-                with _crawl_lock:
-                    _rebuilding.discard(crawl_key)
+                if not handed_off:
+                    _release()
         _rebuild_pool.submit(_do_rebuilds)
 
 
@@ -2191,7 +2198,7 @@ def _is_index_ready(bucket):
 PROGRESS_RECOUNT_SECONDS = int(os.environ.get("PROGRESS_RECOUNT_SECONDS", "15"))  # incremental-crawl progress refresh cadence
 FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
 SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))
-SUBPREFIX_SPLIT_MIN_OBJECTS = int(os.environ.get("SUBPREFIX_SPLIT_MIN_OBJECTS", "500000"))  # drill into any top-level prefix with more indexed rows than this  # drill down this many levels when a bucket has <=3 top-level prefixes
+SUBPREFIX_SPLIT_MIN_OBJECTS = int(os.environ.get("SUBPREFIX_SPLIT_MIN_OBJECTS", "500000"))  # drill into any prefix with more indexed rows than this
 SUBPREFIX_SPLIT_MAX_CHILDREN = int(os.environ.get("SUBPREFIX_SPLIT_MAX_CHILDREN", "1000"))  # above this a prefix is listed whole instead of split
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
 FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
@@ -2271,17 +2278,28 @@ def _natural_key(prefix):
     return [(0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", s) if t]
 
 
-def _list_children(client, bucket, prefix):
-    """Immediate child 'folders' of prefix (delimiter list, fully paginated)."""
-    out, token = [], None
+def _list_children(client, bucket, prefix, max_children=None, max_pages=None, contents=None):
+    """Immediate child 'folders' of prefix (delimiter list, fully paginated).
+
+    Returns None when a bound trips (more than max_children children, or max_pages pages read
+    without finishing) so callers keep the prefix as one unit. The listing's direct objects
+    (Contents) are appended to `contents` when given."""
+    out, token, pages = [], None, 0
     while True:
         params = {"Bucket": bucket, "Prefix": prefix, "Delimiter": "/", "MaxKeys": 1000}
         if token:
             params["ContinuationToken"] = token
         resp = client.list_objects_v2(**params)
+        pages += 1
         out.extend(cp["Prefix"] for cp in resp.get("CommonPrefixes", []))
+        if contents is not None:
+            contents.extend(resp.get("Contents", []))
+        if max_children is not None and len(out) > max_children:
+            return None
         if not resp.get("IsTruncated", False):
             break
+        if max_pages is not None and pages >= max_pages:
+            return None
         token = resp.get("NextContinuationToken")
     return out
 

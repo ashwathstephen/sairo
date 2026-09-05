@@ -476,7 +476,7 @@ class TestAsyncFTSRebuild:
         assert "Thread" in source
         assert "daemon=True" in source
         body = inspect.getsource(sys.modules["main"]._rebuild_fts)
-        assert "VALUES('delete-all')" in body and "FTS_REBUILD_CHUNK" in body   # chunked, bounded-memory rebuild
+        assert "objects_fts_new" in body and "RENAME TO objects_fts" in body and "FTS_REBUILD_CHUNK" in body   # shadow-table, bounded-memory rebuild
 
     def test_fts_rebuild_runs_in_background(self):
         """Test that _rebuild_fts_async actually rebuilds the FTS index."""
@@ -828,16 +828,53 @@ class TestChunkedFtsRebuild:
             m._enable_fts_triggers(db)
             assert m._fts_is_empty(db), "index must read as empty before the rebuild (external-content table)"
             assert m._fts_should_rebuild(bucket, "default", False) is True, "self-heal must trigger on an empty index"
+        with m._get_db(bucket, "default") as db:   # a crash mid-build leaves a stale shadow table behind
+            db.execute("CREATE VIRTUAL TABLE objects_fts_new USING fts5(key, content='objects', content_rowid='rowid', tokenize='trigram')")
+            db.commit()
         with patch.object(m, "FTS_REBUILD_CHUNK", 100):   # force many chunks
-            m._rebuild_fts_async(bucket, "default")
-            for _ in range(200):
-                with m._get_db(bucket, "default") as db:
-                    if db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234: break
-                time.sleep(0.05)
+            m._rebuild_fts(bucket, "default")
         with m._get_db(bucket, "default") as db:
             assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234
             assert not m._fts_is_empty(db)
             assert m._fts_should_rebuild(bucket, "default", False) is False
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objects_fts_new'").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'objects_fts_a_'").fetchone()[0] == 3
+            # sync triggers survive the swap: a new key is searchable immediately
+            db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES ('z/haystack.zip',1,'2026-01-01T00:00:00+00:00','e','z/',1,1)")
+            db.commit()
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'haystack'").fetchone()[0] == 1
+
+    def test_rebuild_keeps_old_index_searchable_until_the_swap(self):
+        """Readers must never see an empty or partial index: the build goes into a shadow table."""
+        import sys, os
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "fts-shadow"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           [(f"a/needle-{i}.zip", 1, "2026-01-01T00:00:00+00:00", "e", "a/", 1, 1) for i in range(300)])
+            db.commit()
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 300
+        seen = []
+        import sqlite3
+        reader = sqlite3.connect(m._db_path(bucket, "default"))
+        orig_get_db = m._get_db
+        from contextlib import contextmanager
+        class Spy:
+            """Delegates to the builder's connection; after every commit, reads the live index from a second connection."""
+            def __init__(self, conn): self._c = conn
+            def __getattr__(self, name): return getattr(self._c, name)
+            def commit(self):
+                self._c.commit()
+                seen.append(reader.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0])
+        @contextmanager
+        def spy_get_db(b, e=None):
+            with orig_get_db(b, e) as db:
+                yield Spy(db)
+        from unittest.mock import patch
+        with patch.object(m, "_get_db", spy_get_db), patch.object(m, "FTS_REBUILD_CHUNK", 50):
+            m._rebuild_fts(bucket, "default")
+        assert seen and all(n == 300 for n in seen), f"live index dipped during the rebuild: {seen}"
 
 
 class TestSkewSplit:
@@ -911,4 +948,32 @@ class TestSplitFanoutCap:
         assert listed == ["druid/logs/"], listed
         delimiter_calls = [c.kwargs for c in client.list_objects_v2.call_args_list if c.kwargs.get("Delimiter") and c.kwargs.get("Prefix") == "druid/logs/"]
         assert len(delimiter_calls) <= 2, "enumeration must stop once the cap is exceeded"
+
+
+class TestSplitKeepsDirectObjects:
+    def test_objects_directly_under_a_split_prefix_are_indexed_and_not_pruned(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-direct"
+        m._init_db(bucket, "default")
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":   # a README next to the sub-folders: only a delimiter listing of druid/ ever sees it
+                    return {"CommonPrefixes": [{"Prefix": "druid/segments/"}],
+                            "Contents": [{"Key": "druid/README.md", "Size": 7, "LastModified": lm, "ETag": '"r"'}], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            return {"Contents": [{"Key": f"{pre}part-1.zip", "Size": 1, "LastModified": lm, "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")           # initial crawl
+            m._run_crawl(bucket, "default")           # incremental recrawl runs the stale-key prune
+        with m._get_db(bucket, "default") as db:
+            keys = sorted(r[0] for r in db.execute("SELECT key FROM objects"))
+        assert keys == ["druid/README.md", "druid/segments/part-1.zip"], keys
 
