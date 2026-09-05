@@ -1,0 +1,3 @@
+{"buckets": [
+  {"name": "rec-1m", "layout": "druid", "datasources": 4, "intervals": 500, "partitions": 500}
+]}
