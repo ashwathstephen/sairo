@@ -1395,14 +1395,32 @@ def _rebuild_fts_async(bucket, endpoint_id=None, done=None):
     return t
 
 
+def _fts_consistent(db):
+    """SQLite's own check that the FTS index matches the content table (external-content tables compare
+    every row). Slow on a big index — used once, for databases that predate the readiness marker."""
+    try:
+        # rank=1: also compare against the external content table (the plain form checks only the
+        # index's internal structure and passed with an unindexed row — verified on SQLite 3.53).
+        db.execute("INSERT INTO objects_fts(objects_fts, rank) VALUES('integrity-check', 1)")
+        return True
+    except Exception:
+        return False
+
+
+def _seed_from_existing(prev_status, total, dur):
+    """Startup trusts an existing index as fresh only when its last full crawl finished COMPLETE.
+    Interrupted/degraded resume from their checkpoints; an error is retried; anything else is a first crawl."""
+    return total > 0 and dur > 0 and prev_status == "complete"
+
+
 def _ensure_fts_ready(bucket, endpoint_id=None):
     """Startup repair for a served index whose search generation is absent or stale.
 
-    Databases from before fts_ready_gen existed have NULL: if their index is healthy it was built by the
-    previous release's post-crawl rebuild, so the marker is backfilled (verified, not assumed). A
-    marker behind the current generation, or an unhealthy index, means a rebuild never committed:
-    repair it now instead of reporting `rebuilding` until the next full reconcile. Returns the
-    rebuild thread when one was started, else None."""
+    Databases from before fts_ready_gen existed have NULL: the marker is backfilled only after SQLite's
+    integrity check proves the index matches the catalogue (a readable, non-empty but STALE index must
+    not be certified). A marker behind the current generation, an unhealthy index or a failed check
+    means a rebuild never committed: repair it now instead of reporting `rebuilding` until the next
+    full reconcile. Returns the rebuild thread when one was started, else None."""
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
     try:
@@ -1414,10 +1432,10 @@ def _ensure_fts_ready(bucket, endpoint_id=None):
             healthy = _fts_healthy(db)
             if ready == gen and healthy:
                 return None
-            if ready is None and healthy:
+            if ready is None and healthy and _fts_consistent(db):
                 db.execute("UPDATE crawl_status SET fts_ready_gen=? WHERE id=1", (gen,))
                 db.commit()
-                log.info("[%s:%s] Search index verified; readiness marker backfilled for generation %d", eid, bucket, gen)
+                log.info("[%s:%s] Search index verified against the catalogue; readiness marker backfilled for generation %d", eid, bucket, gen)
                 return None
     except Exception as e:
         log.warning("[%s:%s] Could not check search readiness: %s", eid, bucket, e)
@@ -2466,16 +2484,20 @@ def _delta_crawl(bucket, endpoint_id):
         tops = [r[0] for r in db.execute("SELECT prefix FROM folder_stats WHERE prefix != ''").fetchall() if r[0]]
         row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
         gen = (row[0] if row else 0) or 0
+    failed_targets = []
     try:
         discovered = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
     except Exception as e:
+        # Discovery is what finds brand-new partitions. Without it this delta cannot vouch for
+        # freshness: keep the hot-prefix refresh, but report the delta as degraded.
         log.warning("[%s:%s] delta target discovery failed: %s", eid, bucket, e)
         discovered = set()
+        failed_targets.append("discovery")
     targets = _minimal_prefixes(set(hot) | discovered)
 
     # List all targets in parallel (the hot set is small; this keeps a delta fast
     # even when several partitions are active).
-    all_objs, failed_targets = [], []
+    all_objs = []
     def _list_or_fail(tp):
         try:
             return tp, _delta_list_prefix(client, bucket, tp)
@@ -2517,6 +2539,7 @@ def _delta_crawl(bucket, endpoint_id):
                 step(bucket, eid)
             except Exception as e:
                 log.warning("[%s:%s] delta post-step %s failed: %s", eid, bucket, getattr(step, "__name__", step), e)
+                failed_targets.append(f"post-step:{getattr(step, '__name__', step)}")   # counters/stats not refreshed → not a clean delta
     return changed, failed_targets
 
 
@@ -2535,9 +2558,9 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
         try:
             with _get_db(bucket, eid) as db:   # _delta_crawl shows 'crawling' meanwhile; restore this afterwards
                 row = db.execute("SELECT status FROM crawl_status WHERE id=1").fetchone()
-                prev_status = (row[0] if row else None) or "complete"
+                prev_status = (row[0] if row else None) or "unknown"
         except Exception:
-            prev_status = "complete"
+            prev_status = "unknown"   # never assume complete when the status could not be read
         try:
             _s3_context.endpoint_id = eid
             n, failed_targets = _delta_crawl(bucket, eid)
@@ -2563,7 +2586,11 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
                     # Only an already-complete catalogue is promotable by a delta: a hot-prefix refresh
                     # cannot make a degraded, interrupted or errored full crawl whole.
                     restore = prev_status if prev_status != "crawling" else "complete"
-                    if delta_error is None and prev_status == "complete":
+                    if prev_status == "unknown":
+                        # status could not be read before the delta: record the attempt, touch nothing else
+                        db.execute("UPDATE crawl_status SET last_attempt_at=?, last_error=COALESCE(?, last_error) WHERE id=1",
+                                   (now_iso, delta_error))
+                    elif delta_error is None and prev_status == "complete":
                         db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL WHERE id=1",
                                    (now_iso, now_iso))
                     elif delta_error is None:
@@ -2738,10 +2765,12 @@ def startup():
                         # Seed only from a COMPLETED full crawl (one that recorded a duration). Seeding
                         # an interrupted index marked it "fresh" and left large buckets delta-only for
                         # FULL_CRAWL_INTERVAL while a third of the data was missing.
-                        if total > 0 and dur > 0 and prev_status not in ("interrupted", "degraded"):
+                        if _seed_from_existing(prev_status, total, dur):
                             _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
                             seeded = True
-                            _ensure_fts_ready(name, eid)   # legacy NULL marker → verify and backfill; stale → repair now
+                            # legacy NULL marker → verify and backfill; stale → repair now. Off the startup
+                            # thread and bounded by the rebuild pool (the check reads the whole index).
+                            _rebuild_pool.submit(_ensure_fts_ready, name, eid)
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
                                      eid, name, f"{total:,}")
                     except Exception:
@@ -2749,7 +2778,8 @@ def startup():
                     if not seeded:
                         _queue_crawl(name, eid)
                         log.info("Queued %s crawl for %s:%s",
-                                 f"resume of {prev_status}" if prev_status in ("interrupted", "degraded") else "initial", eid, name)
+                                 f"resume of {prev_status}" if prev_status in ("interrupted", "degraded")
+                                 else ("retry after error" if prev_status.startswith("error") else "initial"), eid, name)
             except Exception as e:
                 log.error("Failed to list buckets on startup (endpoint=%s): %s", eid, e)
     threading.Thread(target=_startup_crawl, daemon=True).start()

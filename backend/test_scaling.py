@@ -1264,3 +1264,74 @@ class TestTruthfulStates:
         d = m.crawl_status(bucket, user={})
         assert d["status"] == "degraded" and d["full_crawl_complete"] is False and d["crawl_duration"], d
 
+    # ── review round 3: three remaining freshness-without-evidence paths ─────────────────
+
+    def test_stale_legacy_fts_is_rebuilt_not_certified(self):
+        """Pre-upgrade DB: readable, non-empty FTS that is missing a newer object. NULL marker must not be
+        backfilled; SQLite's integrity check catches the mismatch and a rebuild runs."""
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-legacy-stale"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        m._rebuild_fts(bucket, "default")   # generation N fully indexed
+        with m._get_db(bucket, "default") as db:
+            # catalogue moves to N+1 behind the index's back (triggers off, as during a crawl); marker NULL like a legacy DB
+            m._disable_fts_triggers(db)
+            db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES ('z/uniqueneedle.bin',1,'2026-01-01T00:00:00+00:00','e','z/',1,2)")
+            db.execute("UPDATE crawl_status SET fts_ready_gen=NULL, current_crawl_gen=current_crawl_gen+1")
+            db.commit()
+            m._enable_fts_triggers(db)
+            assert m._fts_healthy(db), "readable and non-empty — the health probe alone cannot see the staleness"
+            assert not m._fts_consistent(db), "SQLite's integrity check must see the missing row"
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'uniqueneedle'").fetchone()[0] == 0
+        t = m._ensure_fts_ready(bucket, "default")
+        assert t is not None, "a stale legacy index must be rebuilt, never certified"
+        t.join(30)
+        d = m.crawl_status(bucket, user={})
+        assert d["fts_ready_gen"] == d["current_crawl_gen"] and d["search_ready"] is True, d
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'uniqueneedle'").fetchone()[0] == 1
+            assert m._fts_consistent(db)
+
+    def test_startup_seeds_only_a_complete_full_crawl(self):
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        assert m._seed_from_existing("complete", 120, 12.0) is True
+        for st in ("error: fatal listing failure", "degraded", "interrupted", "crawling", ""):
+            assert m._seed_from_existing(st, 120, 12.0) is False, st
+        assert m._seed_from_existing("complete", 0, 12.0) is False and m._seed_from_existing("complete", 120, 0) is False
+
+    def test_delta_discovery_failure_degrades_the_delta(self):
+        import sys
+        from unittest.mock import patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta-discovery"
+        m._init_db(bucket, "default")
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        def boom(*a, **k): raise RuntimeError("SlowDown")
+        with patch.object(m, "_hot_target_prefixes", return_value=["a/"]), patch.object(m, "_discover_delta_targets", side_effect=boom), \
+             patch.object(m, "_delta_list_prefix", return_value=[{"Key": "a/new", "Size": 1, "LastModified": lm, "ETag": '"n"'}]), \
+             patch.object(m._s3_manager, "get_client", return_value=object()):
+            changed, failed = m._delta_crawl(bucket, "default")
+        assert changed == 1 and failed == ["discovery"], (changed, failed)   # hot prefixes still refreshed, but not a clean delta
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects WHERE key='a/new'").fetchone()[0] == 1
+        # and the caller treats it as degraded: no success stamp
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        with m._get_db(bucket, "default") as db:
+            end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+        with patch.object(m, "_delta_crawl", return_value=(1, ["discovery"])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            m._queue_delta_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        assert row["last_crawl_end"] == end0 and row["status"] == "complete" and "1 delta target" in row["last_error"], row
+
