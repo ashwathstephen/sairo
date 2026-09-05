@@ -45,9 +45,6 @@ spec:
             - containerPort: {{ .Values.service.targetPort }}
               name: http
           env:
-            {{- with .Values.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
             # ── S3 Configuration ──
             - name: S3_ENDPOINT
               value: {{ .Values.s3.endpoint | quote }}
@@ -206,6 +203,10 @@ spec:
             {{- if .Values.branding.loginMessage }}
             - name: LOGIN_MESSAGE
               value: {{ .Values.branding.loginMessage | quote }}
+            {{- end }}
+            # extraEnv last so operator values override anything the chart sets above (k8s: last duplicate wins)
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
             - name: data
