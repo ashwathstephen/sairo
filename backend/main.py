@@ -2387,6 +2387,7 @@ DELTA_NEWEST_K = int(os.environ.get("DELTA_NEWEST_K", "2"))             # partit
 DELTA_MAX_DEPTH = int(os.environ.get("DELTA_MAX_DEPTH", "12"))          # safety cap on walk depth
 DELTA_LIST_CONCURRENCY = int(os.environ.get("DELTA_LIST_CONCURRENCY", "16"))  # parallel S3 list calls per level
 DELTA_MAX_NODES = int(os.environ.get("DELTA_MAX_NODES", "2000"))        # safety cap on folders visited per delta
+DELTA_NODE_MAX_PAGES = int(os.environ.get("DELTA_NODE_MAX_PAGES", "2"))   # delimiter pages per discovery node before the node is left unvisited (partial)
 DELTA_ROOT_MAX_PAGES = int(os.environ.get("DELTA_ROOT_MAX_PAGES", "200"))  # root listing pages per delta before the delta is degraded (200k entries; production has 62k-prefix roots)
 
 
@@ -2452,9 +2453,15 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
                 frontier = sorted(frontier, key=_natural_key)[-budget:]
                 truncated = True
             visited += len(frontier)
-            listed = list(ex.map(lambda p: (p, _list_children(client, bucket, p)), frontier))
+            # Per-node bound too: the node budget alone did not bound remote work — one node with
+            # 20,000 children cost 20 LIST pages and 20,000 names in memory. A node wider than
+            # DELTA_NODE_MAX_PAGES pages is left unvisited and the walk is reported partial.
+            listed = list(ex.map(lambda p: (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES)), frontier))
             nxt = []
             for cur, children in listed:
+                if children is None:
+                    truncated = True
+                    continue
                 if not children:
                     targets.add(cur)  # leaf: objects live directly under cur
                     continue

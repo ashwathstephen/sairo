@@ -1540,3 +1540,21 @@ class TestTruthfulStates:
         with m._get_db(bucket, "default") as db:
             assert db.execute("SELECT COUNT(*) FROM objects WHERE key LIKE 'big/%'").fetchone()[0] == 7000
 
+    def test_discovery_bounds_remote_work_per_node(self):
+        """DELTA_MAX_NODES=1 must not let one node cost 20 LIST pages and 20,000 names: the node is
+        left unvisited after DELTA_NODE_MAX_PAGES and the walk is reported partial."""
+        import sys
+        from unittest.mock import MagicMock, patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-discovery-node"
+        m._init_db(bucket, "default")
+        def list_objects_v2(**p):
+            tok = int(p.get("ContinuationToken") or 0)
+            return {"CommonPrefixes": [{"Prefix": f"{p['Prefix']}c{tok:02d}-{i:04d}/"} for i in range(1000)],
+                    "Contents": [], "IsTruncated": tok + 1 < 20, "NextContinuationToken": str(tok + 1)}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m, "DELTA_MAX_NODES", 1), patch.object(m, "DELTA_NODE_MAX_PAGES", 2):
+            targets, partial = m._discover_delta_targets(client, bucket, "default", ["wide/"])
+        assert partial is True and targets == set()
+        assert client.list_objects_v2.call_count == 2, client.list_objects_v2.call_count
+

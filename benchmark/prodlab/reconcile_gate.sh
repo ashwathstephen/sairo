@@ -53,10 +53,11 @@ check '[ "$(field rows)" = "$(truth)" ]' "cycle 2 rows == truth (deletions prune
 check '[[ "$(field last_crawl_end)" > "$END0" ]]' "cycle 2 advanced last_crawl_end" '$(field last_crawl_end) vs $END0'
 check '[ "$(field last_error)" = None ]' "cycle 2 cleared last_error" '$(field last_error)'
 check '[ "$(field fts_gen)" = "$(field gen)" ]' "search generation matches catalogue generation" '$(field fts_gen) vs $(field gen)'
-END2=$(field last_crawl_end)
+END2=$(field last_crawl_end); GEN2=$(field gen)
 
-# ── cycle 3: kill the pod mid-reconcile; must resume, never look complete while partial ──
-wait_for 'kubectl -n lab logs deploy/sairo --tail=300 2>/dev/null | grep -q "Crawl started for default:'$B'.*incremental=True" && [ "$(field status)" = crawling ]' 600 "cycle 3 reconcile start"
+# ── cycle 3: kill the pod mid-RECONCILE (a full crawl bumps current_crawl_gen; deltas do not, and both
+#    show status=crawling, so the generation is the only reliable signal) ──
+wait_for '[ "$(field gen)" -gt '$GEN2' ]' 600 "cycle 3 full reconcile start (generation > $GEN2)"
 sleep 15; say "killing pod mid-reconcile: $(snapshot)"
 kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null; sleep 45
 say "after restart: $(snapshot)"
