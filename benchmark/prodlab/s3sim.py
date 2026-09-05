@@ -14,7 +14,7 @@ Run:  python3 s3sim.py --spec spec.json --port 9000 --admin-port 9001 --latency-
 Spec: {"buckets": [{"name": "segments-a", "datasources": 40, "intervals": 2500, "partitions": 99}, ...]}
       objects = datasources × intervals × partitions  (40 × 2500 × 99 = 9,900,000)
 """
-import argparse, base64, bisect, datetime as dt, hashlib, json, random, threading, time
+import argparse, base64, bisect, datetime as dt, hashlib, json, os, random, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.sax.saxutils import escape
@@ -29,18 +29,23 @@ class Bucket:
         self.ds, self.iv, self.pt = int(spec["datasources"]), int(spec["intervals"]), int(spec["partitions"])
         self.n = self.ds * self.iv * self.pt
         self.size_p50 = int(spec.get("size_p50", 17 * 1024 * 1024))
+        self._iv_str = [self._interval(j) for j in range(self.iv)]   # precomputed once: interval strings
+        self._ds_str = [f"druid/segments/ds_{i:03d}/" for i in range(self.ds)]
+        self._pt_str = [f"/{VERSION}/{k:04d}/index.zip" for k in range(self.pt)]
         self.deleted = set()          # generated keys removed via admin
         self.added = []               # sorted extra keys added via admin (key, size)
         self.lock = threading.Lock()
 
     # position <-> key (monotonic: zero-padded components keep nested-loop order == lexicographic)
+    @staticmethod
+    def _interval(j):
+        d0 = EPOCH + dt.timedelta(days=j); d1 = d0 + dt.timedelta(days=1)
+        return f"{d0.isoformat()}T00:00:00.000Z_{d1.isoformat()}T00:00:00.000Z"
+
     def key(self, n):
         i, r = divmod(n, self.iv * self.pt)
         j, k = divmod(r, self.pt)
-        d0 = EPOCH + dt.timedelta(days=j)
-        d1 = d0 + dt.timedelta(days=1)
-        return (f"druid/segments/ds_{i:03d}/{d0.isoformat()}T00:00:00.000Z_{d1.isoformat()}T00:00:00.000Z/"
-                f"{VERSION}/{k:04d}/index.zip")
+        return self._ds_str[i] + self._iv_str[j] + self._pt_str[k]
 
     def first_ge(self, s):
         """Smallest position whose key >= s (binary search over the monotonic key space)."""
@@ -54,8 +59,9 @@ class Bucket:
         return lo
 
     def obj(self, key):
-        h = hashlib.md5(key.encode()).hexdigest()
-        size = self.size_p50 // 2 + int(h[:6], 16) % self.size_p50  # 0.5x .. 1.5x p50
+        hv = hash(key) & 0xFFFFFFFFFFFFFFFF          # process-stable enough for a run; cheap
+        h = f"{hv:016x}{hv:016x}"
+        size = self.size_p50 // 2 + (hv & 0xFFFFFF) % self.size_p50  # 0.5x .. 1.5x p50
         # LastModified follows the interval date so "recent" partitions look recent
         try:
             day = key.split("/")[3][:10]
@@ -143,7 +149,7 @@ def xml_list(bucket, prefix, delimiter, max_keys, contents, cps, next_token, tok
     if next_token:
         parts.append(f"<NextContinuationToken>{escape(next_token)}</NextContinuationToken>")
     for key, size, lm, etag in contents:
-        parts.append(f"<Contents><Key>{escape(key)}</Key><LastModified>{lm}</LastModified>"
+        parts.append(f"<Contents><Key>{key}</Key><LastModified>{lm}</LastModified>"
                      f'<ETag>"{etag}"</ETag><Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>')
     for cp in cps:
         parts.append(f"<CommonPrefixes><Prefix>{escape(cp)}</Prefix></CommonPrefixes>")
@@ -282,6 +288,7 @@ def make_admin(state):
 
 
 def main():
+    os.environ.setdefault("PYTHONHASHSEED", "0")
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True); ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--admin-port", type=int, default=9001); ap.add_argument("--latency-ms", type=float, default=0)
