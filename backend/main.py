@@ -940,6 +940,13 @@ def _init_db(bucket, endpoint_id=None):
         conn.execute("ALTER TABLE crawl_status ADD COLUMN current_crawl_gen INTEGER DEFAULT 0")
     except Exception:
         pass  # Column already exists
+    # Truthful state: last_crawl_end is stamped on SUCCESS only; a failed attempt records
+    # last_attempt_at + last_error instead, so freshness is never faked by a failure.
+    for col in ("last_error TEXT", "last_attempt_at TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE crawl_status ADD COLUMN {col}")
+        except Exception:
+            pass
     # Migration: persist last full-crawl duration so the scheduler can classify a
     # bucket (small vs large) immediately after a restart, without re-crawling it.
     try:
@@ -1267,8 +1274,10 @@ def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callbac
             else:
                 log.error("[%s] Prefix '%s' failed after %d retries", bucket, prefix[:40], max_retries)
                 if batch_callback is not None and batch:
-                    batch_callback(batch)
-                return total_count if batch_callback is not None else objects
+                    batch_callback(batch)   # rows listed so far are real; the prefix is NOT marked done
+                # Returning the partial count let the caller mark the prefix complete and prune the
+                # rows it never saw. A listing that did not reach its last page is a failure.
+                raise RuntimeError(f"listing '{prefix}' failed after {max_retries} retries: {e}")
 
         for obj in resp.get("Contents", []):
             key = obj["Key"]
@@ -1799,13 +1808,21 @@ def _run_crawl(bucket, endpoint_id=None):
             log.warning("[%s:%s] Skipping stale-key prune — %d prefix(es) still failed after retry; index kept intact",
                         eid, bucket, len(failed_prefixes))
 
-        # Final counts
+        # Final counts. With failed prefixes the index is intact but not fully reconciled: report
+        # 'degraded' (still served) instead of 'complete', keep the previous success timestamp,
+        # and record what went wrong.
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
         with _get_db(bucket, eid) as db:
             row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
             total_objects, total_size = row[0], row[1]
-            db.execute(
-                "UPDATE crawl_status SET status='complete', last_crawl_end=?, total_objects=?, total_size=? WHERE id=1",
-                (time.strftime("%Y-%m-%dT%H:%M:%SZ"), total_objects, total_size))
+            if failed_prefixes:
+                db.execute(
+                    "UPDATE crawl_status SET status='degraded', last_attempt_at=?, last_error=?, total_objects=?, total_size=? WHERE id=1",
+                    (now_iso, f"{len(failed_prefixes)} prefix(es) failed to list", total_objects, total_size))
+            else:
+                db.execute(
+                    "UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL, total_objects=?, total_size=? WHERE id=1",
+                    (now_iso, now_iso, total_objects, total_size))
             db.commit()
             # FTS indexes the key only, so it is stale only when keys were ADDED or
             # DELETED — not when size/etag changed. Skip the O(all-rows) trigram
@@ -2183,7 +2200,7 @@ def _is_index_ready(bucket):
         return False
     with _get_db(bucket) as db:
         row = db.execute("SELECT status, total_objects FROM crawl_status WHERE id=1").fetchone()
-        if row and (row["status"] == "complete" or (row["total_objects"] or 0) > 0):
+        if row and (row["status"] in ("complete", "degraded") or (row["total_objects"] or 0) > 0):
             return True
         # Source of truth is the objects table. crawl_status counters can be
         # transiently 0/NULL during a crawl transition — never let that make a
@@ -2438,16 +2455,25 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
             log.info("[%s:%s] Delta crawl: %d new/changed in %.1fs", eid, bucket, n, time.monotonic() - t0)
         except Exception as e:
             log.warning("[%s:%s] Delta crawl error: %s", eid, bucket, e)
+            delta_error = str(e)[:200]
+        else:
+            delta_error = None
         finally:
             with _crawl_lock:
                 _crawling.pop(crawl_key, None)
-            # Always return status to 'complete' and stamp last_crawl_end so the UI
-            # reflects that the index was just refreshed (even on a no-change delta).
+            # Success stamps the success time. A failed delta records the attempt and the error and
+            # leaves status and last_crawl_end alone: monitoring must not see freshness that did not happen.
             try:
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 with _get_db(bucket, eid) as db:
-                    # A delta refreshes hot prefixes only; it must not relabel an interrupted full crawl as complete.
-                    db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=? WHERE id=1 AND status <> 'interrupted'",
-                               (time.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+                    if delta_error is None:
+                        # A delta refreshes hot prefixes only; it must not relabel an interrupted or degraded full crawl as complete.
+                        db.execute("UPDATE crawl_status SET status='complete', last_crawl_end=?, last_attempt_at=?, last_error=NULL "
+                                   "WHERE id=1 AND status NOT IN ('interrupted', 'degraded')", (now_iso, now_iso))
+                        db.execute("UPDATE crawl_status SET last_crawl_end=?, last_attempt_at=? WHERE id=1 AND status IN ('interrupted', 'degraded')",
+                                   (now_iso, now_iso))
+                    else:
+                        db.execute("UPDATE crawl_status SET last_attempt_at=?, last_error=? WHERE id=1", (now_iso, delta_error))
                     db.commit()
             except Exception:
                 pass
@@ -2516,7 +2542,10 @@ def _auto_recrawl():
     the whole bucket every cycle, and avoids crawl/rebuild lock collisions."""
     while True:
         try:
-            time.sleep(RECRAWL_INTERVAL)
+            # Tick at a quarter of the interval: the per-bucket cooldown checks below still enforce
+            # RECRAWL_INTERVAL since the last finish, but a coarse tick made a 120 s setting behave
+            # like ~240 s (wake just before the cooldown boundary → skip → wait another full interval).
+            time.sleep(max(5, RECRAWL_INTERVAL // 4))
             now = time.time()
             for eid in _s3_manager.get_all_ids():
                 try:
@@ -5577,8 +5606,13 @@ def crawl_status(bucket: str, user: dict = Depends(get_current_user)):
     st = d.get("status") or ""
     # True only when a full crawl has finished and nothing since has interrupted one.
     d["full_crawl_complete"] = bool(d.get("crawl_duration")) and st != "interrupted" and not st.startswith("error")
-    started = _crawling.get(f"{_current_endpoint_id()}:{bucket}")
+    crawl_key = f"{_current_endpoint_id()}:{bucket}"
+    started = _crawling.get(crawl_key)
     d["crawl_elapsed"] = round(time.time() - started, 1) if isinstance(started, float) else None
+    # 'complete' means the catalogue rows are in; folder stats and the search index are rebuilt
+    # afterwards (minutes at 10M keys). Say so instead of letting clients infer it.
+    d["rebuilding"] = crawl_key in _rebuilding
+    d["search_ready"] = st in ("complete", "degraded") and not d["rebuilding"]
     return d
 
 

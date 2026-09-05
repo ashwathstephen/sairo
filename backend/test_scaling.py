@@ -977,3 +977,90 @@ class TestSplitKeepsDirectObjects:
             keys = sorted(r[0] for r in db.execute("SELECT key FROM objects"))
         assert keys == ["druid/README.md", "druid/segments/part-1.zip"], keys
 
+
+class TestTruthfulStates:
+    """P0: a crawl that did not see every page must not look complete, and a failed delta must not fake freshness."""
+
+    def _mk(self, m, bucket, fail_prefix=None):
+        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        calls = {"n": 0}
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "a/"}, {"Prefix": "b/"}, {"Prefix": "c/"}, {"Prefix": "d/"}], "Contents": [], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            if pre == fail_prefix:
+                calls["n"] += 1
+                if calls["n"] == 1:   # first page succeeds, every later page fails
+                    return {"Contents": [{"Key": f"{pre}k1", "Size": 1, "LastModified": lm, "ETag": '"e"'}], "IsTruncated": True, "NextContinuationToken": "t"}
+                raise ConnectionError("provider went away")
+            return {"Contents": [{"Key": f"{pre}k1", "Size": 1, "LastModified": lm, "ETag": '"e"'}, {"Key": f"{pre}k2", "Size": 1, "LastModified": lm, "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        return client
+
+    def test_terminal_page_failure_marks_degraded_and_never_prunes(self):
+        import sys, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-degraded"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")     # healthy full crawl: 4 prefixes × 2 objects
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT status FROM crawl_status").fetchone()[0] == "complete"
+            ok_end = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+        time.sleep(1.1)
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket, fail_prefix="c/")), patch.object(m._rebuild_pool, "submit"), patch.object(m.time, "sleep"):
+            m._run_crawl(bucket, "default")     # recrawl where c/ fails after its first page
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT * FROM crawl_status").fetchone())
+            keys = sorted(r[0] for r in db.execute("SELECT key FROM objects"))
+        assert row["status"] == "degraded", row
+        assert row["last_crawl_end"] == ok_end, "a failed attempt must not move the success timestamp"
+        assert row["last_error"] and "1 prefix" in row["last_error"]
+        assert row["last_attempt_at"] and row["last_attempt_at"] >= ok_end
+        assert "c/k2" in keys, "the row the failed listing never reached must NOT be pruned"
+        assert m._is_index_ready(bucket)
+
+    def test_failed_delta_does_not_fake_freshness(self):
+        import sys, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-delta"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")   # the rebuild pool was mocked, so release the post-crawl marker by hand
+        with m._get_db(bucket, "default") as db:
+            before = dict(db.execute("SELECT status, last_crawl_end FROM crawl_status").fetchone())
+        def boom(*a, **k): raise RuntimeError("SlowDown")
+        with patch.object(m, "_delta_crawl", side_effect=boom), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
+            assert m._queue_delta_crawl(bucket, "default") is True
+        with m._get_db(bucket, "default") as db:
+            after = dict(db.execute("SELECT status, last_crawl_end, last_error, last_attempt_at FROM crawl_status").fetchone())
+        assert after["status"] == before["status"] == "complete"
+        assert after["last_crawl_end"] == before["last_crawl_end"], "a failed delta must not stamp a success time"
+        assert after["last_error"] == "SlowDown" and after["last_attempt_at"]
+
+    def test_crawl_status_reports_rebuilding_and_search_readiness(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-status"
+        m._init_db(bucket, "default")
+        with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        key = f"default:{bucket}"
+        try:
+            d = m.crawl_status(bucket, user={})
+            assert d["status"] == "complete" and d["rebuilding"] is True and d["search_ready"] is False, d   # rebuild pool was mocked: still marked rebuilding
+        finally:
+            with m._crawl_lock:
+                m._rebuilding.discard(key)
+        d = m.crawl_status(bucket, user={})
+        assert d["rebuilding"] is False and d["search_ready"] is True, d
+

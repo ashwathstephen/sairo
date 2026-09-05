@@ -90,7 +90,7 @@ def register(mcp):
             lines = [f"Found {len(results)} bucket(s):\n"]
             for b in sorted(results, key=lambda x: x["name"]):
                 status = b.get("index_status", "unknown")
-                status_icon = {"complete": "ready", "crawling": "indexing...", "interrupted": "resuming index...", "idle": "ready"}.get(
+                status_icon = {"complete": "ready", "degraded": "partial (some folders failed to list)", "crawling": "indexing...", "interrupted": "resuming index...", "idle": "ready"}.get(
                     status, status
                 )
                 objects = format_number(b.get("objects", 0))

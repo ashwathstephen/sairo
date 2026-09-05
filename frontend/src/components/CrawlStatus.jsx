@@ -23,7 +23,9 @@ export default function CrawlStatus({ bucket }) {
 
   const isInterrupted = status.status === "interrupted";
   const isCrawling = status.status === "crawling" || isInterrupted;
-  const isComplete = status.status === "complete";
+  const isDegraded = status.status === "degraded";           // index served, some folders failed to list
+  const isComplete = status.status === "complete" || isDegraded;
+  const isRebuilding = isComplete && status.rebuilding;       // rows in, search index still being rebuilt
   const isError = status.status?.startsWith("error");
 
   const handleRecrawl = async () => {
@@ -55,7 +57,7 @@ export default function CrawlStatus({ bucket }) {
         {isCrawling
           ? `${isInterrupted ? "Resuming index..." : "Indexing..."} ${(status.total_objects || 0).toLocaleString()}`
           : isComplete
-          ? `${(status.total_objects || 0).toLocaleString()} objects`
+          ? `${(status.total_objects || 0).toLocaleString()} objects${isRebuilding ? " · finishing search index" : isDegraded ? " · partial" : ""}`
           : isError ? "Index error" : "Not indexed"}
       </button>
 
@@ -63,8 +65,14 @@ export default function CrawlStatus({ bucket }) {
         <div className="crawl-dropdown">
           <div className="crawl-detail">
             <span className="crawl-label">Status</span>
-            <span>{status.status}</span>
+            <span>{isRebuilding ? `${status.status} (rebuilding search index)` : status.status}</span>
           </div>
+          {status.last_error && (
+            <div className="crawl-detail">
+              <span className="crawl-label">Last error</span>
+              <span>{status.last_error}</span>
+            </div>
+          )}
           <div className="crawl-detail">
             <span className="crawl-label">Objects</span>
             <span>{(status.total_objects || 0).toLocaleString()}</span>
