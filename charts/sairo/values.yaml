@@ -37,6 +37,8 @@ persistence:
   storageClass: ""
   accessMode: ReadWriteOnce
   size: 20Gi          # ~1 GB per 1M indexed objects (incl. search index)
+                      # Upgrading an existing release: a PVC can only grow in place if its StorageClass
+                      # has allowVolumeExpansion; otherwise keep your current value (e.g. --set persistence.size=5Gi).
   keep: true          # helm.sh/resource-policy: keep on the PVC (survives uninstall)
 
 # S3 Configuration (required)

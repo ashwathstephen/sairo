@@ -4,6 +4,8 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ## [Unreleased]
 
+**Upgrade note (Helm):** the default `persistence.size` moved from 5Gi to 20Gi. An existing release's PVC is patched in place, which only works when the StorageClass allows volume expansion; otherwise pass your current size (`--set persistence.size=5Gi`). The PVC now carries `helm.sh/resource-policy: keep`, so `helm uninstall` no longer deletes the index.
+
 Crawler correctness (Core program, Phase A — SAE-63).
 
 ### Fixed
