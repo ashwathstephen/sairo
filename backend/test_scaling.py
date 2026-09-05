@@ -1114,7 +1114,7 @@ class TestTruthfulStates:
             assert m._queue_delta_crawl(bucket, "default") is True
         with m._get_db(bucket, "default") as db:
             row = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
-        assert row == {"status": "complete", "last_crawl_end": end0, "last_error": "1 delta target(s) failed to list"}, row
+        assert row == {"status": "complete", "last_crawl_end": end0, "last_error": "1 delta target(s) failed to list: a/"}, row
         # clean delta over a degraded index: status stays degraded, no success stamp
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='degraded', last_error='2 prefix(es) failed to list'"); db.commit()

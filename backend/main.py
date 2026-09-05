@@ -2634,7 +2634,7 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
             with _crawl_lock:
                 _crawl_meta.setdefault(crawl_key, {})["last_delta"] = time.time()
             if failed_targets:
-                delta_error = f"{len(failed_targets)} delta target(s) failed to list"
+                delta_error = f"{len(failed_targets)} delta target(s) failed to list: " + ", ".join(t[:60] for t in failed_targets[:5])
                 log.warning("[%s:%s] Delta crawl degraded: %d new/changed, %s in %.1fs", eid, bucket, n, delta_error, time.monotonic() - t0)
             else:
                 log.info("[%s:%s] Delta crawl: %d new/changed in %.1fs", eid, bucket, n, time.monotonic() - t0)
