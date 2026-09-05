@@ -22,3 +22,37 @@ Druid key layout (`druid/segments/<ds>/<interval>/<version>/<partition>/index.zi
 | Restart behaviour after the OOM (Phase A) | `Queued resume of interrupted crawl for default:seg-main` → `Sub-prefix split 'druid/' → 1 children` → `Crawl started (1 prefixes, 1,300,000 existing, incremental=True)` | resume worked as designed but had nothing to skip: with one prefix the resume unit is the whole bucket, and the split only went one level. B.6 (split on initial crawl, multi-level) is a prerequisite for resume to help on this layout. |
 
 seg-main single-threaded baseline: **did not complete** before the OOM kill (1.3M rows in ≈700 s while competing with 11 other buckets ≈ 1,900 objects/s). Rerun as seg-main-only for a clean number (Run 2).
+
+## Run 2 — seg-main only (9,900,000 objects), fresh volume, image `phase-a` (single-thread baseline for B.6)
+
+| Metric | Value |
+|---|---|
+| Threads used for listing | **1** (`Crawl started … (1 prefixes, 0 existing)`) |
+| `crawl_duration` | **908.6 s (15.1 min)** at 40 ms/page simulated latency ≈ 10.9k objects/s |
+| Progress shown in UI during the crawl | `total_objects = 0` for the whole 15 minutes |
+| RSS while listing | ≈ 128 MB, flat |
+| RSS at completion (post-crawl rebuild) | **926 MB**, then the pod restarted (restart count 1) — the spike is in the post-crawl phase, not in listing. The folder-table rebuilds aggregate only the top level (tiny here); the **FTS trigram rebuild over 9.9M keys** is the main suspect (verified in Run 3, which runs the same rebuild) |
+| Index size | 7.4 GB (≈ 0.75 GB per 1M objects for this layout once compacted) |
+
+Note on production translation: at a real provider RTT of ~200–300 ms per page instead of 40 ms, the same single-threaded crawl is ≈ 9,900 × 0.25 s ≈ 40–50 min of pure waiting on the provider before CPU and write time; with throttling and the herd it becomes the hours observed.
+
+## Run 3 — seg-main only, fresh volume, image `phase-b6` (B.6: multi-level split on the initial crawl)
+
+Startup log: `Sub-prefix split 'druid/' → 1 children` → `Sub-prefix split 'druid/segments/' → 40 children` → `Expanded 1 prefixes → 40 sub-prefixes` → `Crawl started … (40 prefixes, 0 existing)`.
+
+| Metric | Value |
+|---|---|
+| Listing rate with 16 threads | ≈ 23–24k objects/s (8.23M at 345 s) vs ≈ 10.9k/s single-threaded — **2.2× at 40 ms latency**, now bounded by the single-process CPU ceiling rather than by latency |
+| Progress in UI | live (`objects=980000` at 42 s, …) |
+| RSS while listing | 264–341 MB |
+| **Failure at 8.53M** | `Crawl error: database is locked` — 16 concurrent batch writers starved the main thread's progress `UPDATE` past the 30 s busy timeout; the crawl errored and the scheduler restarted it as an *incremental* crawl (the `crawl_gen` write-amplification path). **B.6 parallelism without serialized writes is unsafe at this scale.** |
+
+Fix: per-bucket write lock around the SQLite write section (listing stays parallel) — commit on `core/phase-b-initial-split`, image `phase-b7`. Run 4 below.
+
+## Run 4 — seg-main only, fresh volume, image `phase-b7` (B.6 + per-bucket write lock)
+
+Result: pending.
+
+## Production read-only run (real StorageGRID endpoint, 22 buckets), Phase A + B.6 + write lock
+
+First attempt (before the write lock) listed 3,801 prefixes in ≈ 60 s with no throttling or lock errors. At least one production bucket has a **wide-and-shallow** layout (thousands of ULID-named top-level prefixes holding 4–7 objects each) — the opposite of the Druid shape; the lab's layout matrix must include it. Result: pending.
