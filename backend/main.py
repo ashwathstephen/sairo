@@ -1203,6 +1203,8 @@ _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}       # crawl_key -> timestamp when crawl started
 _crawl_futures = {}  # crawl_key -> Future of the running _run_crawl (for cancel/shutdown)
 _write_locks = {}    # crawl_key -> threading.Lock serializing SQLite writes from a crawl's threads
+_crawl_progress_ts = {}  # crawl_key -> time of the last completed prefix/batch (stall detection)
+_CRAWL_STALL_SECONDS = int(os.environ.get("CRAWL_STALL_SECONDS", "1800"))  # no progress for this long => ask the crawl to stop and resume
 # ponytail: one writer per bucket (a lock, not a queue); listing threads still overlap the write.
 # Upgrade path: a writer thread + bounded queue (SAE-74) if the lock shows up in the counters.
 _crawl_cancel = {}   # crawl_key -> threading.Event requesting a cooperative stop
@@ -1457,6 +1459,7 @@ def _run_crawl(bucket, endpoint_id=None):
         with _write_lock(crawl_key), _get_db(bucket, eid) as _db:
             _db.execute("INSERT OR REPLACE INTO crawl_progress (prefix, gen) VALUES (?, ?)", (p, crawl_gen))
             _db.commit()
+        _crawl_progress_ts[crawl_key] = time.time()
 
     crawl_start = time.monotonic()
     crawl_ok = False
@@ -1641,6 +1644,7 @@ def _run_crawl(bucket, endpoint_id=None):
                             progress_rows[0] += len(batch)
                             db.execute("UPDATE crawl_status SET total_objects=? WHERE id=1", (progress_rows[0],))
                     db.commit()
+                _crawl_progress_ts[crawl_key] = time.time()
             return _cb
 
         with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
@@ -1773,6 +1777,7 @@ def _run_crawl(bucket, endpoint_id=None):
             _crawl_futures.pop(crawl_key, None)
             _crawl_cancel.pop(crawl_key, None)
             _write_locks.pop(crawl_key, None)
+            _crawl_progress_ts.pop(crawl_key, None)
             if crawl_ok:
                 _rebuilding.add(crawl_key)
                 # Record full-crawl timing so the scheduler can decide between a
@@ -2359,18 +2364,24 @@ def _queue_crawl(bucket, endpoint_id=None):
         started_at = _crawling.get(crawl_key)
         if started_at:
             # `True` marks a non-crawl owner (version purge); never time it out.
-            if started_at is True or now - started_at <= _CRAWL_MAX_DURATION:
+            if started_at is True:
                 return False
+            last_progress = _crawl_progress_ts.get(crawl_key, started_at)
             fut = _crawl_futures.get(crawl_key)
             if fut is not None and not fut.done():
-                # Over the limit but still running: never start a second crawl of the same
-                # bucket (they would fight over the single SQLite writer). Ask it to stop; it
-                # exits 'interrupted' and the scheduler resumes it from crawl_progress.
-                ev = _crawl_cancel.get(crawl_key)
-                if ev is not None and not ev.is_set():
-                    ev.set()
-                    log.warning("Crawl for %s exceeded %d min; cancellation requested (will resume)",
-                                crawl_key, _CRAWL_MAX_DURATION // 60)
+                # Still running. A long crawl is fine as long as it makes progress (a 10M-object
+                # bucket legitimately takes hours at provider RTT). Only a STALLED crawl — no
+                # prefix or batch completed for _CRAWL_STALL_SECONDS — is asked to stop; it exits
+                # 'interrupted' and the scheduler resumes it from crawl_progress. Never start a
+                # second crawl of the same bucket.
+                if now - last_progress > _CRAWL_STALL_SECONDS:
+                    ev = _crawl_cancel.get(crawl_key)
+                    if ev is not None and not ev.is_set():
+                        ev.set()
+                        log.warning("Crawl for %s made no progress for %d min; cancellation requested (will resume)",
+                                    crawl_key, int((now - last_progress) // 60))
+                return False
+            if now - started_at <= _CRAWL_MAX_DURATION:
                 return False
             # Thread is gone (OOM kill, executor death): the lock really is stale.
             log.warning("Force-releasing stale crawl lock for %s (started %.0f min ago, thread gone)", crawl_key, (now - started_at) / 60)
