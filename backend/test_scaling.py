@@ -834,3 +834,18 @@ class TestChunkedFtsRebuild:
             assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 1234
             assert not m._fts_is_empty(db)
             assert m._fts_should_rebuild(bucket, "default", False) is False
+
+
+class TestTempStoreIsFileBacked:
+    def test_connections_do_not_force_in_memory_temp_store(self):
+        # The post-crawl rebuilds GROUP BY a computed expression over the whole objects table; with
+        # temp_store=MEMORY that sort is a full-table copy in RAM (OOMKilled at 9.9M rows under 1Gi).
+        import sys, os
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "temp-store-check"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("PRAGMA temp_store").fetchone()[0] != 2   # 2 = MEMORY

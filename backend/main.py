@@ -879,7 +879,8 @@ def _init_db(bucket, endpoint_id=None):
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
-    conn.execute("PRAGMA temp_store = MEMORY")       # temp tables in RAM
+    # temp_store stays DEFAULT (file-backed): the post-crawl GROUP BY rebuilds sort the whole objects table
+    # in a temp b-tree, which in RAM is a full-table copy (OOM at 9.9M rows under the 1Gi chart limit).
     conn.execute("PRAGMA wal_autocheckpoint = 2000") # checkpoint ~every 16MB of WAL
     conn.execute("""
         CREATE TABLE IF NOT EXISTS objects (
@@ -1034,7 +1035,8 @@ def _get_db(bucket, endpoint_id=None):
     conn.execute("PRAGMA synchronous = NORMAL")      # safe under WAL; fewer fsyncs on the crawl write path
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
-    conn.execute("PRAGMA temp_store = MEMORY")       # temp tables in RAM
+    # temp_store stays DEFAULT (file-backed): the post-crawl GROUP BY rebuilds sort the whole objects table
+    # in a temp b-tree, which in RAM is a full-table copy (OOM at 9.9M rows under the 1Gi chart limit).
     try:
         yield conn
     finally:
