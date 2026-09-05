@@ -2353,9 +2353,14 @@ def _hot_target_prefixes(bucket, endpoint_id, sample=None, max_targets=None):
     return _minimal_prefixes({p for (p,) in rows})[:max_targets]
 
 
-def _delta_list_prefix(client, bucket, prefix):
-    """Recursively list every object under `prefix` (no delimiter). Returns raw S3 objects."""
+def _delta_list_prefix(client, bucket, prefix, sink=None, batch_size=5000):
+    """Recursively list every object under `prefix` (no delimiter).
+
+    Without `sink`, returns the raw S3 objects. With `sink`, hands them over in batches of at most
+    `batch_size` as pages arrive and returns the count — a brand-new dataset with millions of objects
+    must not be held in memory (that is the large-bucket OOM path)."""
     objs = []
+    total = 0
     token = None
     while True:
         params = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
@@ -2365,9 +2370,15 @@ def _delta_list_prefix(client, bucket, prefix):
         for o in resp.get("Contents", []):
             if o["Key"] != prefix:
                 objs.append(o)
+        if sink is not None and len(objs) >= batch_size:
+            total += len(objs); sink(objs); objs = []
         if not resp.get("IsTruncated", False):
             break
         token = resp.get("NextContinuationToken")
+    if sink is not None:
+        if objs:
+            total += len(objs); sink(objs)
+        return total
     return objs
 
 
@@ -2426,13 +2437,20 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
     brand-new hour folder — even when it sits beyond the first 1000 siblings and in a
     dataset that isn't the globally most-recently-modified one)."""
     if not tops:
-        return set()
-    targets, frontier, visited = set(), list(tops), 0
+        return set(), False
+    targets, frontier, visited, truncated = set(), list(tops), 0, False
     with _get_db(bucket, endpoint_id) as db, \
          ThreadPoolExecutor(max_workers=DELTA_LIST_CONCURRENCY) as ex:
         depth = 0
         while frontier and depth < DELTA_MAX_DEPTH and visited < DELTA_MAX_NODES:
             depth += 1
+            budget = DELTA_MAX_NODES - visited
+            if len(frontier) > budget:
+                # The cap must hold on the FIRST level too: a 20,000-prefix root walked in full is a
+                # full crawl (lab: 356 s against a 120 s target). Keep the newest names, and say the
+                # walk was partial so the delta is not certified as a complete refresh.
+                frontier = sorted(frontier, key=_natural_key)[-budget:]
+                truncated = True
             visited += len(frontier)
             listed = list(ex.map(lambda p: (p, _list_children(client, bucket, p)), frontier))
             nxt = []
@@ -2454,7 +2472,30 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
                         targets.add(c)    # brand-new partition (e.g. a fresh hour folder)
                     nxt.append(c)
             frontier = nxt
-    return targets
+        if frontier:
+            truncated = True   # depth or node budget exhausted with folders still unvisited
+    return targets, truncated
+
+
+def _delta_write(db, objs, gen):
+    """Upsert one batch of listed S3 objects; returns how many were new or changed."""
+    changed = 0
+    for i in range(0, len(objs), 5000):
+        chunk = objs[i:i + 5000]
+        keys = [o["Key"] for o in chunk]
+        ph = ",".join("?" * len(keys))
+        have = {r[0]: (r[1], r[2]) for r in
+                db.execute(f"SELECT key,size,etag FROM objects WHERE key IN ({ph})", keys)}
+        batch = []
+        for o in chunk:
+            k = o["Key"]; sz = o["Size"]; et = o.get("ETag", "").strip('"')
+            prev = have.get(k)
+            if not prev or prev[0] != sz or prev[1] != et:
+                changed += 1
+            batch.append((k, sz, o["LastModified"].isoformat(), et, _key_prefix(k), _key_depth(k), gen))
+        db.executemany(
+            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)", batch)
+    return changed
 
 
 def _delta_crawl(bucket, endpoint_id):
@@ -2507,7 +2548,9 @@ def _delta_crawl(bucket, endpoint_id):
         row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
         gen = (row[0] if row else 0) or 0
     try:
-        discovered = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
+        discovered, partial = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
+        if partial:
+            failed_targets.append("discovery:truncated")   # bounded walk did not cover every folder → not a clean delta
     except Exception as e:
         # Discovery is what finds brand-new partitions. Without it this delta cannot vouch for
         # freshness: keep the hot-prefix refresh, but report the delta as degraded.
@@ -2516,45 +2559,38 @@ def _delta_crawl(bucket, endpoint_id):
         failed_targets.append("discovery")
     targets = _minimal_prefixes(set(hot) | discovered | new_tops)   # new top-level prefixes are listed in full
 
-    # List all targets in parallel (the hot set is small; this keeps a delta fast
-    # even when several partitions are active).
-    all_objs = list(root_objs)   # direct root-level objects from the root listing above
+    # List all targets in parallel; every page batch is written as it arrives (bounded memory:
+    # at most batch_size objects per listing thread), serialised on the bucket's write lock.
+    changed = 0
+    wlock = _write_lock(f"{eid}:{bucket}")
+    def flush(objs):
+        nonlocal changed
+        with wlock, _get_db(bucket, eid) as db:
+            changed += _delta_write(db, objs, gen)
+            db.commit()
+    if root_objs:
+        flush(root_objs)
     def _list_or_fail(tp):
         try:
-            return tp, _delta_list_prefix(client, bucket, tp)
+            res = _delta_list_prefix(client, bucket, tp, sink=flush)
+            if isinstance(res, list):   # a listing helper that returns objects instead of streaming
+                flush(res)
+            return tp, True
         except Exception as e:   # one failed target degrades the delta; it must not fake a full refresh
             log.warning("[%s:%s] delta target '%s' failed: %s", eid, bucket, tp[:60], e)
-            return tp, None
+            return tp, False
     if targets:
         with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
-            for tp, objs in ex.map(_list_or_fail, targets):
-                if objs is None:
+            for tp, ok in ex.map(_list_or_fail, targets):
+                if not ok:
                     failed_targets.append(tp)
-                else:
-                    all_objs.extend(objs)
-
-    changed = 0
-    with _get_db(bucket, eid) as db:
-        for i in range(0, len(all_objs), 5000):
-            chunk = all_objs[i:i + 5000]
-            keys = [o["Key"] for o in chunk]
-            ph = ",".join("?" * len(keys))
-            have = {r[0]: (r[1], r[2]) for r in
-                    db.execute(f"SELECT key,size,etag FROM objects WHERE key IN ({ph})", keys)}
-            batch = []
-            for o in chunk:
-                k = o["Key"]; sz = o["Size"]; et = o.get("ETag", "").strip('"')
-                prev = have.get(k)
-                if not prev or prev[0] != sz or prev[1] != et:
-                    changed += 1
-                batch.append((k, sz, o["LastModified"].isoformat(), et,
-                              _key_prefix(k), _key_depth(k), gen))
-            db.executemany(
-                "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) "
-                "VALUES (?,?,?,?,?,?,?)", batch)
-        if new_tops:
-            db.executemany("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES (?)", [(t,) for t in new_tops])
-        db.commit()
+    # A new top-level prefix becomes "known" only once it has actually been listed: otherwise the
+    # next delta would skip it and report clean.
+    recorded = new_tops - set(failed_targets)
+    if recorded:
+        with wlock, _get_db(bucket, eid) as db:
+            db.executemany("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES (?)", [(t,) for t in recorded])
+            db.commit()
 
     if changed:
         # cheap metadata refreshes; FTS already maintained incrementally by triggers
