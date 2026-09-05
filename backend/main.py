@@ -1503,10 +1503,16 @@ def _run_crawl(bucket, endpoint_id=None):
                                [(p,) for p in known_prefixes])
                 db.commit()
 
-        # Recursive sub-prefix splitting: if we have very few top-level prefixes
-        # but many objects, drill one level deeper for better parallelism.
-        # e.g. druid/ → druid/segments/, druid/indexing-logs/, druid/msq-intermediate/
-        if known_prefixes and len(known_prefixes) <= 3 and existing_count > 500_000:
+        # Recursive sub-prefix splitting: a bucket with very few top-level prefixes (e.g. a
+        # single `druid/`) would otherwise be listed by ONE thread. Drill down while the
+        # prefix set is tiny, up to a few levels, so the 16-thread pool has work. This runs
+        # on the FIRST crawl too: before, it required existing_count > 500_000, so the initial
+        # crawl (and every crawl after a volume wipe) of a 9.9M-object single-prefix bucket
+        # was sequential (measured: 9,900 pages at provider RTT). Cost: one delimiter listing
+        # per prefix per level.
+        for _level in range(SUBPREFIX_SPLIT_LEVELS):
+            if not known_prefixes or len(known_prefixes) > 3:
+                break
             expanded = set()
             for p in list(known_prefixes):
                 try:
@@ -1535,6 +1541,10 @@ def _run_crawl(bucket, endpoint_id=None):
                 log.info("[%s:%s] Expanded %d prefixes → %d sub-prefixes for better parallelism",
                          eid, bucket, len(known_prefixes), len(expanded))
                 known_prefixes = expanded
+            elif expanded == known_prefixes:
+                break  # nothing deeper to split
+            else:
+                known_prefixes = expanded  # same count, one level deeper (e.g. druid/ → druid/segments/)
 
         if not known_prefixes and not root_files:
             # Small bucket — just do a simple full list with streaming inserts
@@ -1598,6 +1608,9 @@ def _run_crawl(bucket, endpoint_id=None):
                             root_batch)
                     db.commit()
 
+        progress_rows = [0]
+        progress_lock = threading.Lock()
+
         def _make_prefix_batch_cb(b, e, gen):
             """Create a batch callback that inserts directly into DB from the crawl thread."""
             def _cb(batch):
@@ -1608,6 +1621,12 @@ def _run_crawl(bucket, endpoint_id=None):
                         db.executemany(
                             "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
                             [row + (gen,) for row in batch])
+                        # Initial crawl: publish rows written after every batch. Progress used to be
+                        # recorded per completed prefix, so a single-prefix bucket showed 0 objects
+                        # in the UI for its entire first crawl.
+                        with progress_lock:
+                            progress_rows[0] += len(batch)
+                            db.execute("UPDATE crawl_status SET total_objects=? WHERE id=1", (progress_rows[0],))
                     db.commit()
             return _cb
 
@@ -2067,6 +2086,7 @@ def _is_index_ready(bucket):
             return False
 
 
+SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))  # drill down this many levels when a bucket has <=3 top-level prefixes
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
 FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
 LARGE_BUCKET_SECONDS = int(os.environ.get("LARGE_BUCKET_SECONDS", "60"))  # if a full crawl took longer than this, keep fresh via delta crawls

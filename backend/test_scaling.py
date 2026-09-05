@@ -744,3 +744,57 @@ class TestFullIntegration:
             )
 
         print(f"  folder_stats verified: {len(actual_dict)} prefixes match exactly")
+
+
+class TestInitialCrawlSplit:
+    """B.6: a single-top-prefix bucket is split into sub-prefixes on the FIRST crawl (empty index)."""
+
+    def test_empty_index_single_prefix_is_split_for_parallelism(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-initial"
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":
+                    return {"CommonPrefixes": [{"Prefix": "druid/segments/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/segments/":
+                    return {"CommonPrefixes": [{"Prefix": f"druid/segments/ds_{i:03d}/"} for i in range(40)], "Contents": [], "IsTruncated": False}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}{i}/index.zip", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'} for i in range(3)],
+                    "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert len(listed) == 40 and all(p.startswith("druid/segments/ds_") for p in listed), f"expected 40 ds prefixes, got {len(listed)}: {listed[:3]}"
+        with m._get_db(bucket, "default") as db:
+            row = db.execute("SELECT status, total_objects FROM crawl_status WHERE id=1").fetchone()
+            assert row["status"] == "complete" and row["total_objects"] == 120
+
+    def test_many_top_level_prefixes_not_split(self):
+        import sys
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-none"
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            if delim and pre == "":
+                return {"CommonPrefixes": [{"Prefix": f"t{i}/"} for i in range(10)], "Contents": [], "IsTruncated": False}
+            if delim:
+                raise AssertionError("no sub-prefix discovery expected for 10 top-level prefixes")
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}a", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert sorted(listed) == [f"t{i}/" for i in range(10)]

@@ -935,11 +935,12 @@ class TestCrawlerCorrectness:
         bucket = "resumebkt"
         m._init_db(bucket, "default")
         with m._get_db(bucket, "default") as db:
+            db.execute("DELETE FROM objects"); db.execute("DELETE FROM crawl_progress"); db.execute("DELETE FROM discovered_prefixes")  # idempotent across runs (shared test DB_DIR)
             db.execute("UPDATE crawl_status SET status='crawling', current_crawl_gen=7 WHERE id=1")
-            db.execute("INSERT INTO crawl_progress (prefix, gen) VALUES ('a/', 7)")
-            db.execute("INSERT INTO discovered_prefixes (prefix) VALUES ('a/'), ('b/')")
+            db.execute("INSERT OR REPLACE INTO crawl_progress (prefix, gen) VALUES ('a/', 7)")
+            db.execute("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES ('a/'), ('b/')")
             for i in range(2):  # rows the interrupted crawl already wrote for a/
-                db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
                            (f"a/{i}", 1, "2026-01-01T00:00:00+00:00", "e", "a/", 1, 7))
             db.commit()
         listed = []
