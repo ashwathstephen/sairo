@@ -1202,6 +1202,9 @@ _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}       # crawl_key -> timestamp when crawl started
 _crawl_futures = {}  # crawl_key -> Future of the running _run_crawl (for cancel/shutdown)
+_write_locks = {}    # crawl_key -> threading.Lock serializing SQLite writes from a crawl's threads
+# ponytail: one writer per bucket (a lock, not a queue); listing threads still overlap the write.
+# Upgrade path: a writer thread + bounded queue (SAE-74) if the lock shows up in the counters.
 _crawl_cancel = {}   # crawl_key -> threading.Event requesting a cooperative stop
 _shutting_down = threading.Event()
 MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
@@ -1210,6 +1213,14 @@ MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
 class CrawlInterrupted(Exception):
     """Raised inside a crawl when shutdown or cancellation was requested. Progress is in
     crawl_progress; the next crawl of the bucket resumes from it."""
+
+
+def _write_lock(crawl_key):
+    with _crawl_lock:
+        lk = _write_locks.get(crawl_key)
+        if lk is None:
+            lk = _write_locks[crawl_key] = threading.Lock()
+        return lk
 
 
 def _disk_low():
@@ -1443,7 +1454,7 @@ def _run_crawl(bucket, endpoint_id=None):
                  eid, bucket, crawl_gen, len(done_prefixes))
 
     def _mark_prefix_done(p):
-        with _get_db(bucket, eid) as _db:
+        with _write_lock(crawl_key), _get_db(bucket, eid) as _db:
             _db.execute("INSERT OR REPLACE INTO crawl_progress (prefix, gen) VALUES (?, ?)", (p, crawl_gen))
             _db.commit()
 
@@ -1551,7 +1562,7 @@ def _run_crawl(bucket, endpoint_id=None):
             log.info("Simple crawl for bucket %s (endpoint=%s)", bucket, eid)
 
             def _simple_batch_cb(batch):
-                with _get_db(bucket, eid) as db:
+                with _write_lock(crawl_key), _get_db(bucket, eid) as db:
                     if existing_count > 0:
                         _incremental_upsert(db, batch, crawl_gen)
                     else:
@@ -1611,10 +1622,12 @@ def _run_crawl(bucket, endpoint_id=None):
         progress_rows = [0]
         progress_lock = threading.Lock()
 
+        wlock = _write_lock(crawl_key)
+
         def _make_prefix_batch_cb(b, e, gen):
             """Create a batch callback that inserts directly into DB from the crawl thread."""
             def _cb(batch):
-                with _get_db(b, e) as db:
+                with wlock, _get_db(b, e) as db:
                     if incremental:
                         _incremental_upsert(db, batch, gen)
                     else:
@@ -1654,7 +1667,7 @@ def _run_crawl(bucket, endpoint_id=None):
                     log.warning("[%s:%s] Prefix '%s' failed: %s: %s", eid, bucket, p[:40], type(e).__name__, e)
 
                 # Update progress after each prefix
-                with _get_db(bucket, eid) as db:
+                with wlock, _get_db(bucket, eid) as db:
                     row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
                     db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                     db.commit()
@@ -1759,6 +1772,7 @@ def _run_crawl(bucket, endpoint_id=None):
             _crawling.pop(crawl_key, None)
             _crawl_futures.pop(crawl_key, None)
             _crawl_cancel.pop(crawl_key, None)
+            _write_locks.pop(crawl_key, None)
             if crawl_ok:
                 _rebuilding.add(crawl_key)
                 # Record full-crawl timing so the scheduler can decide between a
