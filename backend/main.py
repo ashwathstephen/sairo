@@ -1564,6 +1564,7 @@ def _run_crawl(bucket, endpoint_id=None):
                 try:
                     sub_token = None
                     sub_found = set()
+                    too_many = False
                     while True:
                         sub_params = {"Bucket": bucket, "Prefix": p, "Delimiter": "/", "MaxKeys": 1000}
                         if sub_token:
@@ -1571,10 +1572,20 @@ def _run_crawl(bucket, endpoint_id=None):
                         sub_resp = client.list_objects_v2(**sub_params)
                         for cp in sub_resp.get("CommonPrefixes", []):
                             sub_found.add(cp["Prefix"])
+                        # A prefix with a huge fan-out of tiny children (live: 629,643 children
+                        # holding 300k objects) must NOT become 629k list calls; listing it whole
+                        # is 300 pages. Stop enumerating and keep the parent as one unit.
+                        if len(sub_found) > SUBPREFIX_SPLIT_MAX_CHILDREN:
+                            too_many = True
+                            break
                         if not sub_resp.get("IsTruncated", False):
                             break
                         sub_token = sub_resp.get("NextContinuationToken")
-                    if sub_found:
+                    if too_many:
+                        expanded.add(p)
+                        log.info("[%s:%s] Sub-prefix split '%s' skipped: more than %d children, listing it whole",
+                                 eid, bucket, p, SUBPREFIX_SPLIT_MAX_CHILDREN)
+                    elif sub_found:
                         expanded.update(sub_found)
                         log.info("[%s:%s] Sub-prefix split '%s' → %d children",
                                  eid, bucket, p, len(sub_found))
@@ -1730,8 +1741,8 @@ def _run_crawl(bucket, endpoint_id=None):
                     count = future.result(timeout=prefix_timeout)
                     total_new += count
                     _mark_prefix_done(p)
-                    log.info("[%s:%s] Prefix '%s': %s objects",
-                             eid, bucket, p[:40], f"{count:,}")
+                    (log.debug if len(known_prefixes) > 1000 else log.info)(
+                        "[%s:%s] Prefix '%s': %s objects", eid, bucket, p[:40], f"{count:,}")
                 except CrawlInterrupted:
                     interrupted = True
                 except Exception as e:
@@ -2187,6 +2198,7 @@ PROGRESS_RECOUNT_SECONDS = int(os.environ.get("PROGRESS_RECOUNT_SECONDS", "15"))
 FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
 SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))
 SUBPREFIX_SPLIT_MIN_OBJECTS = int(os.environ.get("SUBPREFIX_SPLIT_MIN_OBJECTS", "500000"))  # drill into any top-level prefix with more indexed rows than this  # drill down this many levels when a bucket has <=3 top-level prefixes
+SUBPREFIX_SPLIT_MAX_CHILDREN = int(os.environ.get("SUBPREFIX_SPLIT_MAX_CHILDREN", "1000"))  # above this a prefix is listed whole instead of split
 RECRAWL_INTERVAL = int(os.environ.get("RECRAWL_INTERVAL", "120"))         # how often to check each bucket for fresh data
 FULL_CRAWL_INTERVAL = int(os.environ.get("FULL_CRAWL_INTERVAL", "3600"))  # full reconcile cadence for large buckets (deletions/cold changes)
 LARGE_BUCKET_SECONDS = int(os.environ.get("LARGE_BUCKET_SECONDS", "60"))  # if a full crawl took longer than this, keep fresh via delta crawls

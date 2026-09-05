@@ -875,3 +875,40 @@ class TestSkewSplit:
         assert "big/" not in listed, "the heavy prefix must be split, not listed whole"
         assert sum(p.startswith("big/part") for p in listed) == 20 and sum(p.startswith("small") for p in listed) == 5, listed
 
+
+class TestSplitFanoutCap:
+    def test_prefix_with_huge_fanout_is_listed_whole(self):
+        """One top-level prefix whose only child has 2,500 tiny sub-prefixes: the split must stop
+        at the cap and list the child whole (1 list unit), not dispatch 2,500 list calls."""
+        import sys, os
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "split-fanout"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        listed = []
+        def list_objects_v2(**p):
+            pre, delim, tok = p.get("Prefix", ""), p.get("Delimiter"), p.get("ContinuationToken")
+            if delim:
+                if pre == "":
+                    return {"CommonPrefixes": [{"Prefix": "druid/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/":
+                    return {"CommonPrefixes": [{"Prefix": "druid/logs/"}], "Contents": [], "IsTruncated": False}
+                if pre == "druid/logs/":   # 2,500 children over 3 pages
+                    page = int(tok or 0)
+                    lo, hi = page * 1000, min((page + 1) * 1000, 2500)
+                    return {"CommonPrefixes": [{"Prefix": f"druid/logs/q{i:05d}/"} for i in range(lo, hi)],
+                            "Contents": [], "IsTruncated": hi < 2500, "NextContinuationToken": str(page + 1)}
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            listed.append(pre)
+            return {"Contents": [{"Key": f"{pre}k", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'}], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        assert listed == ["druid/logs/"], listed
+        delimiter_calls = [c.kwargs for c in client.list_objects_v2.call_args_list if c.kwargs.get("Delimiter") and c.kwargs.get("Prefix") == "druid/logs/"]
+        assert len(delimiter_calls) <= 2, "enumeration must stop once the cap is exceeded"
+
