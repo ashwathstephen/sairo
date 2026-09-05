@@ -51,8 +51,30 @@ Fix: per-bucket write lock around the SQLite write section (listing stays parall
 
 ## Run 4 — seg-main only, fresh volume, image `phase-b7` (B.6 + per-bucket write lock)
 
-Result: pending.
+| Metric | Value |
+|---|---|
+| Threads used for listing | 16 (40 sub-prefixes) |
+| `crawl_duration` | **1,066 s** at 40 ms/page — *slower* than the 908.6 s single-thread baseline |
+| Lock errors / restarts during listing | 0 / 0 |
+| Progress in UI | live throughout |
+| RSS while listing | 250–430 MB; peak 574 MB by completion |
+| Index size | 7.3 GB |
+
+Interpretation: with all writes serialized behind one lock, listing threads wait for the writer instead of overlapping with it, so at **low latency the crawl is write-bound and parallel listing buys nothing**. B.6's win is at real provider latency (hundreds of ms per page), where waiting on the provider dominated the single-threaded crawl; the production run measures that case. The next lever for the write path is a writer thread with a bounded queue so listing and writing overlap (SAE-74), plus larger transactions and the zero-write reconcile (SAE-72). **Post-crawl phase: OOMKilled again** (restart count 1, reason OOMKilled) — the one-shot FTS `rebuild` over 9.9M keys exceeds the 1 GiB limit deterministically at this size, in both the single-threaded and the parallel build. Because the rebuild dies before committing, the FTS table stays empty and `_fts_should_rebuild` retries on the next crawl: a **crash loop** for any bucket this large at the chart default. Fix: chunked rebuild (250k rows per transaction, then `optimize`) on the Phase B branch; verified in Run 4b.
 
 ## Production read-only run (real StorageGRID endpoint, 22 buckets), Phase A + B.6 + write lock
 
-First attempt (before the write lock) listed 3,801 prefixes in ≈ 60 s with no throttling or lock errors. At least one production bucket has a **wide-and-shallow** layout (thousands of ULID-named top-level prefixes holding 4–7 objects each) — the opposite of the Druid shape; the lab's layout matrix must include it. Result: pending.
+First attempt (before the write lock) listed 3,801 prefixes in ≈ 60 s with no throttling or lock errors. At least one production bucket has a **wide-and-shallow** layout (thousands of ULID-named top-level prefixes holding 4–7 objects each) — the opposite of the Druid shape; the lab's layout matrix now includes it (`spec-layouts.json`: druid / wide / hive / flat).
+
+Second attempt (with the write lock), first 9 minutes: 22 buckets, 17 complete, 2.43M objects indexed, largest bucket at 1.24M and crawling, no throttling and no lock errors, **process RSS 1,124 MB** on the workstation (no cgroup limit here; this would have been an OOM kill at the chart's 1 GiB default — SAE-85 confirmed at real scale). Splitter on real layouts: `1 → 953`, `2 → 45`, `1 → 3` sub-prefixes on three buckets; 6 buckets are flat (no prefixes). Result: pending.
+
+## Run 5 — layout matrix (`spec-layouts.json`, ~200k objects each), image `phase-b7`
+
+| Layout | Shape | Crawler decision | Initial crawl |
+|---|---|---|---|
+| druid (deep) | 1 top prefix → 4 datasources → 500 intervals → 100 partitions | split 1 → 4 sub-prefixes (B.6) | 200,000 in **20.6 s** |
+| flat | 200,000 root-level keys, no delimiter | "Simple crawl" (0 prefixes), **single thread, unsplittable** | 200,000 in **28.0 s** |
+| hive | 400 `dt=` prefixes × 24 `hour=` × 20 parts | 400 prefixes, 16 threads | 192,000 in **36.3 s** |
+| wide | 20,000 ULID-like top-level prefixes × 10 objects | 20,000 prefixes, 16 threads | 200,000 in **351.7 s** (≈ 57 prefixes/s; 10–17× the other layouts) |
+
+The wide penalty is per-prefix overhead, not listing: one list call, one progress write and, before commit c610c76, a **full `COUNT(*)`/`SUM(size)` scan of the objects table after every completed prefix** (20,000 full scans here; production has a bucket with 3,800+ such prefixes). Fixed on the Phase B branch (time-bounded recount, image `phase-b9`); Run 5b re-measures. Flat buckets remain single-threaded by nature (no delimiter to split on); their ceiling is provider RTT × pages, which only events/inventory can remove.
