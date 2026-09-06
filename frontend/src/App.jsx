@@ -25,6 +25,7 @@ import LicenseManager from "./components/LicenseManager";
 import UserManager from "./components/UserManager";
 import HealthCheck from "./components/HealthCheck";
 import TwoFactorSetup from "./components/TwoFactorSetup";
+import ChangePassword from "./components/ChangePassword";
 import EndpointManager from "./components/EndpointManager";
 import ToastContainer, { toast } from "./components/Toast";
 import { checkAuth, logout, refreshSession } from "./auth";
@@ -144,6 +145,7 @@ function MainApp() {
   const [showUserManager, setShowUserManager] = useState(false);
   const [showHealthCheck, setShowHealthCheck] = useState(false);
   const [showTwoFactor, setShowTwoFactor] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
   const [showEndpointManager, setShowEndpointManager] = useState(false);
   const [branding, setBranding] = useState({ app_name: "Sairo" });
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -629,6 +631,9 @@ function MainApp() {
     <div className="user-badge">
       <span className="user-name">{user.username}</span>
       <span className="user-role">{user.role}</span>
+      {(user.auth_source || "local") === "local" && (
+        <button onClick={() => setShowChangePassword(true)} className="btn-settings">Password</button>
+      )}
       <button onClick={() => setShowTwoFactor(true)} className="btn-settings">2FA</button>
       <button onClick={handleLogout} className="btn-settings">Logout</button>
     </div>
@@ -695,6 +700,7 @@ function MainApp() {
         {showLicense && <LicenseManager onClose={() => setShowLicense(false)} />}
         {showUserManager && <UserManager onClose={() => setShowUserManager(false)} currentUser={user} />}
         {showHealthCheck && <HealthCheck onClose={() => setShowHealthCheck(false)} />}
+        {showChangePassword && <ChangePassword onClose={() => setShowChangePassword(false)} />}
         {showTwoFactor && <TwoFactorSetup onClose={() => setShowTwoFactor(false)} totpEnabled={user.totp_enabled} onStatusChange={(enabled) => setUser(prev => ({ ...prev, totp_enabled: enabled }))} />}
         {showEndpointManager && <EndpointManager onClose={() => setShowEndpointManager(false)} />}
         <ToastContainer />

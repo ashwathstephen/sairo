@@ -907,6 +907,19 @@ export async function ldapLogin(username, password) {
   return res.json();
 }
 
+export async function changePassword(oldPassword, newPassword) {
+  const res = await apiFetch(`${BASE}/auth/change-password`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Password change failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── 2FA / TOTP ────────────────────────────────────────────
 
 export async function setup2FA() {

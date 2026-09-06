@@ -231,6 +231,12 @@ export default function Login({ onLogin, branding = {} }) {
                 required
                 aria-label="Password"
               />
+              {ldapEnabled && (
+                <label className="login-ldap-toggle">
+                  <input type="checkbox" checked={authMode === "ldap"} onChange={(e) => setAuthMode(e.target.checked ? "ldap" : "local")} aria-label="Sign in with LDAP" />
+                  Sign in with LDAP directory
+                </label>
+              )}
             </>
           )}
           <button type="submit" disabled={loading} className="btn-primary">
