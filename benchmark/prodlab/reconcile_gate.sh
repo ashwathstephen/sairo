@@ -70,7 +70,10 @@ GEN2=$(field gen)
 wait_for '[ "$(field gen)" -gt '$GEN2' ]' 600 "cycle 3 full reconcile start (generation > $GEN2)"
 sleep 15; END_PRE=$(field last_crawl_end)   # baseline immediately before the kill (a clean delta may have advanced it since cycle 2)
 say "killing pod mid-reconcile: $(snapshot)"
-kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null; sleep 45
+kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null
+# Check the state the moment the replacement is Ready, not after a fixed pause: checkpoint resume is
+# fast enough that a 45 s pause let the resumed crawl finish before the "still interrupted" check.
+kubectl -n lab rollout status deploy/sairo --timeout=180s >/dev/null 2>&1
 say "after restart: $(snapshot)"
 S3=$(field status)
 check '[ "$S3" = interrupted ] || [ "$S3" = crawling ]' "after the kill the state is interrupted/crawling, not complete" '$S3'
