@@ -171,3 +171,19 @@ A Python-level thread dump (temporary local patch, never committed — the fault
 | Process RSS after | 345 MB |
 | Index size | 10.06 GB (the shadow table needs the old index's space only until the swap) |
 
+## Run 9 — PR #32 (truthful states), final image `phase-b22`: layouts re-timed + three-cycle reconcile gate
+
+Layouts (four buckets concurrently, 40 ms/page, 1 CPU): druid **19.3 s**, flat **27.9 s**, hive **33.0 s**, wide **222.8 s**; the wide layout's first delta with bounded discovery **42.4 s** (356 s before the `DELTA_MAX_NODES` frontier cap; it is reported `degraded: discovery:truncated`, so it never claims a full refresh).
+
+`reconcile_gate.sh` (1M-object druid bucket, `FULL_CRAWL_INTERVAL=240`, `RECRAWL_INTERVAL=60`, verified in the pod) — **RESULT: 0 failure(s)**:
+
+| Step | Observed |
+|---|---|
+| Initial crawl | 1,000,000 rows in 40–42 s, `complete`, rows == simulator truth |
+| Cycle 1: 1,000 keys deleted at the provider + 5 % injected LIST failures | reconcile 192.9–228.7 s → `complete`, **999,000 rows == truth** (per-page retries absorbed the injected failures; a terminal failure would have ended `degraded`) |
+| Cycle 2: clean reconcile | `complete`, rows == truth, `last_crawl_end` advanced, `last_error` cleared, search generation == catalogue generation |
+| Cycle 3: pod killed mid-reconcile (after the generation bumped) | `interrupted` after restart, resumed from checkpoints, `last_crawl_end` unchanged across the kill, then `complete`, rows == truth, timestamp advanced only after the resumed crawl finished |
+| Whole run | 0 unplanned restarts; 0 lock errors, crawl/delta errors, rebuild failures or unexpected tracebacks |
+
+Gate-script lessons recorded on the way: the search marker is stamped by the post-crawl step seconds after `complete` (wait for it, do not race it); a clean delta legitimately advances `last_crawl_end` between cycles (baseline immediately before the kill); Kubernetes rejects duplicate env names, so chart-managed variables must be set through their values, not `extraEnv`.
+
