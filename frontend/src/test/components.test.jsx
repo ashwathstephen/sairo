@@ -162,14 +162,15 @@ describe("Login", () => {
     expect(screen.getByText("Welcome!")).toBeInTheDocument();
   });
 
-  // Skipped, not deleted: the Local/LDAP choice disappeared from the form in the SSO redesign (#21) and
-  // LDAP login is currently unreachable from the UI — tracked in #35. Re-enable with that fix.
-  it.skip("shows LDAP toggle when enabled", async () => {
+  it("shows LDAP toggle when enabled", async () => {
+    // #35: the SSO redesign (#21) dropped the Local/LDAP choice; LDAP is an option on the password form again.
     const { default: Login } = await import("../components/Login");
     render(<Login onLogin={() => {}} branding={{ ldap_enabled: true }} />);
-
-    expect(screen.getByText("Local")).toBeInTheDocument();
-    expect(screen.getByText("LDAP")).toBeInTheDocument();
+    const ldap = screen.getByLabelText("Sign in with LDAP");
+    expect(ldap).not.toBeChecked();
+    expect(screen.getByText("Sign In")).toBeInTheDocument();
+    fireEvent.click(ldap);
+    expect(screen.getByText("Sign In with LDAP")).toBeInTheDocument();
   });
 
   it("does not show LDAP toggle when disabled", async () => {
@@ -897,6 +898,34 @@ describe("SharePage accent", () => {
     const { default: SharePage } = await import("../components/SharePage");
     render(<SharePage token="t" />);
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--primary")).toBe("#ff5500"));
+    vi.doUnmock("../api");
+  });
+});
+
+describe("ChangePassword", () => {
+  it("validates locally, then calls the API and confirms", async () => {
+    vi.resetModules();
+    const calls = [];
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      changePassword: vi.fn().mockImplementation((o, n) => { calls.push([o, n]); return Promise.resolve({ updated: true }); }),
+    }));
+    const { default: ChangePassword } = await import("../components/ChangePassword");
+    render(<ChangePassword onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "oldpass123" } });
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "short" } });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "short" } });
+    fireEvent.submit(screen.getByText("Update Password").closest("form"));
+    expect(await screen.findByText(/at least 8 characters/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newpassword1" } });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "newpassword2" } });
+    fireEvent.submit(screen.getByText("Update Password").closest("form"));
+    expect(await screen.findByText(/do not match/)).toBeInTheDocument();
+    expect(calls).toEqual([]);
+    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "newpassword1" } });
+    fireEvent.submit(screen.getByText("Update Password").closest("form"));
+    expect(await screen.findByText(/has been updated/)).toBeInTheDocument();
+    expect(calls).toEqual([["oldpass123", "newpassword1"]]);
     vi.doUnmock("../api");
   });
 });
