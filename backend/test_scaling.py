@@ -1285,6 +1285,10 @@ class TestTruthfulStates:
     def test_startup_seeds_only_a_complete_full_crawl(self):
         import sys
         m = sys.modules.get("backend.main") or sys.modules["main"]
+        with patch.object(m, "FULL_CRAWL_INTERVAL", 3600), patch.object(m, "RECRAWL_INTERVAL", 120), patch.object(m, "LARGE_BUCKET_SECONDS", 60):
+            assert [m._seed_offset(i, 4, 600) for i in range(4)] == [0, 900, 1800, 2700], "large buckets spread over the full-crawl interval"
+            assert [m._seed_offset(i, 4, 5) for i in range(4)] == [0, 30, 60, 90], "small buckets spread over their own recrawl interval"
+            assert m._seed_offset(0, 0, 5) == 0
         assert m._seed_from_existing("complete", 120, 12.0) is True
         for st in ("error: fatal listing failure", "degraded", "interrupted", "crawling", ""):
             assert m._seed_from_existing(st, 120, 12.0) is False, st
@@ -1577,6 +1581,32 @@ class TestTruthfulStates:
 
 
 
+class TestSeededScheduleStagger:
+    def test_first_scheduler_tick_after_boot_does_not_stampede(self):
+        """22 small + 2 large buckets seeded at boot: the first tick (30 s) queues a handful of full crawls,
+        not 21 of them. Staggering by FULL_CRAWL_INTERVAL alone put every small bucket past its 120 s cadence."""
+        import sys, time
+        from unittest.mock import MagicMock, patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        class _Stop(BaseException): pass
+        names = [f"small{i:02d}" for i in range(22)] + ["big-a", "big-b"]
+        durs = {n: (600.0 if n.startswith("big") else 5.0) for n in names}
+        t0 = 1_000_000.0
+        seeded = {f"default:{n}": {"last_full": t0 - m._seed_offset(i, len(names), durs[n]), "duration": durs[n]} for i, n in enumerate(names)}
+        client = MagicMock(); client.list_buckets.return_value = {"Buckets": [{"Name": n} for n in names]}
+        queued_full, ticks = [], [0]
+        def fake_sleep(_):
+            ticks[0] += 1
+            if ticks[0] > 1: raise _Stop()
+        with patch.object(m, "_crawl_meta", seeded), patch.object(m, "RECRAWL_INTERVAL", 120), patch.object(m, "FULL_CRAWL_INTERVAL", 3600), \
+             patch.object(m, "LARGE_BUCKET_SECONDS", 60), patch.object(m._s3_manager, "get_all_ids", return_value=["default"]), \
+             patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m.time, "sleep", fake_sleep), \
+             patch.object(m.time, "time", return_value=t0 + 30), patch.object(m, "_queue_crawl", side_effect=lambda n, e: queued_full.append(n) or True), \
+             patch.object(m, "_queue_delta_crawl", return_value=False):
+            try: m._auto_recrawl()
+            except _Stop: pass
+        assert 1 <= len(queued_full) <= 6, f"first tick queued {len(queued_full)} full crawls: {queued_full}"
+        assert not any(n.startswith("big") for n in queued_full), "large buckets are not due for a full reconcile at boot"
 class TestBoundedFtsRebuilds:
     def test_concurrent_rebuilds_are_bounded(self):
         """Six buckets asking for a rebuild at once run at most FTS_REBUILD_CONCURRENCY (default 1) at a time."""
