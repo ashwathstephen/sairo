@@ -187,3 +187,17 @@ Layouts (four buckets concurrently, 40 ms/page, 1 CPU): druid **19.3 s**, flat *
 
 Gate-script lessons recorded on the way: the search marker is stamped by the post-crawl step seconds after `complete` (wait for it, do not race it); a clean delta legitimately advances `last_crawl_end` between cycles (baseline immediately before the kill); Kubernetes rejects duplicate env names, so chart-managed variables must be set through their values, not `extraEnv`.
 
+## Run 10 — PR #32 current head (3324384 product code, image `phase-b23`): reconcile gate ×2, both **0 failures**
+
+Same three-cycle gate as Run 9, on the head that adds per-bucket FTS rebuild serialisation. Two runs: one with the post-kill state read at pod-Ready, one with the completion-aware check (a finished resume is accepted only with a strictly advanced success timestamp).
+
+| Step | Observed (both runs) |
+|---|---|
+| Initial crawl | 1,000,000 rows in 40–42 s, complete, == truth |
+| Cycle 1: 1,000 deletions + 5 % injected LIST failures | 999,000 == truth in 200–238 s |
+| Cycle 2: clean | complete, == truth, timestamp advanced, error cleared, search generation == catalogue generation |
+| Cycle 3: kill during the gen-4 reconcile | replacement Ready in 11–12 s reading `crawling` with `last_crawl_end` unchanged; "Resuming interrupted crawl"; complete 30 s later, == truth, timestamp advanced only then |
+| Whole run | 0 unplanned restarts; 0 lock errors, crawl/delta errors, rebuild failures, unexpected tracebacks |
+
+Three consecutive zero-failure gate runs on the PR #32 product code (Runs 9, 10a, 10b). The earlier "failures" were all gate-script timing: racing the post-crawl marker stamp, baselining before a legitimate clean delta, and a fixed 45 s pause that the checkpoint resume (39 s) beat.
+
