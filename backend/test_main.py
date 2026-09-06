@@ -646,6 +646,108 @@ class TestAuthSource:
         assert "bucket_count" in admin and isinstance(admin["bucket_count"], int)
 
 
+class TestActivationMilestones:
+    """3.6.1 fix: first_search_at must record on the search REQUEST — symmetric with
+    first_dashboard_open_at — even when the index isn't ready and the search 503s. The old
+    placement (after the 503 gate) under-counted fresh installs and manufactured a false 0%."""
+
+    def test_first_search_records_even_when_index_not_ready(self, app, client, admin_cookies):
+        m = _main_module()
+        # reset any prior recording so we observe this request's effect
+        m._recorded_milestones.discard("first_search_at")
+        with m._get_users_db() as db:
+            db.execute("DELETE FROM instance_meta WHERE key='first_search_at'")
+            db.commit()
+        # a bucket with no index → the search 503s (index not ready) ...
+        resp = client.get("/api/buckets/unindexed-bucket/search",
+                          params={"q": "hello"}, cookies=admin_cookies)
+        assert resp.status_code == 503
+        # ... but the activation milestone must still have recorded (it fires before the gate)
+        assert m._meta_get("first_search_at") is not None, \
+            "first_search_at must record even when the search 503s during indexing"
+
+
+class TestBrandingInjection:
+    """3.6.2 white-label: APP_NAME / PRIMARY_COLOR are injected into the served
+    HTML + manifest server-side, so a branded deployment never leaks "Sairo"
+    (tab title, og:title for link previews, PWA name) and shows no load flash."""
+
+    SAMPLE_HTML = (
+        '<title>Sairo</title>\n'
+        '<meta property="og:title" content="Sairo" />\n'
+        '<meta name="description" content="Sairo — S3-compatible object storage browser" />\n'
+        '<meta name="theme-color" content="#3b82f6" />'
+    )
+
+    def test_html_fields_follow_app_name_and_color(self):
+        m = _main_module()
+        out = m._apply_branding_html(self.SAMPLE_HTML, "Objex", "#e11d48")
+        assert "<title>Objex</title>" in out
+        assert 'property="og:title" content="Objex"' in out            # link/social previews
+        assert 'content="Objex — S3-compatible' in out                 # description
+        assert 'name="theme-color" content="#e11d48"' in out           # tab/PWA colour
+        assert "Sairo" not in out                                      # no leak anywhere
+
+    def test_html_default_keeps_sairo(self):
+        m = _main_module()
+        out = m._apply_branding_html(self.SAMPLE_HTML, "Sairo", "#3b82f6")
+        assert "<title>Sairo</title>" in out                           # vanilla install unchanged
+
+    def test_html_escapes_app_name(self):
+        m = _main_module()
+        out = m._apply_branding_html("<title>Sairo</title>", "A&B<x>", "#000")
+        assert "A&amp;B&lt;x&gt;" in out and "<title>A&B<x></title>" not in out
+
+    def test_html_brand_name_is_text_not_regex_replacement(self):
+        m = _main_module()
+        out = m._apply_branding_html(self.SAMPLE_HTML, "Acme\\q", "#000")   # a backslash sequence used to break re.sub
+        assert "<title>Acme\\q</title>" in out and 'property="og:title" content="Acme\\q"' in out
+
+    def test_index_html_route_is_the_branded_no_cache_shell(self, client, monkeypatch):
+        m = _main_module()
+        if not os.path.isfile(os.path.join(m.static_dir, "index.html")):
+            pytest.skip("built frontend not present")
+        monkeypatch.setenv("APP_NAME", "Objex"); m._spa_cache.clear()
+        for path in ("/", "/index.html"):
+            r = client.get(path)
+            assert r.status_code == 200 and "<title>Objex</title>" in r.text, path
+            assert r.headers.get("cache-control") == "no-cache, must-revalidate", path
+        m._spa_cache.clear()
+
+    def test_hashed_assets_are_long_cacheable(self, client):
+        m = _main_module()
+        assets = os.path.join(m.static_dir, "assets")
+        if not os.path.isdir(assets) or not os.listdir(assets):
+            pytest.skip("built frontend not present")
+        r = client.get(f"/assets/{sorted(os.listdir(assets))[0]}")
+        assert r.status_code == 200 and r.headers.get("cache-control") == "public, max-age=31536000, immutable"
+
+    def test_missing_asset_404_is_not_cached_for_a_year(self, client):
+        r = client.get("/assets/index-doesnotexist.js")
+        assert r.status_code == 404 and "immutable" not in (r.headers.get("cache-control") or "")
+
+    def test_csp_allows_the_configured_external_logo(self, client, monkeypatch):
+        csp = client.get("/healthz").headers["content-security-policy"]
+        assert "img-src 'self' blob: data:;" in csp
+        monkeypatch.setenv("APP_LOGO", "https://cdn.example.com/brand/logo.svg")
+        csp = client.get("/healthz").headers["content-security-policy"]
+        assert "img-src 'self' blob: data: https://cdn.example.com;" in csp
+
+    def test_manifest_branded(self):
+        m = _main_module()
+        out = m._branded_manifest(
+            {"name": "Sairo", "short_name": "Sairo", "theme_color": "#3b82f6", "start_url": "/"},
+            "Objex", "#e11d48")
+        assert out["name"] == "Objex" and out["short_name"] == "Objex"
+        assert out["theme_color"] == "#e11d48"
+        assert out["start_url"] == "/"   # untouched fields preserved
+
+    def test_manifest_default_keeps_sairo(self):
+        m = _main_module()
+        out = m._branded_manifest({"name": "Sairo", "short_name": "Sairo"}, "Sairo", "#3b82f6")
+        assert out["name"] == "Sairo"
+
+
 # ── Health Check ─────────────────────────────────────────
 
 class TestHealth:

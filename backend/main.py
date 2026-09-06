@@ -5,6 +5,7 @@ import logging
 import os
 import secrets
 import sqlite3
+from urllib.parse import urlparse
 import threading
 import shutil
 import time
@@ -26,7 +27,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Depends, Cookie, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse, JSONResponse, HTMLResponse
 import pyotp
 from passlib.hash import bcrypt
 from pydantic import BaseModel
@@ -95,13 +96,17 @@ def _csp_connect_origins():
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
+    if request.url.path.startswith("/assets/") and response.status_code == 200:   # content-hashed bundles: cache for a year;
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # a 404 mid-rollout must not be cached that long
     connect_src = ("connect-src 'self' " + _csp_connect_origins()).rstrip()
+    logo = urlparse(os.environ.get("APP_LOGO", ""))   # a documented external logo URL must be allowed by img-src
+    img_src = "img-src 'self' blob: data:" + (f" {logo.scheme}://{logo.netloc}" if logo.scheme in ("http", "https") and logo.netloc else "")
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' blob: data:; "
+        f"{img_src}; "
         f"{connect_src}; "
         "frame-src blob:;"
     )
@@ -3073,17 +3078,24 @@ def _record_milestone_once(key: str):
         pass
 
 
-def _record_first_search(returned_results: bool):
-    """Activation event: first search *served* (regardless of hit count). Also records whether
-    that first search returned any results — a free diagnostic for the index-not-ready race
-    (searched-but-zero-results before the crawl finished)."""
-    if "first_search_at" in _recorded_milestones:
+def _record_first_search():
+    """Activation event: the user reached search. Recorded on the search REQUEST — before the
+    index-ready gate — so it is symmetric with first_dashboard_open_at (which records on view
+    open). Recording it only on a served 200 response systematically under-counted fresh
+    installs whose early searches 503 during the initial crawl, manufacturing a false 0%."""
+    _record_milestone_once("first_search_at")
+
+
+def _record_search_returned(returned_results: bool):
+    """Diagnostic paired with first_search_at: did the first *served* search return any results
+    (distinguishes a genuine no-match from the index-not-ready race). Set once, on the first
+    search that actually reaches the index."""
+    if "first_search_returned_results" in _recorded_milestones:
         return
     try:
-        if not _meta_get("first_search_at"):
-            _meta_set("first_search_at", _iso_now())
+        if _meta_get("first_search_returned_results") is None:
             _meta_set("first_search_returned_results", "1" if returned_results else "0")
-        _recorded_milestones.add("first_search_at")
+        _recorded_milestones.add("first_search_returned_results")
     except Exception:
         pass
 
@@ -5357,11 +5369,14 @@ def refresh_prefix(bucket: str, prefix: str = "", user: dict = Depends(require_a
 @app.get("/api/buckets/{bucket}/search")
 @limiter.limit("60/minute")
 def search_objects(bucket: str, request: Request, q: str = Query(..., min_length=1), prefix: str = "", limit: int = 200, user: dict = Depends(get_current_user)):
+    _record_first_search()  # activation: reached search — record on the request (symmetric with
+                            # first_dashboard_open_at), BEFORE the index-ready gate, so a search
+                            # issued during the initial crawl still counts.
     if not _is_index_ready(bucket):
         raise HTTPException(503, "Index not ready — crawl in progress")
     with _get_db(bucket) as db:
         rows = _search_fts(db, q, prefix, limit)
-    _record_first_search(len(rows) > 0)  # activation milestone (fail-safe, idempotent)
+    _record_search_returned(len(rows) > 0)  # diagnostic, on the first served search
     return {"results": [dict(r) for r in rows], "count": len(rows), "query": q}
 
 
@@ -7483,15 +7498,77 @@ def bucket_info_compat(user: dict = Depends(get_current_user)):
 
 
 # ── Serve React SPA ─────────────────────────────────────────────────────────
+# ── White-label branding injection (pure, unit-testable) ─────────────────────
+
+def _brand_name_color():
+    return (os.environ.get("APP_NAME", "Sairo"),
+            os.environ.get("PRIMARY_COLOR", "#3b82f6"))
+
+def _apply_branding_html(doc: str, name: str, color: str) -> str:
+    """Rewrite the brandable fields of index.html — tab title, og:title,
+    description, theme-color — from APP_NAME / PRIMARY_COLOR. Done server-side so
+    a white-label deployment is correct the instant the page loads (no client
+    flash from "Sairo", and correct og:title for link/social previews)."""
+    import re, html as _html
+    n = _html.escape(name, quote=True)
+    c = _html.escape(color, quote=True)
+    # Callables, not replacement strings: a name like "Acme\\q" is text, not a regex escape.
+    doc = re.sub(r"<title>.*?</title>", lambda _: f"<title>{n}</title>", doc, count=1, flags=re.S)
+    doc = re.sub(r'(<meta property="og:title" content=")[^"]*(")', lambda m: f"{m.group(1)}{n}{m.group(2)}", doc)
+    doc = re.sub(r'(<meta name="description" content=")Sairo\b', lambda m: f"{m.group(1)}{n}", doc)
+    doc = re.sub(r'(<meta name="theme-color" content=")[^"]*(")', lambda m: f"{m.group(1)}{c}{m.group(2)}", doc)
+    return doc
+
+def _branded_manifest(m: dict, name: str, color: str) -> dict:
+    """PWA manifest branded from APP_NAME / PRIMARY_COLOR."""
+    m = dict(m)
+    m["name"] = name
+    m["short_name"] = name
+    if color:
+        m["theme_color"] = color
+    return m
+
+
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+
+    _spa_cache: dict = {}
+
+    def _spa_index_html():
+        if "html" not in _spa_cache:
+            try:
+                with open(os.path.join(static_dir, "index.html"), encoding="utf-8") as f:
+                    _spa_cache["html"] = _apply_branding_html(f.read(), *_brand_name_color())
+            except Exception:
+                _spa_cache["html"] = None
+        return _spa_cache["html"]
+
+    # The SPA shell + manifest must revalidate on every load, or browsers
+    # heuristically cache them and users stay on a stale bundle after a deploy
+    # (e.g. old branding/title until a manual hard-refresh). Hashed /assets/*
+    # remain long-cacheable — only the entry documents are no-cache.
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+    @app.get("/manifest.json")
+    def serve_manifest():
+        try:
+            with open(os.path.join(static_dir, "manifest.json"), encoding="utf-8") as f:
+                m = json.load(f)
+        except Exception:
+            m = {"start_url": "/", "display": "standalone"}
+        return JSONResponse(_branded_manifest(m, *_brand_name_color()), headers=_NO_CACHE)
 
     @app.get("/{path:path}")
     def serve_spa(path: str):
         file_path = os.path.realpath(os.path.join(static_dir, path))
         if not file_path.startswith(os.path.realpath(static_dir)):
             raise HTTPException(403, "Forbidden")
-        if os.path.isfile(file_path):
+        if os.path.isfile(file_path) and path != "index.html":   # /index.html is the shell too, not a static file
             return FileResponse(file_path)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+        # SPA entry: serve index.html with the app name/colour baked in, and
+        # never let the browser serve a stale shell after a deploy.
+        doc = _spa_index_html()
+        if doc is not None:
+            return HTMLResponse(doc, headers=_NO_CACHE)
+        return FileResponse(os.path.join(static_dir, "index.html"), headers=_NO_CACHE)
