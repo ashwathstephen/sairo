@@ -884,3 +884,19 @@ describe("CrawlStatus manual recrawl polling", () => {
     vi.doUnmock("../api");
   });
 });
+
+describe("SharePage accent", () => {
+  it("applies the deployment's PRIMARY_COLOR outside the main app", async () => {
+    vi.resetModules();
+    document.documentElement.style.removeProperty("--primary");
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getBranding: vi.fn().mockResolvedValue({ app_name: "Objex", primary_color: "#ff5500" }),
+      resolveShareLink: vi.fn(() => new Promise(() => {})),
+    }));
+    const { default: SharePage } = await import("../components/SharePage");
+    render(<SharePage token="t" />);
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--primary")).toBe("#ff5500"));
+    vi.doUnmock("../api");
+  });
+});

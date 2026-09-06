@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { applyAccent } from "./branding";
 import BucketList from "./components/BucketList";
 import Breadcrumb from "./components/Breadcrumb";
 import ObjectTable from "./components/ObjectTable";
@@ -174,6 +175,14 @@ function MainApp() {
     });
     getBranding().then(setBranding).catch(() => {});
   }, []);
+
+  // Keep the browser tab title in sync with the (white-label) app name, so a
+  // deployment that sets APP_NAME doesn't still read "Sairo" in the tab.
+  useEffect(() => {
+    if (branding.app_name) document.title = branding.app_name;
+  }, [branding.app_name]);
+
+  useEffect(() => { applyAccent(branding.primary_color); }, [branding.primary_color]);
 
   // Listen for session-expired events from api.js (replaces hard page reload)
   useEffect(() => {
@@ -607,6 +616,14 @@ function MainApp() {
   }
 
   const appName = branding.app_name || "Sairo";
+  // White-label logo: use APP_LOGO when set, else the default mark.
+  const logoMark = branding.app_logo
+    ? <img src={branding.app_logo} alt={appName} style={{ height: 22, width: "auto", display: "block" }} />
+    : (
+      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="22" height="22">
+        <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
+      </svg>
+    );
 
   const userBadge = (
     <div className="user-badge">
@@ -624,9 +641,7 @@ function MainApp() {
         <header>
           <div className="header-left">
             <span className="header-logo-mark">
-              <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="22" height="22">
-                <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
-              </svg>
+              {logoMark}
             </span>
             <h1>{appName}</h1>
             <span className="bucket-name">Object Storage</span>
@@ -650,7 +665,7 @@ function MainApp() {
             </span>
             <div className="ub-body">
               <div className="ub-head">
-                Sairo <strong>v{updateInfo.latest}</strong> is here <span className="ub-cur">· you're on v{updateInfo.current}</span>
+                {appName} <strong>v{updateInfo.latest}</strong> is here <span className="ub-cur">· you're on v{updateInfo.current}</span>
               </div>
               <div className="ub-chips">
                 {UPDATE_HIGHLIGHTS.map((h) => <span className="ub-chip" key={h}>{h}</span>)}
@@ -675,7 +690,7 @@ function MainApp() {
         <BucketList onSelect={navigateBucket} role={user.role} onDashboard={setDashboardBucket} />
         {showAuditLog && <AuditLog onClose={() => setShowAuditLog(false)} />}
         {dashboardBucket && <StorageDashboard bucket={dashboardBucket} onClose={() => setDashboardBucket(null)} onNavigate={(pfx) => { setDashboardBucket(null); setHash(dashboardBucket, pfx); }} />}
-        {showWelcome && <Welcome onDismiss={() => setShowWelcome(false)} />}
+        {showWelcome && <Welcome onDismiss={() => setShowWelcome(false)} appName={appName} />}
         {showTokenManager && <TokenManager onClose={() => setShowTokenManager(false)} />}
         {showLicense && <LicenseManager onClose={() => setShowLicense(false)} />}
         {showUserManager && <UserManager onClose={() => setShowUserManager(false)} currentUser={user} />}
@@ -699,9 +714,7 @@ function MainApp() {
       <header>
         <div className="header-left">
           <span className="header-logo-mark" style={{ cursor: "pointer" }} onClick={goHome}>
-            <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" width="20" height="20">
-              <path d="M28 10c0 3-4 5.5-8 5.5S12 13 12 10s4-5.5 8-5.5 8 2.5 8 5.5z"/><path d="M28 20c0 3-4 5.5-8 5.5S12 23 12 20"/><path d="M28 30c0 3-4 5.5-8 5.5S12 33 12 30"/><line x1="12" y1="10" x2="12" y2="30"/><line x1="28" y1="10" x2="28" y2="30"/>
-            </svg>
+            {logoMark}
           </span>
           <h1 style={{ cursor: "pointer" }} onClick={goHome}>{appName}</h1>
           <span className="bucket-name">{bucket}</span>
