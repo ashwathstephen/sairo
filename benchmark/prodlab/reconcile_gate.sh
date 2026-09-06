@@ -75,10 +75,18 @@ kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null
 # fast enough that a 45 s pause let the resumed crawl finish before the "still interrupted" check.
 kubectl -n lab rollout status deploy/sairo --timeout=180s >/dev/null 2>&1
 say "after restart: $(snapshot)"
-S3=$(field status)
-check '[ "$S3" = interrupted ] || [ "$S3" = crawling ]' "after the kill the state is interrupted/crawling, not complete" '$S3'
+S3=$(field status); END_NOW=$(field last_crawl_end)
 check 'kubectl -n lab logs deploy/sairo --tail=2000 2>/dev/null | grep -q "Resuming interrupted crawl"' "resumed from checkpoints" ''
-check '[ "$(field last_crawl_end)" = "$END_PRE" ]' "kill did not advance last_crawl_end" '$(field last_crawl_end) vs $END_PRE'
+# Completion-aware: checkpoint resume can finish before this check runs. Either the crawl is still
+# running (state interrupted/crawling, success timestamp untouched) or it has already completed
+# (timestamp advanced past the pre-kill value). What is never acceptable: 'complete' with an
+# unchanged or earlier timestamp, or any state that pretends the kill itself was a success.
+if [ "$S3" = complete ]; then
+  check '[[ "$END_NOW" > "$END_PRE" ]]' "resume completed before the check; last_crawl_end advanced only via the resumed crawl" '$END_NOW vs $END_PRE'
+else
+  check '[ "$S3" = interrupted ] || [ "$S3" = crawling ]' "after the kill the state is interrupted/crawling, not complete" '$S3'
+  check '[ "$END_NOW" = "$END_PRE" ]' "kill did not advance last_crawl_end" '$END_NOW vs $END_PRE'
+fi
 wait_for '[ "$(field status)" = complete ]' 900 "cycle 3 completion after resume"
 say "after cycle 3: $(snapshot)"
 check '[ "$(field rows)" = "$(truth)" ]' "cycle 3 rows == truth after kill+resume" '$(field rows) vs $(truth)'
