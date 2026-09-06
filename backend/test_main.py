@@ -1091,3 +1091,16 @@ class TestCrawlerCorrectness:
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
         assert client.get(f"/api/buckets/{bucket}/crawl-status", cookies=admin_cookies).json()["full_crawl_complete"] is True
+
+
+class TestChangeOwnPassword:
+    """Issue #29: a user changes their own password; wrong current → 401, short → 400, and the new one logs in."""
+
+    def test_change_password_flow(self, client, admin_cookies):
+        client.post("/api/auth/users", json={"username": "pw-user", "password": "firstpass1", "role": "viewer"}, cookies=admin_cookies)
+        cookies = client.post("/api/auth/login", json={"username": "pw-user", "password": "firstpass1"}).cookies
+        assert client.put("/api/auth/change-password", json={"old_password": "wrong", "new_password": "secondpass2"}, cookies=cookies).status_code == 401
+        assert client.put("/api/auth/change-password", json={"old_password": "firstpass1", "new_password": "short"}, cookies=cookies).status_code == 400
+        assert client.put("/api/auth/change-password", json={"old_password": "firstpass1", "new_password": "secondpass2"}, cookies=cookies).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "pw-user", "password": "firstpass1"}).status_code == 401
+        assert client.post("/api/auth/login", json={"username": "pw-user", "password": "secondpass2"}).status_code == 200
