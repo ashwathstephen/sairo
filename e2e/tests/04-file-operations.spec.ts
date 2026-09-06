@@ -22,9 +22,20 @@ test.describe('File Operations', () => {
   test('4.1 selects files and uploads with progress', async ({ page }) => {
     await page.locator(SEL.uploadButton).click();
 
-    // Set files via hidden input
+    const uploadName = `e2e-upload-${Date.now()}.txt`;
+
+    // Use a unique object so the assertion proves this upload was persisted.
     const fileInput = page.locator(SEL.uploadFileInput);
-    await fileInput.setInputFiles(testDataPath('sample.txt'));
+    await fileInput.setInputFiles({
+      name: uploadName,
+      mimeType: 'text/plain',
+      buffer: Buffer.from('Sairo e2e upload'),
+    });
+
+    // The Docker-internal MinIO hostname is intentionally not reachable from
+    // the host browser. Exercise the supported proxy fallback in this hermetic
+    // critical path; public-endpoint signing needs its own deployment POC.
+    await page.locator(SEL.modal).getByRole('checkbox', { name: 'Direct upload' }).uncheck();
 
     // File should appear in queue
     await expect(page.locator(SEL.uploadFileRow)).toBeVisible();
@@ -32,8 +43,8 @@ test.describe('File Operations', () => {
     // Click upload
     await page.locator(SEL.uploadSubmitButton).click();
 
-    // Wait for completion toast
-    await waitForToast(page, 'complete', 'success');
+    await expect(page.locator(SEL.modal)).toBeHidden({ timeout: 15_000 });
+    await expect(page.locator(`${SEL.tableRow}:has-text("${uploadName}")`)).toBeVisible({ timeout: 15_000 });
   });
 
   test('4.1 cancel closes upload modal without uploading', async ({ page }) => {
