@@ -245,3 +245,63 @@ The residual at this layout is per-listing-unit overhead, not per-row: 2,000 uni
 | Peak process memory over idle, 16 concurrent prefixes (macOS) | +17 MB | old code +168 MB |
 
 Per post-crawl step at 960k rows (each is a GROUP BY over every row): folder_stats 88 MB, prefix_children 89 MB, storage snapshot 89 MB → now skipped / 0 MB when the reconcile changed nothing.
+
+---
+
+## Run 12 — 3.7.0 release gate: production-shaped upgrade, 19 buckets / 15.5M objects, 1 GiB pod
+
+Phase 1 built the index with the 3.6.0 image on a fresh volume; phase 2 upgraded in place to the
+release image and sampled for 75 minutes. Host on AC with sleep blocked for the whole run.
+
+**Phase 1 is itself a result.** 3.6.0 was OOM-killed and then reported `seg-main` as `complete`
+holding **1,320,000 of 9,900,000** objects — the false-complete failure Phase A fixed, reproduced
+on the baseline. The other 18 buckets reached truth. Phase 2 therefore measures recovery from a
+damaged 3.6.0 index, which is the realistic upgrade path, and a harsher one: 3.7.0 had to repair
+8.58M missing objects while 18 buckets reconciled around it.
+
+| Metric | Pre-fix candidate | This run |
+|---|---|---|
+| Container restarts | 11 | **0** |
+| OOM kills | yes (exit 137) | **none** |
+| Peak anonymous memory | 888 MiB | **605 MiB** |
+| Peak working set | — | 987 MiB (reclaimable cache; `oom=0`, `oom_kill=0`) |
+| Peak `memory.current` | ~1.071 GB | 1022 MiB |
+| Connection-pool overflow | sustained | **0** |
+| Counts vs provider truth | — | 15,500,000 / 15,500,000, all 19 |
+| Upgrade rollout | — | 11 s |
+| `seg-main` repair | — | 1.32M → 9.9M in ~10 min |
+
+Also zero lock errors, zero stalled crawls, zero crawl retries, and the only traceback is the known
+benign bcrypt version warning. 294 samples. Anonymous memory rose through the repair wave and fell
+back (quarter averages 415 → 503 → 549 → 515), so the growth is allocator behaviour, not a leak.
+
+### Delta certification (`DELTA_NODE_MAX_PAGES` 2 → 3)
+
+The gate initially scored `seg-main` as passing because its `status` read `complete`, but its
+`last_error` still held `discovery:truncated` and its last attempt was newer than its last success.
+The cause was arithmetic: 2,500 interval prefixes per datasource, S3 pages at 1,000, and a 2-page
+budget stops at 2,000 with `IsTruncated` still set — so every delta truncated, deterministically.
+
+After the fix, on the same workload: `seg-main` produced 3 consecutive clean cycles, all 19 buckets
+certified at least once, `last_error` clear everywhere, peak anonymous memory **234 MiB**, 0 restarts.
+
+End-to-end proof that a partition beyond page two is really ingested, not merely certified: one
+object was added under a brand-new 2,501st interval with `FULL_CRAWL_INTERVAL` raised to 7200 s so
+no full crawl could run. A delta discovered and indexed it (9,900,002 → 9,900,003), with zero
+`Crawl started` lines for the bucket.
+
+### Known behaviour, not a regression
+
+Delta discovery follows only the newest `DELTA_NEWEST_K` (2) branches at any level wider than
+`DELTA_BRANCH_FANOUT` (8). With 40 datasources that means a delta chases the two lexicographically
+newest only; new data in the other 38 is picked up by the full reconcile
+(`FULL_CRAWL_INTERVAL`, default 3600 s) rather than by a delta. Observed directly: an object added
+under `ds_000` was indexed by the full crawl, not by any delta.
+
+### Gate harness corrections made during this run
+
+Four defects that could each have produced a false PASS: restart counting did arithmetic across pod
+identities (a rollout resets `restartCount`, so one real OOM computed as zero); error scanning read
+only the live container, where an OOM hides its evidence in the terminated one; a missing FTS
+generation passed vacuously; and `seg-main` was scored on `status` alone rather than on
+`last_error` being clear and `last_crawl_end >= last_attempt_at`.

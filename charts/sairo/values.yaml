@@ -36,7 +36,9 @@ persistence:
   enabled: true
   storageClass: ""
   accessMode: ReadWriteOnce
-  size: 20Gi          # ~1 GB per 1M indexed objects (incl. search index)
+  size: 30Gi          # 1.0-1.4 GB per 1M indexed objects incl. the search index, depending on key
+                      # length: 15.5M deep keys measured ~21 GB. Crawls stop below MIN_FREE_DISK_PCT
+                      # (10%) free, so size for the index plus that margin, not for the index alone.
                       # Upgrading an existing release: a PVC can only grow in place if its StorageClass
                       # has allowVolumeExpansion; otherwise keep your current value (e.g. --set persistence.size=5Gi).
   keep: true          # helm.sh/resource-policy: keep on the PVC (survives uninstall)

@@ -55,7 +55,7 @@ The table below lists the most important values. For the full schema, see `chart
 | `resources.limits.cpu`    | `1`                         | CPU limit                                |
 | `resources.limits.memory` | `1Gi`                       | Memory limit                             |
 | `persistence.enabled`     | `true`                      | Enable persistent storage for /data      |
-| `persistence.size`        | `5Gi`                       | PVC size for SQLite databases            |
+| `persistence.size`        | `30Gi`                      | PVC size for the index (1.0-1.4 GB per 1M objects) |
 | `persistence.storageClass`| `""`                        | Storage class (empty uses cluster default)|
 | `ingress.enabled`         | `false`                     | Enable ingress resource                  |
 | `ingress.className`       | `""`                        | Ingress class name                       |
