@@ -1577,6 +1577,33 @@ class TestTruthfulStates:
 
 
 
+class TestBoundedFtsRebuilds:
+    def test_concurrent_rebuilds_are_bounded(self):
+        """Six buckets asking for a rebuild at once run at most FTS_REBUILD_CONCURRENCY (default 1) at a time."""
+        import sys, threading, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        running, peak, lock = [0], [0], threading.Lock()
+        def slow_rebuild(bucket, eid=None):
+            with lock:
+                running[0] += 1; peak[0] = max(peak[0], running[0])
+            time.sleep(0.15)
+            with lock:
+                running[0] -= 1
+        with patch.object(m, "_rebuild_fts", slow_rebuild):
+            threads = [m._rebuild_fts_async(f"b{i}", "default") for i in range(6)]
+            for th in threads: th.join(timeout=10)
+        assert peak[0] == m.FTS_REBUILD_CONCURRENCY == 1, peak[0]
+
+    def test_zero_or_garbage_setting_still_lets_rebuilds_run(self, monkeypatch):
+        """FTS_REBUILD_CONCURRENCY=0 used to park every rebuild thread forever."""
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        monkeypatch.setenv("FTS_REBUILD_CONCURRENCY", "0"); assert m._fts_rebuild_concurrency() == 1
+        monkeypatch.setenv("FTS_REBUILD_CONCURRENCY", "3"); assert m._fts_rebuild_concurrency() == 3
+        monkeypatch.delenv("FTS_REBUILD_CONCURRENCY"); assert m._fts_rebuild_concurrency() == 1
+
+
 class TestZeroWriteReconcile:
     """SAE-72: an incremental crawl writes only changed rows, and prunes deletions per listed unit."""
 
