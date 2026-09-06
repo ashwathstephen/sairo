@@ -59,23 +59,27 @@ check '[ "$(field status)" = complete ]' "cycle 2 complete" '$(field status)'
 check '[ "$(field rows)" = "$(truth)" ]' "cycle 2 rows == truth (deletions pruned)" '$(field rows) vs $(truth)'
 check '[[ "$(field last_crawl_end)" > "$END0" ]]' "cycle 2 advanced last_crawl_end" '$(field last_crawl_end) vs $END0'
 check '[ "$(field last_error)" = None ]' "cycle 2 cleared last_error" '$(field last_error)'
+# The search marker is stamped by the post-crawl rebuild step seconds after 'complete' (search_ready is
+# honestly false meanwhile): wait for it, bounded, instead of racing it.
+wait_for '[ "$(field fts_gen)" = "$(field gen)" ]' 300 "search generation catching up to catalogue generation"
 check '[ "$(field fts_gen)" = "$(field gen)" ]' "search generation matches catalogue generation" '$(field fts_gen) vs $(field gen)'
-END2=$(field last_crawl_end); GEN2=$(field gen)
+GEN2=$(field gen)
 
 # ── cycle 3: kill the pod mid-RECONCILE (a full crawl bumps current_crawl_gen; deltas do not, and both
 #    show status=crawling, so the generation is the only reliable signal) ──
 wait_for '[ "$(field gen)" -gt '$GEN2' ]' 600 "cycle 3 full reconcile start (generation > $GEN2)"
-sleep 15; say "killing pod mid-reconcile: $(snapshot)"
+sleep 15; END_PRE=$(field last_crawl_end)   # baseline immediately before the kill (a clean delta may have advanced it since cycle 2)
+say "killing pod mid-reconcile: $(snapshot)"
 kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null; sleep 45
 say "after restart: $(snapshot)"
 S3=$(field status)
 check '[ "$S3" = interrupted ] || [ "$S3" = crawling ]' "after the kill the state is interrupted/crawling, not complete" '$S3'
 check 'kubectl -n lab logs deploy/sairo --tail=2000 2>/dev/null | grep -q "Resuming interrupted crawl"' "resumed from checkpoints" ''
-check '[ "$(field last_crawl_end)" = "$END2" ]' "kill did not advance last_crawl_end" '$(field last_crawl_end)'
+check '[ "$(field last_crawl_end)" = "$END_PRE" ]' "kill did not advance last_crawl_end" '$(field last_crawl_end) vs $END_PRE'
 wait_for '[ "$(field status)" = complete ]' 900 "cycle 3 completion after resume"
 say "after cycle 3: $(snapshot)"
 check '[ "$(field rows)" = "$(truth)" ]' "cycle 3 rows == truth after kill+resume" '$(field rows) vs $(truth)'
-check '[[ "$(field last_crawl_end)" > "$END2" ]]' "cycle 3 advanced last_crawl_end only after the resumed crawl completed" '$(field last_crawl_end)'
+check '[[ "$(field last_crawl_end)" > "$END_PRE" ]]' "cycle 3 advanced last_crawl_end only after the resumed crawl completed" '$(field last_crawl_end) vs $END_PRE'
 check '[ "$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")" = 0 ]' "no unplanned container restarts (OOM/crash)" '$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")'
 # Operational failures only. "Prefix ... failed after N retries" (ERROR level) is the EXPECTED outcome of the injected
 # LIST failures in cycle 1, and every pod logs one trapped passlib/bcrypt version traceback at startup.
