@@ -12,10 +12,12 @@ kubectl config use-context kind-sairo-lab >/dev/null
 # Set the intervals BEFORE the variant deploy (which reuses release values). No --wait here: a pod
 # still terminating from a previous run made the waited upgrade time out and the settings were
 # silently dropped, so cycle 2/3 waited on a 3600 s reconcile interval.
+# RECRAWL_INTERVAL is chart-managed → its value; FULL_CRAWL_INTERVAL is not → extraEnv (a duplicate env name
+# is rejected by the API server, which is how two earlier gate runs lost their intervals).
 helm upgrade sairo "$HERE/../../charts/sairo" -n lab --reuse-values \
   --set-string 'extraEnv[0].name=SUBPREFIX_SPLIT_MIN_OBJECTS,extraEnv[0].value=50000' \
   --set-string 'extraEnv[1].name=FULL_CRAWL_INTERVAL,extraEnv[1].value=240' \
-  --set-string 'extraEnv[2].name=RECRAWL_INTERVAL,extraEnv[2].value=60' >/dev/null || { echo "helm upgrade (intervals) failed"; exit 1; }
+  --set crawler.recrawlInterval=60 || { echo "helm upgrade (intervals) failed"; exit 1; }
 "$HERE/run_variant.sh" "$TAG" "$HERE/spec-1m.json" --for 900 >/dev/null 2>&1
 ENVS=$(kubectl -n lab exec deploy/sairo -- sh -c 'echo "$FULL_CRAWL_INTERVAL/$RECRAWL_INTERVAL"' 2>/dev/null)
 [ "$ENVS" = "240/60" ] || { echo "FAIL: pod intervals are '$ENVS', expected 240/60 — gate cannot time its cycles"; exit 1; }

@@ -204,7 +204,15 @@ spec:
             - name: LOGIN_MESSAGE
               value: {{ .Values.branding.loginMessage | quote }}
             {{- end }}
-            # extraEnv last so operator values override anything the chart sets above (k8s: last duplicate wins)
+            # extraEnv: variables the chart does NOT manage. The API server rejects a duplicate env name
+            # (server-side apply: "duplicate entries for key [name=...]"), so a chart-managed variable must be
+            # set through its value (e.g. crawler.recrawlInterval); fail at render time with a clear message.
+            {{- $managed := list "S3_ENDPOINT" "S3_REGION" "S3_PATH_STYLE" "S3_ACCESS_KEY" "S3_SECRET_KEY" "AUTH_MODE" "ADMIN_USER" "ADMIN_PASS" "JWT_SECRET" "SESSION_HOURS" "SECURE_COOKIE" "RECRAWL_INTERVAL" "TELEMETRY" "SAIRO_STORAGE_EPHEMERAL" "RATE_LIMIT" "UPLOAD_RATE_LIMIT" "LDAP_ENABLED" "LDAP_SERVER" "LDAP_BASE_DN" "LDAP_USER_FILTER" "LDAP_BIND_DN" "LDAP_BIND_PASSWORD" "LDAP_ADMIN_GROUP" "LDAP_DEFAULT_ROLE" "OAUTH_GOOGLE_CLIENT_ID" "OAUTH_GOOGLE_CLIENT_SECRET" "OAUTH_GITHUB_CLIENT_ID" "OAUTH_GITHUB_CLIENT_SECRET" "OAUTH_DEFAULT_ROLE" "OAUTH_ALLOWED_DOMAINS" "OIDC_ISSUER" "OIDC_CLIENT_ID" "OIDC_CLIENT_SECRET" "OIDC_PROVIDER_NAME" "OIDC_USERNAME_CLAIM" "OIDC_SCOPES" "OIDC_DEFAULT_ROLE" "OIDC_ALLOWED_DOMAINS" "OIDC_ADMIN_GROUP" "OIDC_GROUPS_CLAIM" "OIDC_REQUIRE_VERIFIED_EMAIL" "OIDC_RP_LOGOUT" "APP_NAME" "APP_LOGO" "PRIMARY_COLOR" "LOGIN_MESSAGE" }}
+            {{- range .Values.extraEnv }}
+            {{- if has .name $managed }}
+            {{- fail (printf "extraEnv: %s is managed by the chart; set it through its value instead (duplicate env names are rejected by the API server)" .name) }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
