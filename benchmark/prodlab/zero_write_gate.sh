@@ -63,7 +63,8 @@ SAMPLES=$HERE/out/mem_samples.csv; echo "cycle,ts,anon,current,data_mb" > "$SAMP
 
 for C in $(seq 1 "$CYCLES"); do
   refresh; GEN0=$(field gen); N=$(completes)
-  wait_for 'refresh; [ "$(field gen)" -gt '$GEN0' ]' 600 "cycle $C reconcile start"
+  # The first cycle waits behind the initial build's post-crawl step (aggregates + trigram index: ~50 min at 9.9M).
+  wait_for 'refresh; [ "$(field gen)" -gt '$GEN0' ]' 4200 "cycle $C reconcile start"
   W0=$(wbytes); D0=$(datamb)
   ( while :; do a=$(anon); c=$(cur); d=$(datamb); [ -n "$a" ] && echo "$C,$(date +%s),$a,$c,$d" >> "$SAMPLES"; sleep 5; done ) & SAMPLER=$!
   wait_for 'refresh; [ "$(field status)" = complete ] && [ "$(completes)" -gt '$N' ]' 2400 "cycle $C reconcile"

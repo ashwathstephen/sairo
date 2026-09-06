@@ -5071,11 +5071,12 @@ def list_all_buckets(user: dict = Depends(get_current_user)):
                 if os.path.exists(db_file):
                     try:
                         with _get_db(b["name"], eid) as bdb:
-                            row = bdb.execute("SELECT total_objects, total_size, status FROM crawl_status WHERE id=1").fetchone()
+                            row = bdb.execute("SELECT total_objects, total_size, status, last_crawl_end FROM crawl_status WHERE id=1").fetchone()
                             if row:
                                 b["index_status"] = row["status"]
                                 b["object_count"] = row["total_objects"]
                                 b["total_size"] = row["total_size"]
+                                b["indexed"] = row["last_crawl_end"] is not None   # served index; a recrawl in progress is a refresh, not a first build
                     except Exception as db_e:
                         log.debug("Failed to read index stats for %s/%s: %s", eid, b["name"], db_e)
             result.append({"endpoint_id": eid, "endpoint_name": ep["name"], "endpoint_url": ep["endpoint_url"], "buckets": buckets})
@@ -5129,11 +5130,12 @@ def list_buckets(user: dict = Depends(get_current_user)):
         if os.path.exists(_db_path(name)):
             try:
                 with _get_db(name) as db:
-                    row = db.execute("SELECT total_objects, total_size, status FROM crawl_status WHERE id=1").fetchone()
+                    row = db.execute("SELECT total_objects, total_size, status, last_crawl_end FROM crawl_status WHERE id=1").fetchone()
                     if row:
                         info["index_status"] = row["status"]
                         info["object_count"] = row["total_objects"]
                         info["total_size"] = row["total_size"]
+                        info["indexed"] = row["last_crawl_end"] is not None
             except Exception as db_e:
                 log.debug("Failed to read index stats for bucket %s: %s", name, db_e)
         buckets.append(info)
