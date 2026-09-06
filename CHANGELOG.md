@@ -4,6 +4,17 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-09-07
+
+### Rollout
+
+The first boot on an index written by 3.6.0 repairs every bucket's search index (legacy indexes fail the new consistency check) — one at a time (`FTS_REBUILD_CONCURRENCY`, default 1), so a 22-bucket deployment is searchable bucket by bucket over the first minutes. Full reconciles of seeded buckets are spread across their interval instead of all falling due together. Rehearsed twice on the production-shaped lab (19 buckets, 15.5M objects, 1 GiB pod): rollout under a minute, interrupted 3.6.0 crawls resumed, zero restarts.
+
+Crawls do not start while the index volume has under `MIN_FREE_DISK_PCT` (10) percent free — check the PVC before upgrading. Schema changes are additive; `helm rollback` to the 3.6.0 chart works against the migrated database.
+
+Measured on an unchanged bucket (see `benchmark/prodlab/RESULTS.md`, Runs 11–12): a 1M-object reconcile writes 31 MB instead of 1,101 MB and rewrites 0 rows instead of 1,000,000; a 9.9M-object reconcile writes 36 MB with a 326 MB memory peak where 3.6.0 was OOM-killed at 1 GiB.
+
+
 **Upgrade note (Helm):** the default `persistence.size` moved from 5Gi to 20Gi. An existing release's PVC is patched in place, which only works when the StorageClass allows volume expansion; otherwise pass your current size (`--set persistence.size=5Gi`). The PVC now carries `helm.sh/resource-policy: keep`, so `helm uninstall` no longer deletes the index.
 
 Crawler correctness (Core program, Phase A — SAE-63).
