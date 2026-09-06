@@ -249,7 +249,7 @@ async def endpoint_routing_middleware(request: Request, call_next):
 _login_attempts: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
 LOGIN_RATE_WINDOW = 300  # 5 minutes
-LOGIN_RATE_MAX = 10      # max attempts per window
+LOGIN_RATE_MAX = int(os.environ.get("LOGIN_RATE_MAX", "10"))   # max attempts per window (the e2e stack raises it: 50+ browser tests log in from one IP)
 
 def _check_login_rate(ip: str):
     """Raise 429 if IP has exceeded login attempt limit."""

@@ -31,6 +31,10 @@ services:
       SECURE_COOKIE: "false"
       SESSION_HOURS: "24"
       RECRAWL_INTERVAL: "30"
+      # Test stack only: every spec logs in from the same IP within minutes, which the production
+      # defaults (10 logins / 5 min, 120 requests / min) are meant to stop.
+      LOGIN_RATE_MAX: "1000"
+      RATE_LIMIT: "10000/minute"
     depends_on:
       minio:
         condition: service_healthy

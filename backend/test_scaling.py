@@ -1483,11 +1483,12 @@ class TestTruthfulStates:
         bucket = "truth-discovery-cap"
         m._init_db(bucket, "default")
         tops = [f"p{i:05d}/" for i in range(2037)]
-        client = MagicMock(); client.list_objects_v2.side_effect = lambda **p: {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+        calls = []   # list.append is atomic under the GIL; MagicMock.call_count is not (16 listing threads lost increments on CI)
+        client = MagicMock(); client.list_objects_v2.side_effect = lambda **p: calls.append(p) or {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
         with patch.object(m, "DELTA_MAX_NODES", 2000):
             targets, partial = m._discover_delta_targets(client, bucket, "default", tops)
         assert partial is True
-        assert client.list_objects_v2.call_count == 2000, client.list_objects_v2.call_count
+        assert len(calls) == 2000, len(calls)
         assert len(targets) == 2000 and "p02036/" in targets and "p00000/" not in targets, "newest names are kept"
         # and the delta reports the partial walk instead of certifying itself
         with patch.object(m, "_hot_target_prefixes", return_value=["hot/"]), patch.object(m, "_list_children", return_value=[]), \
