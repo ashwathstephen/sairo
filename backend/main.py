@@ -1232,6 +1232,7 @@ def _disk_low():
     except Exception:
         return False
 _rebuilding = set()  # crawl_keys whose post-crawl rebuild is in progress (blocks a colliding recrawl)
+_fts_rebuild_locks = {}  # crawl_key -> Lock: one FTS rebuild per bucket at a time (guarded by _crawl_lock)
 _crawl_lock = threading.Lock()
 _CRAWL_MAX_DURATION = 7200  # 2 hours — if a crawl exceeds this, force-release the lock
 
@@ -1348,8 +1349,23 @@ def _rebuild_fts(bucket, endpoint_id=None):
     """
     eid = endpoint_id or "default"
     t0 = time.monotonic()
+    # One rebuild per bucket at a time. The startup repair and the post-crawl rebuild can both decide
+    # to rebuild the same index; they shared one shadow-table name and the second's rename removed it
+    # under the first ("no such table: objects_fts_new", production read-only run). The late-comer
+    # waits, then finds the marker already current and leaves.
+    with _crawl_lock:
+        lock = _fts_rebuild_locks.setdefault(f"{eid}:{bucket}", threading.Lock())
+    with lock:
+        _rebuild_fts_locked(bucket, eid, t0)
+
+
+def _rebuild_fts_locked(bucket, eid, t0):
     try:
         with _get_db(bucket, eid) as db:
+            row = db.execute("SELECT fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+            if row and row[0] is not None and row[0] == (row[1] or 0) and _fts_healthy(db):
+                log.info("[%s:%s] FTS rebuild skipped — another rebuild already completed generation %s", eid, bucket, row[1])
+                return
             db.execute("DROP TABLE IF EXISTS objects_fts_new")
             db.execute("CREATE VIRTUAL TABLE objects_fts_new USING fts5(key, content='objects', content_rowid='rowid', tokenize='trigram')")
             db.commit()

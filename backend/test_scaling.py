@@ -475,7 +475,7 @@ class TestAsyncFTSRebuild:
         source = inspect.getsource(_rebuild_fts_async)
         assert "Thread" in source
         assert "daemon=True" in source
-        body = inspect.getsource(sys.modules["main"]._rebuild_fts)
+        body = inspect.getsource(sys.modules["main"]._rebuild_fts_locked)
         assert "objects_fts_new" in body and "RENAME TO objects_fts" in body and "FTS_REBUILD_CHUNK" in body   # shadow-table, bounded-memory rebuild
 
     def test_fts_rebuild_runs_in_background(self):
@@ -1557,4 +1557,37 @@ class TestTruthfulStates:
             targets, partial = m._discover_delta_targets(client, bucket, "default", ["wide/"])
         assert partial is True and targets == set()
         assert client.list_objects_v2.call_count == 2, client.list_objects_v2.call_count
+
+    def test_concurrent_fts_rebuilds_of_one_bucket_are_serialised(self):
+        """Startup repair and the post-crawl rebuild may both start a rebuild; they must not share the
+        shadow table. Live failure: "no such table: objects_fts_new"."""
+        import sys, threading, logging
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "truth-fts-concurrent"
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            m._disable_fts_triggers(db)
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                           [(f"a/{i:05d}/needle.bin", 1, "2026-01-01T00:00:00+00:00", "e", f"a/{i:05d}/", 2, 1) for i in range(3000)])
+            db.execute("UPDATE crawl_status SET current_crawl_gen=1"); db.commit()
+            m._enable_fts_triggers(db)
+        failures = []
+        class Catch(logging.Handler):
+            def emit(self, r):
+                if "FTS rebuild failed" in r.getMessage(): failures.append(r.getMessage())
+        h = Catch(); m.log.addHandler(h)
+        try:
+            with patch.object(m, "FTS_REBUILD_CHUNK", 200):
+                ts = [threading.Thread(target=m._rebuild_fts, args=(bucket, "default")) for _ in range(3)]
+                for t in ts: t.start()
+                for t in ts: t.join(60)
+        finally:
+            m.log.removeHandler(h)
+        assert failures == [], failures
+        with m._get_db(bucket, "default") as db:
+            assert m._fts_healthy(db) and m._fts_consistent(db)
+            assert db.execute("SELECT COUNT(*) FROM objects_fts WHERE objects_fts MATCH 'needle'").fetchone()[0] == 3000
+            assert tuple(db.execute("SELECT fts_ready_gen, current_crawl_gen FROM crawl_status").fetchone()) == (1, 1)
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='objects_fts_new'").fetchone()[0] == 0
 
