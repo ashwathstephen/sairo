@@ -1091,3 +1091,48 @@ class TestCrawlerCorrectness:
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
         assert client.get(f"/api/buckets/{bucket}/crawl-status", cookies=admin_cookies).json()["full_crawl_complete"] is True
+
+
+class TestS3KeyAuth:
+    """Issues #1 and #8: logging in with S3 keys, and an S3-key session staying pinned to the endpoint it
+    logged into no matter which endpoint the request is routed to. Neither had a test until now."""
+
+    def _client_ok(self, *a, **k):
+        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
+        c = MagicMock(); c.list_buckets.return_value = {"Buckets": [{"Name": "seen-through-user-keys", "CreationDate": datetime(2026, 1, 1, tzinfo=timezone.utc)}]}; return c
+
+    def test_login_with_s3_keys_valid_and_invalid(self, client):
+        from unittest.mock import patch, MagicMock
+        m = _main_module()
+        bad = MagicMock(); bad.list_buckets.side_effect = Exception("SignatureDoesNotMatch")
+        with patch.object(m._s3_manager, "_build_client", return_value=bad):
+            assert client.post("/api/auth/login-s3", json={"access_key": "AKIAWRONG", "secret_key": "nope"}).status_code == 401
+        with patch.object(m._s3_manager, "_build_client", side_effect=self._client_ok):
+            r = client.post("/api/auth/login-s3", json={"access_key": "AKIAUSERKEY123", "secret_key": "s3cr3t"})
+        assert r.status_code == 200 and r.json()["role"] == "admin" and r.json()["username"].startswith("s3:")
+        assert "access_token" in r.cookies
+        assert client.post("/api/auth/login-s3", json={"access_key": "", "secret_key": ""}).status_code == 400
+
+    def test_s3_key_session_cannot_reach_another_endpoint(self, client):
+        """#8: a user who logged in against endpoint B is routed to B even when the request names A."""
+        from unittest.mock import patch
+        m = _main_module()
+        m._s3_manager.register("ep-b", "http://ep-b.example:9000", "server-ak", "server-sk", "", True)
+        seen = []
+        real_get_client = m._s3_manager.get_client
+        def spy_get_client(eid=None, *a, **k):
+            seen.append(eid); return self._client_ok()
+        try:
+            with patch.object(m, "AUTH_MODE", "s3"), patch.object(m._s3_manager, "_build_client", side_effect=self._client_ok):
+                r = client.post("/api/auth/login-s3", json={"access_key": "AKIAUSERKEY123", "secret_key": "s3cr3t", "endpoint_id": "ep-b"})
+                assert r.status_code == 200
+                cookies = r.cookies
+                with patch.object(m._s3_manager, "get_client", side_effect=spy_get_client):
+                    # routed to the DEFAULT endpoint explicitly, with the ep-b session
+                    r2 = client.get("/api/e/default/buckets", cookies=cookies)
+                    assert r2.status_code == 200, r2.text
+            assert seen and all(e == "ep-b" for e in seen), f"requests must be served by the session's endpoint, got {seen}"
+        finally:
+            with m._s3_manager._lock:
+                m._s3_manager._endpoints.pop("ep-b", None)
