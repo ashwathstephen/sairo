@@ -1172,26 +1172,21 @@ def _adjust_prefix_children(db, key, size_delta, count_delta):
 
 
 def _record_storage_snapshot(bucket, endpoint_id=None):
-    """Record per-prefix storage stats into storage_history after a crawl."""
+    """Record bucket and per-top-level-prefix storage stats into storage_history after a crawl.
+
+    Reads the totals the crawl finalised (crawl_status) and the folders _rebuild_folder_stats just
+    aggregated, instead of re-grouping every object (a full sort of the table: ~90 MB of temp writes
+    per million rows, on every pass). Callers run it after the counters and folder_stats are current.
+    """
     if not os.path.exists(_db_path(bucket, endpoint_id)):
         return
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ")
     with _get_db(bucket, endpoint_id) as db:
-        # Record overall bucket total
-        row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
+        row = db.execute("SELECT total_objects, total_size FROM crawl_status WHERE id=1").fetchone()
         db.execute("INSERT INTO storage_history (timestamp, prefix, object_count, total_size) VALUES (?,?,?,?)",
-                   (ts, "", row[0], row[1]))
-        # Record per top-level prefix
-        rows = db.execute("""
-            SELECT SUBSTR(key, 1, INSTR(key, '/')) as top_prefix,
-                   COUNT(*) as cnt, COALESCE(SUM(size),0) as sz
-            FROM objects WHERE INSTR(key, '/') > 0
-            GROUP BY top_prefix
-        """).fetchall()
-        for r in rows:
-            if r["top_prefix"]:
-                db.execute("INSERT INTO storage_history (timestamp, prefix, object_count, total_size) VALUES (?,?,?,?)",
-                           (ts, r["top_prefix"], r["cnt"], r["sz"]))
+                   (ts, "", (row[0] if row else 0) or 0, (row[1] if row else 0) or 0))
+        db.execute("INSERT INTO storage_history (timestamp, prefix, object_count, total_size) "
+                   "SELECT ?, prefix, object_count, total_size FROM folder_stats WHERE prefix != ''", (ts,))
         db.commit()
 
 
@@ -1513,42 +1508,90 @@ def _fts_should_rebuild(bucket, endpoint_id, keys_changed):
         return True  # if we can't tell, rebuild to be safe
 
 
-def _incremental_upsert(db, batch, gen):
-    """Incremental recrawl: only INSERT/REPLACE objects that are new or changed.
-    For unchanged objects (same key+size+etag), just bump crawl_gen.
-    batch is a list of 6-tuples: (key, size, last_modified, etag, prefix, depth).
+class _PrefixReconcile:
+    """Zero-write reconcile of one listing unit (a prefix, the root group, or the whole bucket).
+
+    ListObjectsV2 returns keys in UTF-8 binary order, which is
+    also SQLite's default TEXT order, so every batch settles the key range from the previous batch's
+    last key up to its own last key with ONE ordered index range read: rows in that range the batch
+    did not return no longer exist at the provider and are deleted at once; rows whose size, ETag or
+    LastModified changed are updated in place (never REPLACEd: the trigram index is external-content
+    FTS keyed by rowid and its triggers are off during a crawl, so a new rowid would strand it);
+    unchanged rows are not written at all. Nothing is buffered, no statement carries a parameter per
+    key (per-key IN(...) lookups kept multi-megabyte prepared statements in every connection's
+    statement cache and did 10k random page reads per batch), and the connection is opened inside
+    the write lock for each batch like every other crawl write (16 long-lived connections were 16
+    live page caches), so memory does not grow with prefix size or thread count and a cold reconcile
+    reads the index sequentially. finish() settles the tail after the last listed key. A failed or
+    interrupted listing never reaches finish(): every range it did settle was listed completely, and
+    everything after it is kept. A listing that arrives out of order fails the unit before touching
+    anything (`scope` confines the unit to its own rows). Each batch also applies its exact object/size
+    delta to crawl_status in the same transaction, so progress needs no periodic COUNT(*)/SUM(size)
+    scan (at 9.9M rows that was a 2 GB table scan every 15 s for the whole reconcile).
     """
-    keys = [row[0] for row in batch]
-    placeholders = ",".join("?" * len(keys))
-    existing = {}
-    for row in db.execute(
-        f"SELECT key, size, etag FROM objects WHERE key IN ({placeholders})", keys
-    ).fetchall():
-        existing[row[0]] = (row[1], row[2])
 
-    unchanged_keys = []
-    changed_rows = []
-    for row in batch:
-        key, size, last_modified, etag, prefix, depth = row
-        prev = existing.get(key)
-        if prev and prev[0] == size and prev[1] == etag:
-            unchanged_keys.append(key)
-        else:
-            changed_rows.append((key, size, last_modified, etag, prefix, depth, gen))
+    _UPSERT = ("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?) "
+               "ON CONFLICT(key) DO UPDATE SET size=excluded.size, last_modified=excluded.last_modified, "
+               "etag=excluded.etag, prefix=excluded.prefix, depth=excluded.depth, crawl_gen=excluded.crawl_gen")
 
-    # Bulk update crawl_gen for unchanged objects
-    if unchanged_keys:
-        # SQLite doesn't have UPDATE ... IN for large lists, batch in chunks
-        for i in range(0, len(unchanged_keys), 2000):
-            chunk = unchanged_keys[i:i+2000]
-            ph = ",".join("?" * len(chunk))
-            db.execute(f"UPDATE objects SET crawl_gen=? WHERE key IN ({ph})", [gen] + chunk)
+    def __init__(self, bucket, eid, gen, wlock, scope="1", params=(), lo="", hi=None):
+        """scope/params: extra predicate confining the unit's rows (e.g. `prefix IN (?,?)`); lo/hi: the unit's
+        key range [lo, hi). The range read carries exactly ONE lower bound: with two bounds on the same
+        column (`key >= lo AND key > last`) the planner may take only the weaker one and scan from the start
+        of the table for every first batch (observed on SQLite 3.46: 2,000 prefixes → 12+ minutes of CPU)."""
+        self.bucket, self.eid, self.gen, self.wlock, self.scope, self.params = bucket, eid, gen, wlock, scope, tuple(params)
+        self.lo, self.hi = lo, hi
+        self.last = None      # highest key settled so far (None = nothing listed yet)
+        self.written = self.pruned = 0
 
-    # Full insert for new/changed objects
-    if changed_rows:
-        db.executemany(
-            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
-            changed_rows)
+    def _lower(self):
+        return ("key > ?", self.last) if self.last is not None else ("key >= ?", self.lo)
+
+    @staticmethod
+    def _publish(db, d_objects, d_size):
+        if d_objects or d_size:
+            db.execute("UPDATE crawl_status SET total_objects = total_objects + ?, total_size = total_size + ? WHERE id=1",
+                       (d_objects, d_size))
+
+    def batch(self, rows):
+        """rows: 6-tuples (key, size, last_modified, etag, prefix, depth) in listing order."""
+        if not rows:
+            return
+        keys = [r[0] for r in rows]
+        if (self.last is not None and keys[0] <= self.last) or any(a >= b for a, b in zip(keys, keys[1:])):
+            raise RuntimeError("listing is not in key order; refusing to reconcile this unit")
+        low_sql, low = self._lower()
+        with self.wlock, _get_db(self.bucket, self.eid) as db:
+            existing = {r[0]: (r[1], r[2], r[3]) for r in db.execute(
+                f"SELECT key, size, etag, last_modified FROM objects WHERE {self.scope} AND {low_sql} AND key <= ?",
+                self.params + (low, keys[-1]))}
+            changed = [(key, size, lm, etag, prefix, depth, self.gen)
+                       for key, size, lm, etag, prefix, depth in rows if existing.get(key) != (size, etag, lm)]
+            gone = existing.keys() - set(keys)
+            if changed:
+                db.executemany(self._UPSERT, changed)
+            if gone:
+                db.executemany("DELETE FROM objects WHERE key = ?", [(k,) for k in gone])
+            new = sum(1 for c in changed if c[0] not in existing)
+            self._publish(db, new - len(gone),
+                          sum(c[1] - (existing[c[0]][0] if c[0] in existing else 0) for c in changed) - sum(existing[k][0] for k in gone))
+            db.commit()
+        self.written += len(changed)
+        self.pruned += len(gone)
+        self.last = keys[-1]
+
+    def finish(self):
+        """The listing is complete: whatever the unit still holds beyond its last key is gone. Returns rows pruned."""
+        low_sql, low = self._lower()
+        where = f"{self.scope} AND {low_sql}" + (" AND key < ?" if self.hi is not None else "")
+        params = self.params + (low,) + ((self.hi,) if self.hi is not None else ())
+        with self.wlock, _get_db(self.bucket, self.eid) as db:
+            n, size = db.execute(f"SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects WHERE {where}", params).fetchone()
+            if n:
+                db.execute(f"DELETE FROM objects WHERE {where}", params)
+                self._publish(db, -n, -size)
+                db.commit()
+        return self.pruned + n
 
 
 class _CrawlDone(Exception):
@@ -1604,10 +1647,18 @@ def _run_crawl(bucket, endpoint_id=None):
         _crawl_progress_ts[crawl_key] = time.time()
 
     crawl_start = time.monotonic()
+    # One connection stays open for the whole crawl. Every write below opens its own short-lived
+    # connection, and whenever the LAST connection to a WAL database closes SQLite checkpoints and
+    # tears the WAL and shm files down, only for the next batch to recreate them: ~120 KB of writes per
+    # listing unit, 267 MB → 33 MB for an unchanged reconcile of 2,000 small prefixes. Idle, it holds no
+    # transaction, so it never blocks a checkpoint.
+    _anchor = _get_db(bucket, eid); _anchor.__enter__()
     crawl_ok = False
     interrupted = False
     fts_needs_rebuild = True  # safe default; refined below once we know what changed
     stale_count = 0
+    written_total = 0         # rows written by an incremental crawl (with stale_count: did the index change at all?)
+    index_changed = True      # folder_stats / prefix_children need a rebuild (refined below)
     try:
         # Get known top-level prefixes from existing index
         known_prefixes = set()
@@ -1630,6 +1681,8 @@ def _run_crawl(bucket, endpoint_id=None):
 
         # Discover top-level prefixes from S3
         root_files = []
+        root_complete = False   # every root-level object was listed: root-level deletions can be pruned
+        root_failed = False     # the root listing raised: root-level objects were not reconciled this attempt
         try:
             token = None
             while True:
@@ -1641,6 +1694,7 @@ def _run_crawl(bucket, endpoint_id=None):
                     known_prefixes.add(cp["Prefix"])
                 root_files.extend(resp.get("Contents", []))
                 if not resp.get("IsTruncated", False):
+                    root_complete = True
                     break
                 token = resp.get("NextContinuationToken")
                 # On recrawl with saved prefixes, skip slow full pagination
@@ -1651,6 +1705,7 @@ def _run_crawl(bucket, endpoint_id=None):
         except Exception as e:
             log.warning("[%s:%s] Delimiter listing failed, using known prefixes only: %s", eid, bucket, e)
             root_files = []
+            root_failed = True
 
         # Save all discovered prefixes to DB for future recrawls
         if known_prefixes:
@@ -1667,6 +1722,7 @@ def _run_crawl(bucket, endpoint_id=None):
         # was sequential (measured: 9,900 pages at provider RTT). Cost: one delimiter listing
         # per prefix per level.
         direct_files = []   # objects sitting directly under a prefix that gets replaced by its children
+        direct_parents = set()   # those prefixes: their direct objects were listed completely, so they can be pruned
 
         def _expand_prefixes(prefixes):
             """One delimiter listing per prefix → the set of their children. A prefix keeps its place when
@@ -1693,6 +1749,7 @@ def _run_crawl(bucket, endpoint_id=None):
                 elif kids:
                     expanded.update(kids)
                     direct_files.extend(direct)
+                    direct_parents.add(p)
                     log.info("[%s:%s] Sub-prefix split '%s' → %d children (%d direct objects kept)",
                              eid, bucket, p, len(kids), len(direct))
                 else:
@@ -1744,23 +1801,23 @@ def _run_crawl(bucket, endpoint_id=None):
             # Small bucket — just do a simple full list with streaming inserts
             log.info("Simple crawl for bucket %s (endpoint=%s)", bucket, eid)
 
-            def _simple_batch_cb(batch):
-                with _write_lock(crawl_key), _get_db(bucket, eid) as db:
-                    if existing_count > 0:
-                        _incremental_upsert(db, batch, crawl_gen)
-                    else:
+            if existing_count > 0:
+                # The whole bucket is one listing unit: everything the listing does not return is pruned.
+                rc = _PrefixReconcile(bucket, eid, crawl_gen, _write_lock(crawl_key))
+                total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=rc.batch, should_stop=stop)
+                stale_count = rc.finish(); written_total = rc.written
+                index_changed = written_total > 0 or stale_count > 0
+            else:
+                def _simple_batch_cb(batch):
+                    with _write_lock(crawl_key), _get_db(bucket, eid) as db:
                         db.executemany(
                             "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
                             [row + (crawl_gen,) for row in batch])
-                    db.commit()
-
-            total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb, should_stop=stop)
+                        db.commit()
+                total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb, should_stop=stop)
+            if stale_count:
+                log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
             with _get_db(bucket, eid) as db:
-                # Remove stale keys: anything with crawl_gen > 0 but older than current gen
-                stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
-                if stale_count > 0:
-                    db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
-                    log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
                 row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
                 now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 db.execute(
@@ -1784,74 +1841,74 @@ def _run_crawl(bucket, endpoint_id=None):
         total_new = 0
         failed_prefixes = []
 
-        # Index root-level files first
-        if root_files:
-            root_batch = []
-            for obj in root_files:
-                key = obj["Key"]
-                root_batch.append((
-                    key, obj["Size"], obj["LastModified"].isoformat(),
-                    obj.get("ETag", "").strip('"'), _key_prefix(key), _key_depth(key), crawl_gen,
-                ))
-            if root_batch:
-                with _get_db(bucket, eid) as db:
-                    if incremental:
-                        _incremental_upsert(db, [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in root_batch], crawl_gen)
-                    else:
-                        db.executemany(
-                            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
-                            root_batch)
+        wlock = _write_lock(crawl_key)
+
+        # Index root-level files first: the root delimiter listing plus the direct objects of split
+        # prefixes. Each of those parents whose listing ran to completion is pruned of what it no
+        # longer holds (also when it now holds nothing at all); a truncated root listing (recrawl
+        # short-cut) prunes nothing at root.
+        parents = sorted(direct_parents | ({""} if root_complete else set())) if incremental else []
+        if root_files or parents:
+            root_batch = [(obj["Key"], obj["Size"], obj["LastModified"].isoformat(), obj.get("ETag", "").strip('"'),
+                           _key_prefix(obj["Key"]), _key_depth(obj["Key"])) for obj in root_files]
+            if incremental:
+                rc = _PrefixReconcile(bucket, eid, crawl_gen, wlock,
+                                      "prefix IN (%s)" % (",".join("?" * len(parents)) or "NULL"), tuple(parents))
+                rc.batch(sorted(root_batch))   # gathered from several listings: put them in key order
+                if parents:
+                    stale_count += rc.finish()
+                written_total += rc.written
+            else:
+                with wlock, _get_db(bucket, eid) as db:
+                    db.executemany(
+                        "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                        [row + (crawl_gen,) for row in root_batch])
                     db.commit()
 
         progress_rows, progress_bytes = 0, 0     # initial crawl: rows/bytes written so far (mutated under wlock)
-        last_recount = time.monotonic()
 
-        wlock = _write_lock(crawl_key)
-
-        def _prefix_batch_cb(batch):
-            """Write one listed batch from a crawl thread and publish progress."""
-            nonlocal progress_rows, progress_bytes, last_recount
+        def _initial_batch_cb(batch):
+            """Initial crawl: plain inserts, and publish what was written after every batch (a single-prefix
+            bucket used to show 0 objects for its whole first crawl). Rows written, not distinct keys: a prefix
+            re-listed by the retry pass counts twice until the exact recount at the end."""
+            nonlocal progress_rows, progress_bytes
             with wlock, _get_db(bucket, eid) as db:
-                if incremental:
-                    _incremental_upsert(db, batch, crawl_gen)
-                else:
-                    db.executemany(
-                        "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
-                        [row + (crawl_gen,) for row in batch])
-                    # Initial crawl: publish what was written after every batch (a single-prefix bucket
-                    # used to show 0 objects for its whole first crawl). Rows written, not distinct keys:
-                    # a prefix re-listed by the retry pass counts twice until the exact recount at the end.
-                    progress_rows += len(batch)
-                    progress_bytes += sum(row[1] for row in batch)
-                    db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (progress_rows, progress_bytes))
+                db.executemany(
+                    "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
+                    [row + (crawl_gen,) for row in batch])
+                progress_rows += len(batch)
+                progress_bytes += sum(row[1] for row in batch)
+                db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (progress_rows, progress_bytes))
                 db.commit()
+            _note_progress()
+
+        def _note_progress():
+            # Incremental crawl totals are kept exact by each batch's delta (see _PrefixReconcile), so
+            # progress here is only the stall-detector stamp.
             _crawl_progress_ts[crawl_key] = time.time()
-            # Incremental crawl: exact totals at most every PROGRESS_RECOUNT_SECONDS. A recount per
-            # completed prefix cost thousands of full scans on wide layouts, and a heavy prefix can run
-            # an hour without completing, so this is timed. The scan runs OUTSIDE the write lock (WAL
-            # readers never block the writer); only the UPDATE takes it.
-            if incremental and time.monotonic() - last_recount >= PROGRESS_RECOUNT_SECONDS:
-                last_recount = time.monotonic()
-                with _get_db(bucket, eid) as db:
-                    row = db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM objects").fetchone()
-                with wlock, _get_db(bucket, eid) as db:
-                    db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
-                    db.commit()
+
+        def _crawl_unit(p):
+            """List one prefix in a pool thread. Returns (objects listed, stale rows pruned, rows written)."""
+            if not incremental:
+                return _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=_initial_batch_cb, should_stop=stop), 0, 0
+            rc = _PrefixReconcile(bucket, eid, crawl_gen, wlock, lo=p, hi=_prefix_upper(p))
+            def cb(batch):
+                rc.batch(batch)
+                _note_progress()
+            count = _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=cb, should_stop=stop)
+            return count, rc.finish(), rc.written   # reached only when every page of p was listed
 
         with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
-            futures = {
-                pool.submit(_crawl_prefix, bucket, p, endpoint_id=eid,
-                            batch_callback=_prefix_batch_cb,
-                            should_stop=stop): p
-                for p in sorted(known_prefixes) if p not in done_prefixes
-            }
+            futures = {pool.submit(_crawl_unit, p): p for p in sorted(known_prefixes) if p not in done_prefixes}
             for future in futures:
                 p = futures[future]
                 try:
                     # Scale timeout: 900s base + 1s per 5000 objects expected
                     prefix_timeout = max(900, 900 + existing_count // 5000)
-                    count = future.result(timeout=prefix_timeout)
+                    count, pruned, written = future.result(timeout=prefix_timeout)
                     total_new += count
+                    stale_count += pruned
+                    written_total += written
                     _mark_prefix_done(p)
                     (log.debug if len(known_prefixes) > 1000 else log.info)(
                         "[%s:%s] Prefix '%s': %s objects", eid, bucket, p[:40], f"{count:,}")
@@ -1874,10 +1931,10 @@ def _run_crawl(bucket, endpoint_id=None):
             log.info("[%s:%s] Retrying %d failed prefix(es) sequentially", eid, bucket, len(retry))
             for p in retry:
                 try:
-                    count = _crawl_prefix(bucket, p, endpoint_id=eid,
-                                          batch_callback=_prefix_batch_cb,
-                                          should_stop=stop)
+                    count, pruned, written = _crawl_unit(p)
                     total_new += count
+                    stale_count += pruned
+                    written_total += written
                     _mark_prefix_done(p)
                     log.info("[%s:%s] Prefix '%s' (retry): %s objects", eid, bucket, p[:40], f"{count:,}")
                 except CrawlInterrupted:
@@ -1890,20 +1947,16 @@ def _run_crawl(bucket, endpoint_id=None):
                 db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (row[0], row[1]))
                 db.commit()
 
-        # Remove stale keys (crawl_gen older than this gen) — but ONLY if every prefix crawled
-        # successfully. A still-failed prefix's keys carry the old gen; pruning them would turn a
-        # transient list failure into real data loss. Skip the prune this cycle to keep the index intact.
-        stale_count = 0
-        if not failed_prefixes:
-            with _get_db(bucket, eid) as db:
-                stale_count = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,)).fetchone()[0]
-                if stale_count > 0:
-                    db.execute("DELETE FROM objects WHERE crawl_gen > 0 AND crawl_gen < ?", (crawl_gen,))
-                    db.commit()
-                    log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
-        else:
-            log.warning("[%s:%s] Skipping stale-key prune — %d prefix(es) still failed after retry; index kept intact",
-                        eid, bucket, len(failed_prefixes))
+        if root_failed:
+            # Root-level objects (and any new top-level prefix) were not reconciled: this attempt is
+            # degraded like any failed prefix, and the next attempt re-lists the root. (The simple
+            # path is exempt: its whole-bucket listing covers the root itself.)
+            failed_prefixes.append("<root>")
+
+        # Stale rows were pruned per prefix as each listing completed cleanly; a prefix that is still
+        # failed kept every row it had (a transient list failure must never become data loss).
+        if stale_count:
+            log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
 
         # Final counts. With failed prefixes the index is intact but not fully reconciled: report
         # 'degraded' (still served) instead of 'complete', keep the previous success timestamp,
@@ -1925,7 +1978,12 @@ def _run_crawl(bucket, endpoint_id=None):
             # DELETED — not when size/etag changed. Skip the O(all-rows) trigram
             # rebuild entirely when no keys changed this crawl (the common recrawl case).
             added = total_objects - initial_count + stale_count
-            fts_needs_rebuild = (added > 0) or (stale_count > 0)
+            # A resumed crawl always rebuilds: the prefixes the interrupted attempt completed wrote their
+            # rows with the sync triggers off, and `added` only sees this attempt's rows.
+            fts_needs_rebuild = bool(done_prefixes) or (added > 0) or (stale_count > 0)
+            # Folder aggregates change only when a row was written or pruned. A resumed crawl counts as
+            # changed: the interrupted attempt's writes never reached the post-crawl step.
+            index_changed = not incremental or bool(done_prefixes) or written_total > 0 or stale_count > 0
 
         elapsed = time.monotonic() - crawl_start
         msg = f"[{eid}:{bucket}] Crawl complete: {total_objects:,} objects, {total_size / (1024**3):.1f} GB in {elapsed:.1f}s"
@@ -1963,6 +2021,7 @@ def _run_crawl(bucket, endpoint_id=None):
         except Exception as inner_e:
             log.warning("Failed to write crawl error status for %s: %s", bucket, inner_e)
     finally:
+        _anchor.__exit__(None, None, None)
         # Release crawl lock BEFORE post-crawl rebuilds so the bucket can be
         # re-queued even if rebuilds hang or crash on very large buckets. But mark
         # the bucket as "rebuilding" so a recrawl can't start mid-rebuild and
@@ -2011,7 +2070,13 @@ def _run_crawl(bucket, endpoint_id=None):
                 # of seconds on a large bucket; if it ran first (in its background
                 # thread) these would block past busy_timeout and fail with
                 # "database is locked", leaving folder_stats/prefix_children empty.
-                for step in (_record_storage_snapshot, _rebuild_folder_stats, _rebuild_prefix_children):
+                # The two aggregate rebuilds re-group every row (a full sort: ~90 MB of temp writes per million
+                # rows each): skipped when the reconcile wrote and pruned nothing. The snapshot reads the
+                # finalised counters and folder_stats, so it is cheap and always recorded.
+                steps = [_rebuild_folder_stats, _rebuild_prefix_children] if index_changed else []
+                if not index_changed:
+                    log.info("[%s:%s] Folder aggregates unchanged — rebuild skipped", eid, bucket)
+                for step in steps + [_record_storage_snapshot]:
                     try:
                         step(bucket, eid)
                     except Exception as step_e:
@@ -2321,7 +2386,6 @@ def _is_index_ready(bucket):
             return False
 
 
-PROGRESS_RECOUNT_SECONDS = int(os.environ.get("PROGRESS_RECOUNT_SECONDS", "15"))  # incremental-crawl progress refresh cadence
 FTS_REBUILD_CHUNK = int(os.environ.get("FTS_REBUILD_CHUNK", "250000"))  # rows per FTS rebuild transaction (bounds rebuild memory)
 SUBPREFIX_SPLIT_LEVELS = int(os.environ.get("SUBPREFIX_SPLIT_LEVELS", "3"))
 SUBPREFIX_SPLIT_MIN_OBJECTS = int(os.environ.get("SUBPREFIX_SPLIT_MIN_OBJECTS", "500000"))  # drill into any prefix with more indexed rows than this
@@ -2501,23 +2565,24 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
 
 
 def _delta_write(db, objs, gen):
-    """Upsert one batch of listed S3 objects; returns how many were new or changed."""
+    """Write the new or changed objects of one listed batch (size, ETag or LastModified differ); returns how
+    many. Unchanged rows are not written: this used to INSERT OR REPLACE every listed row, which rewrote each
+    one (and, with the sync triggers on, its trigram entries) on every delta pass."""
     changed = 0
     for i in range(0, len(objs), 5000):
         chunk = objs[i:i + 5000]
         keys = [o["Key"] for o in chunk]
         ph = ",".join("?" * len(keys))
-        have = {r[0]: (r[1], r[2]) for r in
-                db.execute(f"SELECT key,size,etag FROM objects WHERE key IN ({ph})", keys)}
+        have = {r[0]: (r[1], r[2], r[3]) for r in
+                db.execute(f"SELECT key,size,etag,last_modified FROM objects WHERE key IN ({ph})", keys)}
         batch = []
         for o in chunk:
-            k = o["Key"]; sz = o["Size"]; et = o.get("ETag", "").strip('"')
-            prev = have.get(k)
-            if not prev or prev[0] != sz or prev[1] != et:
-                changed += 1
-            batch.append((k, sz, o["LastModified"].isoformat(), et, _key_prefix(k), _key_depth(k), gen))
-        db.executemany(
-            "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)", batch)
+            k = o["Key"]; sz = o["Size"]; et = o.get("ETag", "").strip('"'); lm = o["LastModified"].isoformat()
+            if have.get(k) != (sz, et, lm):
+                batch.append((k, sz, lm, et, _key_prefix(k), _key_depth(k), gen))
+        changed += len(batch)
+        if batch:
+            db.executemany(_PrefixReconcile._UPSERT, batch)
     return changed
 
 
@@ -2726,9 +2791,13 @@ def _queue_crawl(bucket, endpoint_id=None):
             del _crawling[crawl_key]
         if _disk_low():
             log.warning("Crawl for %s skipped: less than %d%% free on %s", crawl_key, MIN_FREE_DISK_PCT, DB_DIR)
+            # A skipped refresh is recorded as a failed attempt; the index that is already there stays
+            # served under its own state. (This used to overwrite `status` with the error text, turning
+            # every complete index on a full volume into "Index error" in one scheduler pass.)
             try:
                 with _get_db(bucket, eid) as db:
-                    db.execute("UPDATE crawl_status SET status=? WHERE id=1", (f"error: disk below {MIN_FREE_DISK_PCT}% free",))
+                    db.execute("UPDATE crawl_status SET last_attempt_at=?, last_error=? WHERE id=1",
+                               (time.strftime("%Y-%m-%dT%H:%M:%SZ"), f"crawl skipped: disk below {MIN_FREE_DISK_PCT}% free"))
                     db.commit()
             except Exception:
                 pass
@@ -5002,11 +5071,12 @@ def list_all_buckets(user: dict = Depends(get_current_user)):
                 if os.path.exists(db_file):
                     try:
                         with _get_db(b["name"], eid) as bdb:
-                            row = bdb.execute("SELECT total_objects, total_size, status FROM crawl_status WHERE id=1").fetchone()
+                            row = bdb.execute("SELECT total_objects, total_size, status, last_crawl_end FROM crawl_status WHERE id=1").fetchone()
                             if row:
                                 b["index_status"] = row["status"]
                                 b["object_count"] = row["total_objects"]
                                 b["total_size"] = row["total_size"]
+                                b["indexed"] = row["last_crawl_end"] is not None   # served index; a recrawl in progress is a refresh, not a first build
                     except Exception as db_e:
                         log.debug("Failed to read index stats for %s/%s: %s", eid, b["name"], db_e)
             result.append({"endpoint_id": eid, "endpoint_name": ep["name"], "endpoint_url": ep["endpoint_url"], "buckets": buckets})
@@ -5060,11 +5130,12 @@ def list_buckets(user: dict = Depends(get_current_user)):
         if os.path.exists(_db_path(name)):
             try:
                 with _get_db(name) as db:
-                    row = db.execute("SELECT total_objects, total_size, status FROM crawl_status WHERE id=1").fetchone()
+                    row = db.execute("SELECT total_objects, total_size, status, last_crawl_end FROM crawl_status WHERE id=1").fetchone()
                     if row:
                         info["index_status"] = row["status"]
                         info["object_count"] = row["total_objects"]
                         info["total_size"] = row["total_size"]
+                        info["indexed"] = row["last_crawl_end"] is not None
             except Exception as db_e:
                 log.debug("Failed to read index stats for bucket %s: %s", name, db_e)
         buckets.append(info)

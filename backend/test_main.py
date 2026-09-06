@@ -927,8 +927,9 @@ class TestCrawlerCorrectness:
             assert m._disk_low() is True
             assert m._queue_crawl("diskbkt", "default") is False
             submit.assert_not_called()
-        with m._get_db("diskbkt", "default") as db:
-            assert (db.execute("SELECT status FROM crawl_status WHERE id=1").fetchone()[0] or "").startswith("error: disk")
+        with m._get_db("diskbkt", "default") as db:   # the refusal is a recorded attempt; the index state itself is untouched
+            row = db.execute("SELECT status, last_error FROM crawl_status WHERE id=1").fetchone()
+            assert not (row["status"] or "").startswith("error") and "disk" in (row["last_error"] or "")
         with patch.object(m.shutil, "disk_usage", return_value=DU(100, 50, 50)):
             assert m._disk_low() is False
 
@@ -952,8 +953,9 @@ class TestCrawlerCorrectness:
             db.commit()
         listed = []
         def list_objects_v2(**p):
-            if "Delimiter" in p:
-                return {"CommonPrefixes": [{"Prefix": "a/"}, {"Prefix": "b/"}], "Contents": [], "IsTruncated": False}
+            if "Delimiter" in p:   # only the root has children; a real listing never returns a prefix as its own child
+                kids = [{"Prefix": "a/"}, {"Prefix": "b/"}] if not p.get("Prefix") else []
+                return {"CommonPrefixes": kids, "Contents": [], "IsTruncated": False}
             listed.append(p["Prefix"])
             return {"Contents": [{"Key": f"{p['Prefix']}{i}", "Size": 1, "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc), "ETag": '"e"'} for i in range(2)],
                     "IsTruncated": False}

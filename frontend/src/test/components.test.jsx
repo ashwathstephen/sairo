@@ -790,3 +790,95 @@ describe("Drop overlay prefix", () => {
     expect(strong.textContent).toBe("test-data/");
   });
 });
+
+describe("Refresh of a served index (crawl status 'crawling' with a success timestamp)", () => {
+  it("BucketList keeps the stats and says Refreshing; a first build says Indexing", async () => {
+    vi.resetModules();   // fresh module graph so the mocked api is the one the component imports
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      listAllBuckets: vi.fn().mockResolvedValue({ endpoints: [{ endpoint_id: "default", endpoint_name: "Default", buckets: [
+        { name: "served-bkt", created: "2026-01-01T00:00:00Z", index_status: "crawling", indexed: true, object_count: 4460229, total_size: 39e12 },
+        { name: "fresh-bkt", created: "2026-01-01T00:00:00Z", index_status: "crawling", indexed: false, object_count: 12345 },
+      ] }] }),
+    }));
+    const { default: BucketList } = await import("../components/BucketList");
+    render(<BucketList onSelect={() => {}} role="admin" onDashboard={() => {}} />);
+    const served = (await screen.findByText("served-bkt")).closest(".bucket-card");
+    expect(served).toHaveTextContent("4,460,229 objects");
+    expect(served).toHaveTextContent("Refreshing index…");
+    expect(served).not.toHaveTextContent("Indexing...");
+    const fresh = screen.getByText("fresh-bkt").closest(".bucket-card");
+    expect(fresh).toHaveTextContent("Indexing... 12,345");
+    expect(fresh).not.toHaveTextContent("objects");
+    vi.doUnmock("../api");
+  });
+
+  it("CrawlStatus pill says Refreshing for a served index and Indexing for a first build", async () => {
+    const statuses = [
+      { status: "crawling", total_objects: 42, last_crawl_end: "2026-09-01T00:00:00Z" },
+      { status: "crawling", total_objects: 7, last_crawl_end: null },
+    ];
+    vi.resetModules();   // fresh module graph so the mocked api is the one the component imports
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getCrawlStatus: vi.fn().mockImplementation(() => Promise.resolve(statuses.shift())),
+    }));
+    const { default: CrawlStatus } = await import("../components/CrawlStatus");
+    const a = render(<CrawlStatus bucket="served" />);
+    expect(await a.findByText("Refreshing... 42")).toBeInTheDocument();
+    a.unmount();
+    const b = render(<CrawlStatus bucket="fresh" />);
+    expect(await b.findByText("Indexing... 7")).toBeInTheDocument();
+    vi.doUnmock("../api");
+  });
+});
+
+describe("CrawlStatus stale reply guard", () => {
+  it("a delayed reply for the previous bucket cannot overwrite the current bucket's pill", async () => {
+    let resolveOld;
+    const replies = {
+      old: new Promise((r) => { resolveOld = r; }),
+      current: Promise.resolve({ status: "complete", total_objects: 5, last_crawl_end: "2026-09-01T00:00:00Z" }),
+    };
+    vi.resetModules();   // fresh module graph so the mocked api is the one the component imports
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getCrawlStatus: vi.fn().mockImplementation((b) => replies[b]),
+    }));
+    const { default: CrawlStatus } = await import("../components/CrawlStatus");
+    const view = render(<CrawlStatus bucket="old" />);
+    view.rerender(<CrawlStatus bucket="current" />);
+    expect(await view.findByText("5 objects")).toBeInTheDocument();
+    resolveOld({ status: "crawling", total_objects: 10248000, last_crawl_end: null });   // the old bucket's reply lands late
+    await new Promise((r) => setTimeout(r, 20));
+    expect(view.getByText("5 objects")).toBeInTheDocument();
+    expect(view.queryByText(/10,248,000/)).toBeNull();
+    vi.doUnmock("../api");
+  });
+});
+
+describe("CrawlStatus manual recrawl polling", () => {
+  it("the rapid polls started by Re-index Now for bucket A cannot overwrite bucket B after navigating", async () => {
+    vi.resetModules();
+    const calls = { A: 0, B: 0 };
+    const idleA = { status: "complete", total_objects: 3, last_crawl_end: "2026-09-01T00:00:00Z" };
+    const lateA = { status: "crawling", total_objects: 10248000, last_crawl_end: null };      // every A poll after the click
+    const idleB = { status: "complete", total_objects: 5, last_crawl_end: "2026-09-01T00:00:00Z" };
+    vi.doMock("../api", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getCrawlStatus: vi.fn().mockImplementation((b) => { calls[b]++; return Promise.resolve(b === "B" ? idleB : calls.A === 1 ? idleA : lateA); }),
+      triggerCrawl: vi.fn().mockResolvedValue({}),
+    }));
+    const { default: CrawlStatus } = await import("../components/CrawlStatus");
+    const view = render(<CrawlStatus bucket="A" />);
+    fireEvent.click(await view.findByText("3 objects"));               // expand the panel
+    fireEvent.click(await view.findByText("Re-index Now"));            // starts the 6 × 800 ms poll loop for A
+    view.rerender(<CrawlStatus bucket="B" />);                          // user navigates away
+    expect(await view.findByText("5 objects")).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 1800));                     // at least two of A's rapid polls land meanwhile
+    expect(calls.A).toBeGreaterThan(1);
+    expect(view.getByText("5 objects")).toBeInTheDocument();
+    expect(view.queryByText(/10,248,000/)).toBeNull();
+    vi.doUnmock("../api");
+  });
+});

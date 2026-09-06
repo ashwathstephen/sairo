@@ -49,7 +49,6 @@ from main import (
     _record_storage_snapshot,
     _key_prefix,
     _key_depth,
-    _incremental_upsert,
     _disable_fts_triggers,
     _enable_fts_triggers,
     _rebuild_fts_async,
@@ -251,40 +250,22 @@ class TestBatchSizes:
         default = sig.parameters["batch_size"].default
         assert default == 10000, f"Expected batch_size=10000, got {default}"
 
-    def test_incremental_upsert_with_large_batch(self):
-        """Test _incremental_upsert handles a 10K batch correctly."""
+    def test_reconcile_writes_only_changed_rows_at_batch_scale(self):
+        """10k-row batches through the reconcile: an identical second pass writes nothing (not even crawl_gen),
+        and no statement binds one parameter per key (those kept multi-MB prepared statements cached per
+        connection: +290 MB at 16 threads) — the generation sweep (541 MB of WAL per unchanged 844k rows) is gone."""
+        import inspect, sys, threading
+        m = sys.modules.get("backend.main") or sys.modules["main"]
         _init_db("batch-test")
-        batch = []
-        for i in range(10000):
-            key = f"data/file_{i:08d}.parquet"
-            batch.append((key, i * 1024, "2026-04-01T00:00:00Z", f'"etag_{i}"',
-                          "data/", 1))
-
+        batch = [(f"data/file_{i:08d}.parquet", i * 1024, "2026-04-01T00:00:00Z", f'"etag_{i}"', "data/", 1) for i in range(10000)]
+        for gen, expect_written in ((1, 10000), (2, 0)):
+            rc = m._PrefixReconcile("batch-test", "default", gen, threading.Lock())
+            rc.batch(batch); rc.finish()
+            assert rc.written == expect_written, (gen, rc.written)
         with _get_db("batch-test") as db:
-            # First insert (no existing data → all changed)
-            _incremental_upsert(db, batch, gen=1)
-            db.commit()
-
-            count = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
-            assert count == 10000, f"Expected 10000 objects, got {count}"
-
-            # Second insert with same data (all unchanged → bulk UPDATE)
-            _incremental_upsert(db, batch, gen=2)
-            db.commit()
-
-            # All should have gen=2 now
-            gen2_count = db.execute(
-                "SELECT COUNT(*) FROM objects WHERE crawl_gen=2"
-            ).fetchone()[0]
-            assert gen2_count == 10000, f"Expected 10000 with gen=2, got {gen2_count}"
-
-    def test_update_chunk_size_2000(self):
-        """Verify the UPDATE chunk loop uses 2000, not 500."""
-        import inspect
-        source = inspect.getsource(_incremental_upsert)
-        assert "2000)" in source, "Expected chunk size 2000 in _incremental_upsert"
-        assert "500)" not in source, "Old chunk size 500 should not be present"
-
+            assert db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen=1").fetchone()[0] == 10000, "unchanged rows keep their generation"
+        src = inspect.getsource(m._PrefixReconcile)
+        assert "UPDATE objects SET crawl_gen" not in src and "IN ({" not in src and '"?" *' not in src
 
 # ═══════════════════════════════════════════════════════════════════
 # 3. WORKER COUNTS
@@ -695,9 +676,10 @@ class TestFullIntegration:
              f'"etag_{i}"', "data/", 1)
             for i in range(1000)
         ]
-        with _get_db(bucket) as db:
-            _incremental_upsert(db, batch1, gen=1)
-            db.commit()
+        import sys, threading
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        rc = m._PrefixReconcile(bucket, "default", 1, threading.Lock())
+        rc.batch(batch1); rc.finish()
 
         # Gen 2: Same 1000 objects (unchanged) + 100 new + 50 modified
         batch2 = list(batch1)  # Copy unchanged
@@ -708,17 +690,18 @@ class TestFullIntegration:
             batch2[i] = (batch2[i][0], 999999, batch2[i][2], f'"etag_mod_{i}"',
                          batch2[i][4], batch2[i][5])
 
+        rc = m._PrefixReconcile(bucket, "default", 2, threading.Lock())
+        rc.batch(batch2); rc.finish()
+        assert rc.written == 150
         with _get_db(bucket) as db:
-            _incremental_upsert(db, batch2, gen=2)
-            db.commit()
-
             total = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
             assert total == 1100, f"Expected 1100 objects, got {total}"
 
             gen2 = db.execute("SELECT COUNT(*) FROM objects WHERE crawl_gen=2").fetchone()[0]
-            assert gen2 == 1100, f"Expected all 1100 at gen=2, got {gen2}"
+            assert gen2 == 150, f"only the 100 new + 50 modified rows are written, got {gen2}"
+            assert db.execute("SELECT size FROM objects WHERE key='data/file_0000.csv'").fetchone()[0] == 999999
 
-        print("  Incremental upsert: 1000 unchanged + 100 new + 50 modified = 1100 total, all gen=2")
+        print("  Incremental upsert: 1000 unchanged + 100 new + 50 modified = 1100 total, 150 written")
 
     def test_folder_stats_matches_actual_data(self):
         """Verify folder_stats exactly matches aggregated object data."""
@@ -1591,3 +1574,318 @@ class TestTruthfulStates:
             assert tuple(db.execute("SELECT fts_ready_gen, current_crawl_gen FROM crawl_status").fetchone()) == (1, 1)
             assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='objects_fts_new'").fetchone()[0] == 0
 
+
+
+class TestZeroWriteReconcile:
+    """SAE-72: an incremental crawl writes only changed rows, and prunes deletions per listed unit."""
+
+    def _client(self, layout, fail=(), mtime=None, fail_root=False, unordered=False):
+        """layout: {key: size}; mutate between crawls. Delimiter listings are derived from the keys.
+        mtime: {key: datetime} overrides LastModified; fail_root makes the root delimiter listing raise."""
+        from unittest.mock import MagicMock
+        from datetime import datetime, timezone
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        obj = lambda k: {"Key": k, "Size": layout[k], "LastModified": (mtime or {}).get(k, lm), "ETag": f'"e{layout[k]}"'}
+        def list_objects_v2(**p):
+            pre, delim = p.get("Prefix", ""), p.get("Delimiter")
+            keys = sorted(k for k in layout if k.startswith(pre))
+            if delim:
+                if fail_root and pre == "":
+                    raise ConnectionError("root listing failed")
+                kids = sorted({pre + k[len(pre):].split("/")[0] + "/" for k in keys if "/" in k[len(pre):]})
+                direct = [k for k in keys if "/" not in k[len(pre):]]
+                return {"CommonPrefixes": [{"Prefix": c} for c in kids], "Contents": [obj(k) for k in direct], "IsTruncated": False}
+            if pre in fail:
+                raise ConnectionError("provider went away")
+            if unordered:
+                keys = keys[::-1]
+            return {"Contents": [obj(k) for k in keys], "IsTruncated": False}
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        return client
+
+    def _crawl(self, m, bucket, layout, fail=(), **kw):
+        from unittest.mock import patch
+        with patch.object(m._s3_manager, "get_client", return_value=self._client(layout, fail, **kw)), \
+             patch.object(m._rebuild_pool, "submit"), patch.object(m.time, "sleep"):
+            m._run_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            return dict(db.execute("SELECT status, total_objects FROM crawl_status").fetchone()), \
+                   {r[0]: (r[1], r[2]) for r in db.execute("SELECT key, size, crawl_gen FROM objects")}
+
+    def test_unchanged_bucket_writes_nothing(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-nochange"; m._init_db(bucket, "default")
+        layout = {f"{p}/f{i}": i for p in ("a", "b", "c") for i in range(1, 6)}
+        layout["root.txt"] = 9
+        self._crawl(m, bucket, layout)
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        m._rebuild_fts(bucket, "default")           # the first crawl's rebuild pool was mocked: build + certify its index now
+        written = []
+        _finish = m._PrefixReconcile.finish
+        def spy(self):
+            written.append(self.written); return _finish(self)
+        with m._get_db(bucket, "default") as db:
+            hist0 = db.execute("SELECT COUNT(*) FROM storage_history").fetchone()[0]
+        def settle():
+            for _ in range(100):                      # _do_rebuilds releases the marker when it is done
+                if f"default:{bucket}" not in m._rebuilding: break
+                time.sleep(0.05)
+        with patch.object(m._PrefixReconcile, "finish", spy), patch.object(m, "_rebuild_fts_async") as rb, \
+             patch.object(m, "_rebuild_folder_stats", wraps=m._rebuild_folder_stats) as fs, \
+             patch.object(m._s3_manager, "get_client", return_value=self._client(layout)):
+            m._run_crawl(bucket, "default")          # real post-crawl pool this time, so the FTS decision is observable
+            settle()
+        with m._get_db(bucket, "default") as db:
+            status = dict(db.execute("SELECT status, total_objects, fts_ready_gen, current_crawl_gen FROM crawl_status").fetchone())
+            gens = {r[0] for r in db.execute("SELECT DISTINCT crawl_gen FROM objects")}
+            hist1 = db.execute("SELECT COUNT(*) FROM storage_history").fetchone()[0]
+        assert status["status"] == "complete" and status["total_objects"] == 16, status
+        assert written and sum(written) == 0, written
+        assert gens == {1}, "no row may be rewritten when nothing changed"
+        assert not rb.called, "an unchanged bucket must not trigger the trigram rebuild"
+        assert not fs.called, "an unchanged bucket must not re-aggregate folder stats"
+        assert hist1 > hist0, "the storage history snapshot is still recorded (from counters + folder_stats)"
+        assert status["fts_ready_gen"] == status["current_crawl_gen"] == 2, status
+        layout["c/f9"] = 9                            # one new object: the aggregates must be rebuilt again
+        with patch.object(m, "_rebuild_fts_async"), patch.object(m, "_rebuild_folder_stats", wraps=m._rebuild_folder_stats) as fs, \
+             patch.object(m._s3_manager, "get_client", return_value=self._client(layout)):
+            m._run_crawl(bucket, "default"); settle()
+        assert fs.called, "a changed bucket rebuilds folder stats"
+
+    def test_deletions_and_changes_reconciled_per_prefix(self):
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-delta"; m._init_db(bucket, "default")
+        layout = {"a/x1": 1, "a/x2": 2, "b/y1": 3, "b/y2": 4}
+        self._crawl(m, bucket, layout)
+        del layout["a/x2"]; layout["b/y1"] = 30
+        status, rows = self._crawl(m, bucket, layout)
+        assert status["status"] == "complete"
+        assert rows == {"a/x1": (1, 1), "b/y1": (30, 2), "b/y2": (4, 1)}, rows
+
+    def test_failed_prefix_prunes_nothing_and_resume_prunes_only_what_it_listed(self):
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-failed"; m._init_db(bucket, "default")
+        layout = {"a/x1": 1, "a/x2": 2, "b/y1": 3, "b/y2": 4}
+        self._crawl(m, bucket, layout)
+        del layout["a/x2"]; del layout["b/y2"]
+        status, rows = self._crawl(m, bucket, layout, fail=("b/",))
+        assert status["status"] == "degraded", status
+        assert set(rows) == {"a/x1", "b/y1", "b/y2"}, "clean a/ pruned, failed b/ kept every row"
+        del layout["a/x1"]                                  # changes under the already-complete prefix
+        status, rows = self._crawl(m, bucket, layout)       # degraded resume: re-lists only b/
+        assert status["status"] == "complete", status
+        assert set(rows) == {"a/x1", "b/y1"}, "b/y2 pruned by the resumed listing; a/ was not re-listed so a/x1 stays"
+
+    def test_root_level_deletions_pruned_only_when_root_listing_complete(self):
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-root"; m._init_db(bucket, "default")
+        layout = {"r1.txt": 1, "r2.txt": 2, "a/x1": 3}
+        self._crawl(m, bucket, layout)
+        del layout["r2.txt"]
+        status, rows = self._crawl(m, bucket, layout)
+        assert set(rows) == {"r1.txt", "a/x1"}, rows
+        # A root listing cut short (paginated recrawl short-cut) must not prune root-level rows it never saw.
+        layout["r2.txt"] = 2
+        self._crawl(m, bucket, layout)
+        del layout["r2.txt"]
+        client = self._client(layout)
+        real = client.list_objects_v2.side_effect
+        def truncated_root(**p):
+            r = real(**p)
+            if p.get("Delimiter") and not p.get("Prefix"):
+                r = dict(r, IsTruncated=True, NextContinuationToken="t")
+            return r
+        client.list_objects_v2.side_effect = truncated_root
+        with patch.object(m._s3_manager, "get_client", return_value=client), patch.object(m._rebuild_pool, "submit"):
+            m._run_crawl(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            keys = {r[0] for r in db.execute("SELECT key FROM objects")}
+        assert "r2.txt" in keys, "truncated root listing: root rows untouched"
+
+    def test_last_root_object_deleted_is_pruned(self):
+        """No root-level object left at the provider is still a complete root listing: the row must go."""
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-root-empty"; m._init_db(bucket, "default")
+        layout = {"only.txt": 1, "a/x1": 3}
+        self._crawl(m, bucket, layout)
+        del layout["only.txt"]
+        status, rows = self._crawl(m, bucket, layout)
+        assert status["status"] == "complete" and set(rows) == {"a/x1"}, rows
+
+    def test_changed_object_keeps_rowid_and_search_index(self):
+        """A same-key size/ETag change must update in place: REPLACE gave the row a new rowid, the trigram
+        index (external content keyed by rowid, triggers off during the crawl) pointed at a missing row,
+        and since no key changed nothing rebuilt it — 'fts5: missing row' and a LIKE-scan fallback."""
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-rowid"; m._init_db(bucket, "default")
+        layout = {"a/report.pdf": 1, "a/x2": 2, "b/y1": 3}
+        self._crawl(m, bucket, layout)
+        m._rebuild_fts(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            rid = db.execute("SELECT rowid FROM objects WHERE key='a/report.pdf'").fetchone()[0]
+        layout["a/report.pdf"] = 100                      # new size + ETag, same key
+        status, rows = self._crawl(m, bucket, layout)
+        assert status["status"] == "complete" and rows["a/report.pdf"][0] == 100
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT rowid FROM objects WHERE key='a/report.pdf'").fetchone()[0] == rid
+            assert m._fts_consistent(db), "search index must still match the objects table"
+            hit = db.execute("SELECT o.key, o.size FROM objects_fts f JOIN objects o ON o.rowid = f.rowid "
+                             "WHERE objects_fts MATCH 'report'").fetchall()
+            assert [tuple(h) for h in hit] == [("a/report.pdf", 100)], hit
+
+    def test_last_modified_change_is_written(self):
+        """Re-uploading identical bytes keeps size and ETag but moves LastModified: that is a change."""
+        import sys
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-mtime"; m._init_db(bucket, "default")
+        layout = {"a/x1": 1, "a/x2": 2}
+        self._crawl(m, bucket, layout)
+        later = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        status, rows = self._crawl(m, bucket, layout, mtime={"a/x1": later})
+        assert rows["a/x1"][1] == 2 and rows["a/x2"][1] == 1, "only the re-uploaded object is written"
+        with m._get_db(bucket, "default") as db:
+            assert db.execute("SELECT last_modified FROM objects WHERE key='a/x1'").fetchone()[0] == later.isoformat()
+
+    def test_root_listing_failure_is_degraded_not_complete(self):
+        """A failed root delimiter listing leaves root-level objects unreconciled: the attempt is degraded,
+        the success timestamp does not move, nothing is pruned, and the next clean attempt completes."""
+        import sys, time
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-rootfail"; m._init_db(bucket, "default")
+        layout = {"r1.txt": 1, "a/x1": 2, "b/y1": 3}
+        self._crawl(m, bucket, layout)
+        with m._get_db(bucket, "default") as db:
+            end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
+        time.sleep(1.1)
+        del layout["r1.txt"]
+        status, rows = self._crawl(m, bucket, layout, fail_root=True)
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
+        assert row["status"] == "degraded" and row["last_crawl_end"] == end0 and row["last_error"], row
+        assert "r1.txt" in rows, "root rows are kept when the root could not be listed"
+        status, rows = self._crawl(m, bucket, layout)
+        assert status["status"] == "complete" and "r1.txt" not in rows, rows
+
+    def test_range_settle_prunes_first_middle_last_across_batches(self):
+        """Deletions at the very start of a unit, inside a batch range, on a batch boundary and after the
+        last listed key are all pruned; nothing outside the unit's scope is touched."""
+        import sys, threading
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-ranges"; m._init_db(bucket, "default")
+        row = lambda k, size=1: (k, size, "2026-01-01T00:00:00+00:00", "e", m._key_prefix(k), m._key_depth(k), 1)
+        keys = [f"a/k{i:02d}" for i in range(30)] + ["b/other"]
+        with m._get_db(bucket, "default") as db:
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)", [row(k) for k in keys])
+            db.execute("UPDATE crawl_status SET total_objects=?, total_size=? WHERE id=1", (len(keys), len(keys))); db.commit()
+        gone = {"a/k00", "a/k07", "a/k09", "a/k10", "a/k29"}      # first; mid-batch; boundary pair; tail
+        listed = [k for k in keys if k.startswith("a/") and k not in gone]
+        rc = m._PrefixReconcile(bucket, "default", 2, threading.Lock(), lo="a/", hi=m._prefix_upper("a/"))
+        rc.batch([row(k)[:6] for k in listed[:9]])            # a/k01..a/k09-less → ends at a/k11
+        rc.batch([row(k)[:6] for k in listed[9:20]])
+        rc.batch([row(k)[:6] for k in listed[20:]])
+        pruned = rc.finish()
+        with m._get_db(bucket, "default") as db:
+            left = sorted(r[0] for r in db.execute("SELECT key FROM objects"))
+            totals = tuple(db.execute("SELECT total_objects, total_size FROM crawl_status").fetchone())
+        assert pruned == 5 and left == sorted(listed + ["b/other"]), (pruned, left)
+        assert totals == (26, 26), f"progress totals must follow the deltas exactly, got {totals}"
+
+    def test_out_of_order_listing_fails_the_prefix_and_prunes_nothing(self):
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-unordered"; m._init_db(bucket, "default")
+        layout = {"a/x1": 1, "a/x2": 2, "a/x3": 3, "b/y1": 4}
+        self._crawl(m, bucket, layout)
+        del layout["a/x2"]
+        status, rows = self._crawl(m, bucket, layout, unordered=True)
+        assert status["status"] == "degraded", status
+        assert set(rows) == {"a/x1", "a/x2", "a/x3", "b/y1"}, "an out-of-order listing must not prune"
+
+    def test_delta_write_touches_only_changed_rows(self):
+        """The delta path used to REPLACE every listed row (new rowid, trigram entries rewritten via triggers)."""
+        import sys
+        from datetime import datetime, timezone
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-deltawrite"; m._init_db(bucket, "default")
+        lm = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        objs = [{"Key": f"a/x{i}", "Size": i, "LastModified": lm, "ETag": f'"e{i}"'} for i in range(5)]
+        with m._get_db(bucket, "default") as db:
+            assert m._delta_write(db, objs, 1) == 5; db.commit()
+            rid = {r[0]: r[1] for r in db.execute("SELECT key, rowid FROM objects")}
+            assert m._delta_write(db, objs, 2) == 0, "identical listing writes nothing"
+            objs[2]["Size"] = 99
+            assert m._delta_write(db, objs, 3) == 1; db.commit()
+            assert {r[0]: r[1] for r in db.execute("SELECT key, rowid FROM objects")} == rid, "rows are updated in place"
+            assert {r[0] for r in db.execute("SELECT key FROM objects WHERE crawl_gen=3")} == {"a/x2"}
+            assert m._fts_consistent(db)
+
+    def test_low_disk_skips_the_refresh_but_keeps_the_served_index(self):
+        """The free-disk guard used to overwrite `status` with an error string: one scheduler pass on a full
+        volume turned all 22 complete indexes of a live instance into "Index error"."""
+        import sys
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-disklow"; m._init_db(bucket, "default")
+        self._crawl(m, bucket, {"a/x1": 1})
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")   # the mocked rebuild pool never released the post-crawl marker
+        with patch.object(m, "_disk_low", return_value=True):
+            assert m._queue_crawl(bucket, "default") is False
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, last_error, last_attempt_at, total_objects FROM crawl_status").fetchone())
+        assert row["status"] == "complete" and row["total_objects"] == 1, row
+        assert row["last_error"] and "disk" in row["last_error"] and row["last_attempt_at"], row
+        assert m._is_index_ready(bucket), "the index is still served"
+
+    def test_resume_rebuilds_search_index_for_rows_the_interrupted_attempt_wrote(self):
+        """A prefix completed before the pod died wrote its rows with the FTS triggers off. The resumed
+        attempt's change count starts from the row count at resume time, so it saw no change, stamped
+        the search marker as current, and 'x2' was unsearchable with a failing integrity check."""
+        import sys, time
+        from unittest.mock import patch
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-resume-fts"; m._init_db(bucket, "default")
+        layout = {"a/x1": 1, "b/y1": 2}
+        self._crawl(m, bucket, layout)
+        with m._crawl_lock:
+            m._rebuilding.discard(f"default:{bucket}")
+        m._rebuild_fts(bucket, "default")                     # search index built and certified for gen 1
+        layout["a/x2new"] = 3                                 # new object at the provider (trigram search needs 3+ chars)
+        with m._get_db(bucket, "default") as db:              # the interrupted attempt: a/ finished (and wrote a/x2 with triggers off), b/ did not
+            db.execute("UPDATE crawl_status SET status='crawling', current_crawl_gen=current_crawl_gen+1 WHERE id=1")
+            gen = db.execute("SELECT current_crawl_gen FROM crawl_status").fetchone()[0]
+            db.execute("DELETE FROM crawl_progress"); db.execute("INSERT INTO crawl_progress (prefix, gen) VALUES ('a/', ?)", (gen,))
+            m._disable_fts_triggers(db)
+            db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES ('a/x2new',3,'2026-01-01T00:00:00+00:00','e3','a/',1,?)", (gen,))
+            db.commit()
+        with patch.object(m._s3_manager, "get_client", return_value=self._client(layout)):
+            m._run_crawl(bucket, "default")                   # resume: only b/ is listed, nothing changes there
+            for _ in range(200):                              # the post-crawl step (and the FTS rebuild it hands off to) releases the marker when done
+                if f"default:{bucket}" not in m._rebuilding: break
+                time.sleep(0.05)
+        with m._get_db(bucket, "default") as db:
+            row = dict(db.execute("SELECT status, fts_ready_gen, current_crawl_gen FROM crawl_status").fetchone())
+            assert row["status"] == "complete" and row["fts_ready_gen"] == row["current_crawl_gen"], row
+            assert m._fts_consistent(db), "search index must match the catalogue after a resume"
+            hit = [r[0] for r in db.execute("SELECT o.key FROM objects_fts f JOIN objects o ON o.rowid = f.rowid WHERE objects_fts MATCH 'x2new'")]
+            assert hit == ["a/x2new"], hit
+
+    def test_simple_crawl_reconciles_whole_bucket(self):
+        import sys
+        m = sys.modules.get("backend.main") or sys.modules["main"]
+        bucket = "zw-simple"; m._init_db(bucket, "default")
+        layout = {"one.bin": 1, "two.bin": 2}
+        self._crawl(m, bucket, layout)
+        del layout["two.bin"]; layout["one.bin"] = 10
+        status, rows = self._crawl(m, bucket, layout)
+        assert status["status"] == "complete" and rows == {"one.bin": (10, 2)}, rows

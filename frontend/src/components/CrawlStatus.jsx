@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { getCrawlStatus, triggerCrawl, formatSize } from "../api";
 
 export default function CrawlStatus({ bucket }) {
@@ -6,14 +6,19 @@ export default function CrawlStatus({ bucket }) {
   const [expanded, setExpanded] = useState(false);
   const [starting, setStarting] = useState(false);
 
+  const bucketRef = useRef(bucket);   // the bucket on screen; every caller checks it when its reply lands
+  bucketRef.current = bucket;
+
   const fetchStatus = async () => {
+    const b = bucket;
     try {
-      const data = await getCrawlStatus(bucket);
-      setStatus(data);
+      const data = await getCrawlStatus(b);
+      if (bucketRef.current === b) setStatus(data);   // a reply for a bucket we navigated away from must not win
     } catch {}
   };
 
   useEffect(() => {
+    setStatus(null);
     fetchStatus();
     const interval = setInterval(fetchStatus, 5000);
     return () => clearInterval(interval);
@@ -31,11 +36,12 @@ export default function CrawlStatus({ bucket }) {
   const handleRecrawl = async () => {
     if (starting || isCrawling) return;       // guard against the double-click
     setStarting(true);
+    const b = bucket;
     try {
-      await triggerCrawl(bucket);
+      await triggerCrawl(b);
       // Optimistically reflect "crawling" right away — the crawl_status table lags a beat
       // behind the trigger, which is what made the first click look like a no-op.
-      setStatus((s) => ({ ...(s || {}), status: "crawling" }));
+      if (bucketRef.current === b) setStatus((s) => ({ ...(s || {}), status: "crawling" }));
       // Poll quickly for a few seconds to sync the real status, then the 5s interval takes over.
       for (let i = 0; i < 6; i++) {
         await new Promise((r) => setTimeout(r, 800));
@@ -55,7 +61,7 @@ export default function CrawlStatus({ bucket }) {
       >
         {isCrawling && <span className="crawl-dot" />}
         {isCrawling
-          ? `${isInterrupted ? "Resuming index..." : "Indexing..."} ${(status.total_objects || 0).toLocaleString()}`
+          ? `${isInterrupted ? "Resuming index..." : status.last_crawl_end ? "Refreshing..." : "Indexing..."} ${(status.total_objects || 0).toLocaleString()}`
           : isComplete
           ? `${(status.total_objects || 0).toLocaleString()} objects${isRebuilding ? " · finishing search index" : isDegraded ? " · partial" : ""}`
           : isError ? "Index error" : "Not indexed"}

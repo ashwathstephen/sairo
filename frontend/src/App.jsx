@@ -153,6 +153,13 @@ function MainApp() {
   const abortRef = useRef(null);
   const refreshRef = useRef(null);
   const crawlFpRef = useRef(null);     // crawl-status fingerprint — gates the 30s silent refresh
+  const viewBucketRef = useRef(null);  // bucket currently shown: crawl-status replies for an earlier bucket are dropped
+  // The "Indexing your bucket…" bar is for a FIRST build only. A recrawl of an already-served index also
+  // reports status "crawling", but browsing and search work throughout, so it must not show.
+  const applyCrawlStatus = (s) => {
+    const firstBuild = (s?.status === "crawling" || s?.status === "interrupted") && !s?.last_crawl_end;
+    setIndexing(firstBuild); setIndexInterrupted(firstBuild && s?.status === "interrupted"); setIndexCount(s?.total_objects || 0);
+  };
   const silentAbortRef = useRef(null); // in-flight silent-refresh stream, so we can abort it
   const currentViewRef = useRef({ bucket: "", prefix: "" }); // guards stale refreshes from clobbering state
 
@@ -255,7 +262,8 @@ function MainApp() {
     setLoading(true);
     setDone(false);
     setIndexed(false);
-    getCrawlStatus(b).then((s) => { setIndexing(s?.status === "crawling" || s?.status === "interrupted"); setIndexInterrupted(s?.status === "interrupted"); setIndexCount(s?.total_objects || 0); }).catch(() => {});
+    viewBucketRef.current = b; setIndexing(false); setIndexInterrupted(false); setIndexCount(0);
+    getCrawlStatus(b).then((s) => { if (viewBucketRef.current === b) applyCrawlStatus(s); }).catch(() => {});
     crawlFpRef.current = null;  // re-establish fingerprint for this view's background refresh
 
     let firstPage = true;
@@ -297,8 +305,8 @@ function MainApp() {
     // actually changed since the last load. Avoids re-downloading an unchanged folder
     // every 30s — the previous behavior re-streamed the whole listing each tick.
     getCrawlStatus(b).then((status) => {
-      setIndexing(status?.status === "crawling" || status?.status === "interrupted"); setIndexInterrupted(status?.status === "interrupted");
-      setIndexCount(status?.total_objects || 0);
+      if (viewBucketRef.current !== b) return;
+      applyCrawlStatus(status);
       const fp = status ? `${status.total_objects}:${status.last_crawl_end}:${status.status}` : null;
       if (fp && crawlFpRef.current && fp === crawlFpRef.current) return;  // nothing changed
       crawlFpRef.current = fp;

@@ -166,7 +166,7 @@ export default function BucketList({ onSelect, role, onDashboard }) {
                   </div>
                   <div className="bucket-card-meta">
                     <span>Created: {formatDate(b.created)}</span>
-                    {b.index_status === "complete" && (
+                    {(b.index_status === "complete" || b.indexed) && (
                       <>
                         <span>{(b.object_count || 0).toLocaleString()} objects</span>
                         <span>{formatSize(b.total_size || 0)}</span>
@@ -174,7 +174,7 @@ export default function BucketList({ onSelect, role, onDashboard }) {
                     )}
                     {b.index_status === "crawling" && (
                       <span className="crawl-active" style={{ fontSize: 11, padding: "1px 6px" }}>
-                        Indexing... {(b.object_count || 0).toLocaleString()}
+                        {b.indexed ? "Refreshing index…" : `Indexing... ${(b.object_count || 0).toLocaleString()}`}
                       </span>
                     )}
                     {!b.index_status && (

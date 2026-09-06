@@ -201,3 +201,47 @@ Same three-cycle gate as Run 9, on the head that adds per-bucket FTS rebuild ser
 
 Three consecutive zero-failure gate runs on the PR #32 product code (Runs 9, 10a, 10b). The earlier "failures" were all gate-script timing: racing the post-crawl marker stamp, baselining before a legitimate clean delta, and a fixed 45 s pause that the checkpoint resume (39 s) beat.
 
+
+## Run 11 — SAE-72 zero-write reconcile (PR branch `core/phase-b-zero-write-reconcile`, images `phase-b31` → `phase-b34`)
+
+What changed: no generation sweep, no global prune. Each listing unit settles its key range batch by batch with one ordered index range read (S3 lists in UTF-8 binary order); changed rows updated in place, missing rows deleted as the listing passes them, unchanged rows never written. Aggregate rebuilds skipped when nothing changed; storage snapshot reads finalised counters; deltas write only changed rows; one anchor connection per crawl so per-batch connections stop recreating the WAL.
+
+Write bytes are the process's Linux `/proc/<pid>/io` counter. `anon` = cgroup anonymous memory (what the process holds); `current` also counts the reclaimable page cache of a 6–10 GB database and sits at the 1 GiB limit regardless.
+
+### Unchanged 9.9M bucket, three consecutive reconciles in one pod (`zero_write_gate.sh`, image `phase-b31`)
+
+| Cycle | Wall | Rows | Object rows written | Process writes | Peak anon | Search index | Restarts |
+|---|---|---|---|---|---|---|---|
+| Initial build | 450 s (+48 min post-crawl aggregates + trigram build) | 9,900,000 == truth | 9,900,000 | — | 328 MB | built | 0 |
+| Reconcile 1 | 1,130 s | == truth | **0** | 759 MB¹ | 342 MB | current, rebuild skipped | 0 |
+| Reconcile 2 | 848 s | == truth | **0** | **36 MB** | 323 MB | current, rebuild skipped | 0 |
+| Reconcile 3 | 600 s | == truth | **0** | **36 MB** | 326 MB | current, rebuild skipped | 0 |
+
+¹ Cycle 1's counter window opened while the initial build's asynchronous post-crawl work was still draining; cycles 2–3 are the steady state. Reference points for the same bucket: the pre-PR reconcile was OOM-killed at 1 GiB (crawler analysis §4.3) and took 1,802 s once recovered; an intermediate design of this branch (per-key `IN(...)` lookups on 16 long-lived connections) reached 893 MB anon with 0/40 prefixes done after 27 min before it was replaced.
+
+Gate: every product assertion passed on every cycle. The single non-green line was the gate waiting 600 s for cycle 1 to start while the initial build's post-crawl aggregation ran for 48 min (pre-existing; the aggregation now runs only when the index changed). The gate allows 4,200 s for that wait going forward.
+
+### Correctness gate (`reconcile_gate.sh`, 1M, 1,000 deletions, 5 % injected LIST failures, pod kill mid-reconcile) — image `phase-b31`: **0 failures**; repeated on the final image `phase-b34`: **0 failures** (1,000 deletions pruned to truth, injected failures absorbed, kill mid-reconcile resumed from checkpoints, 0 restarts)
+
+Initial 1,000,000 == truth; after cycle 1 999,000 == truth (deletions pruned, injected failures retried to completion); cycle 2 clean, timestamp advanced, search generation == catalogue generation; kill during the gen-4 reconcile → replacement Ready in 12 s reading `crawling` with `last_crawl_end` unchanged, "Resuming interrupted crawl", complete 20 s later, == truth. 0 restarts, 0 lock/crawl/delta/rebuild errors or tracebacks.
+
+### Same-workload comparison, unchanged 1M bucket (`spec-1m.json`, 2,000 listing units under the lab's 50k split threshold), one reconcile
+
+| Code | Wall | Object rows written | Process writes (listing / total) | Peak anon |
+|---|---|---|---|---|
+| Old (PR #32 head, `phase-b23`) | 48.6 s | 1,000,000 (rewritten) | 1,101 MB / 1,167 MB | 191 MB |
+| This branch, before anchor connection (`phase-b33`) | 42.9 s | **0** | 273 MB / 273 MB | 150 MB |
+| This branch, final (`phase-b34`, anchor connection) | 45.9 s | **0** | **31 MB / 31 MB (−97.2 %)** | 180 MB |
+
+The residual at this layout is per-listing-unit overhead, not per-row: 2,000 units × (checkpoint commit + WAL/shm teardown when the last connection closes). Measured inside the image with 2,000 × 500 objects: 267 MB without an anchor connection, **33 MB** with one (final code).
+
+### In-image measurements (Linux write accounting, disk-backed volume, final code)
+
+| Workload (unchanged) | Process writes | Notes |
+|---|---|---|
+| 960k rows / 16 prefixes, end to end incl. post-crawl step | 5 MB | old code ≈ 1.2 GB |
+| 24M rows / 400 prefixes, end to end | 116 MB | listing 337 s |
+| 2,000 prefixes × 500 objects, end to end | 33 MB | 267 MB before the anchor connection |
+| Peak process memory over idle, 16 concurrent prefixes (macOS) | +17 MB | old code +168 MB |
+
+Per post-crawl step at 960k rows (each is a GROUP BY over every row): folder_stats 88 MB, prefix_children 89 MB, storage snapshot 89 MB → now skipped / 0 MB when the reconcile changed nothing.
