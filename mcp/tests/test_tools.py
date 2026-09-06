@@ -12,6 +12,7 @@ Sairo API client and auth. Each test validates:
 import os
 import sys
 
+import time
 import pytest
 
 # Ensure mcp module is on path
@@ -342,5 +343,5 @@ class TestAuth:
 
     def test_session_staleness(self, admin_session):
         assert admin_session.is_stale is False
-        admin_session.cached_at = 0  # Force stale
+        admin_session.cached_at = time.monotonic() - admin_session.CACHE_TTL - 1  # force stale (0 is not stale on a freshly booted runner: monotonic starts near 0)
         assert admin_session.is_stale is True

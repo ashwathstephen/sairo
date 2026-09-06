@@ -59,6 +59,7 @@ app = FastAPI()
 # ── API Rate Limiting ──────────────────────────────────────────────────────
 RATE_LIMIT = os.environ.get("RATE_LIMIT", "120/minute")
 UPLOAD_RATE_LIMIT = os.environ.get("UPLOAD_RATE_LIMIT", "30/minute")
+LOGIN_RATE_LIMIT = os.environ.get("LOGIN_RATE_LIMIT", "10/minute")   # per-route limit on the login endpoints (the e2e stack raises it)
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[RATE_LIMIT])
 app.state.limiter = limiter
@@ -249,7 +250,7 @@ async def endpoint_routing_middleware(request: Request, call_next):
 _login_attempts: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
 LOGIN_RATE_WINDOW = 300  # 5 minutes
-LOGIN_RATE_MAX = 10      # max attempts per window
+LOGIN_RATE_MAX = int(os.environ.get("LOGIN_RATE_MAX", "10"))   # max attempts per window (the e2e stack raises it: 50+ browser tests log in from one IP)
 
 def _check_login_rate(ip: str):
     """Raise 429 if IP has exceeded login attempt limit."""
@@ -3452,7 +3453,7 @@ class UpdateUserRequest(BaseModel):
     role: str
 
 @app.post("/api/auth/login")
-@limiter.limit("10/minute")
+@limiter.limit(LOGIN_RATE_LIMIT)
 def auth_login(req: LoginRequest, request: Request):
     _check_login_rate(request.client.host)
     with _get_users_db() as db:
@@ -3483,7 +3484,7 @@ def auth_login(req: LoginRequest, request: Request):
     return response
 
 @app.post("/api/auth/login-s3")
-@limiter.limit("10/minute")
+@limiter.limit(LOGIN_RATE_LIMIT)
 def auth_login_s3(req: LoginS3Request, request: Request):
     """Authenticate by validating S3 credentials directly.
     Calls list_buckets() with the provided access key / secret key.
