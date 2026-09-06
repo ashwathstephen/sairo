@@ -171,3 +171,33 @@ A Python-level thread dump (temporary local patch, never committed — the fault
 | Process RSS after | 345 MB |
 | Index size | 10.06 GB (the shadow table needs the old index's space only until the swap) |
 
+## Run 9 — PR #32 (truthful states), final image `phase-b22`: layouts re-timed + three-cycle reconcile gate
+
+Layouts (four buckets concurrently, 40 ms/page, 1 CPU): druid **19.3 s**, flat **27.9 s**, hive **33.0 s**, wide **222.8 s**; the wide layout's first delta with bounded discovery **42.4 s** (356 s before the `DELTA_MAX_NODES` frontier cap; it is reported `degraded: discovery:truncated`, so it never claims a full refresh).
+
+`reconcile_gate.sh` (1M-object druid bucket, `FULL_CRAWL_INTERVAL=240`, `RECRAWL_INTERVAL=60`, verified in the pod) — **RESULT: 0 failure(s)**:
+
+| Step | Observed |
+|---|---|
+| Initial crawl | 1,000,000 rows in 40–42 s, `complete`, rows == simulator truth |
+| Cycle 1: 1,000 keys deleted at the provider + 5 % injected LIST failures | reconcile 192.9–228.7 s → `complete`, **999,000 rows == truth** (per-page retries absorbed the injected failures; a terminal failure would have ended `degraded`) |
+| Cycle 2: clean reconcile | `complete`, rows == truth, `last_crawl_end` advanced, `last_error` cleared, search generation == catalogue generation |
+| Cycle 3: pod killed mid-reconcile (after the generation bumped) | `interrupted` after restart, resumed from checkpoints, `last_crawl_end` unchanged across the kill, then `complete`, rows == truth, timestamp advanced only after the resumed crawl finished |
+| Whole run | 0 unplanned restarts; 0 lock errors, crawl/delta errors, rebuild failures or unexpected tracebacks |
+
+Gate-script lessons recorded on the way: the search marker is stamped by the post-crawl step seconds after `complete` (wait for it, do not race it); a clean delta legitimately advances `last_crawl_end` between cycles (baseline immediately before the kill); Kubernetes rejects duplicate env names, so chart-managed variables must be set through their values, not `extraEnv`.
+
+## Run 10 — PR #32 current head (3324384 product code, image `phase-b23`): reconcile gate ×2, both **0 failures**
+
+Same three-cycle gate as Run 9, on the head that adds per-bucket FTS rebuild serialisation. Two runs: one with the post-kill state read at pod-Ready, one with the completion-aware check (a finished resume is accepted only with a strictly advanced success timestamp).
+
+| Step | Observed (both runs) |
+|---|---|
+| Initial crawl | 1,000,000 rows in 40–42 s, complete, == truth |
+| Cycle 1: 1,000 deletions + 5 % injected LIST failures | 999,000 == truth in 200–238 s |
+| Cycle 2: clean | complete, == truth, timestamp advanced, error cleared, search generation == catalogue generation |
+| Cycle 3: kill during the gen-4 reconcile | replacement Ready in 11–12 s reading `crawling` with `last_crawl_end` unchanged; "Resuming interrupted crawl"; complete 30 s later, == truth, timestamp advanced only then |
+| Whole run | 0 unplanned restarts; 0 lock errors, crawl/delta errors, rebuild failures, unexpected tracebacks |
+
+Three consecutive zero-failure gate runs on the PR #32 product code (Runs 9, 10a, 10b). The earlier "failures" were all gate-script timing: racing the post-crawl marker stamp, baselining before a legitimate clean delta, and a fixed 45 s pause that the checkpoint resume (39 s) beat.
+

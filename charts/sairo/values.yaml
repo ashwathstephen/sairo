@@ -62,8 +62,11 @@ auth:
 telemetry:
   enabled: true
 
-# Extra environment variables for the backend container (crawler tuning knobs such as
-# SUBPREFIX_SPLIT_MIN_OBJECTS, RECRAWL_INTERVAL, ...), in Kubernetes env syntax.
+# Extra environment variables for the backend container, in Kubernetes env syntax — for variables the
+# chart does not manage (crawler knobs such as SUBPREFIX_SPLIT_MIN_OBJECTS, FULL_CRAWL_INTERVAL,
+# DELTA_MAX_NODES). Chart-managed variables (RECRAWL_INTERVAL → crawler.recrawlInterval, S3_*, AUTH_*, ...)
+# must be set through their values: a duplicate env name is rejected by the API server, and the
+# chart fails at render time with the variable's name if you try.
 extraEnv: []
 
 # Crawler Configuration

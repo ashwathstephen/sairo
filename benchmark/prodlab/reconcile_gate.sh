@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Truthful-state gate: three full reconciles of a 1M-object bucket with 1,000 deletions, 5 % injected
+# LIST failures and one pod kill mid-reconcile. Every step is ASSERTED; exit code = number of failures.
+#   ./reconcile_gate.sh <image-tag>      (FULL_CRAWL_INTERVAL=240, RECRAWL_INTERVAL=60 via extraEnv)
+set -u
+TAG=$1; HERE=$(cd "$(dirname "$0")" && pwd); B=rec-1m; FAILS=0
+say(){ echo "[$(date +%T)] $*"; }
+pass(){ say "PASS: $*"; }
+fail(){ say "FAIL: $*"; FAILS=$((FAILS+1)); }
+check(){ if eval "$1"; then pass "$2"; else fail "$2 (got: $(eval "echo $3" 2>/dev/null))"; fi; }
+kubectl config use-context kind-sairo-lab >/dev/null
+# Set the intervals BEFORE the variant deploy (which reuses release values). No --wait here: a pod
+# still terminating from a previous run made the waited upgrade time out and the settings were
+# silently dropped, so cycle 2/3 waited on a 3600 s reconcile interval.
+# RECRAWL_INTERVAL is chart-managed → its value; FULL_CRAWL_INTERVAL is not → extraEnv (a duplicate env name
+# is rejected by the API server, which is how two earlier gate runs lost their intervals).
+helm upgrade sairo "$HERE/../../charts/sairo" -n lab --reuse-values \
+  --set-string 'extraEnv[0].name=SUBPREFIX_SPLIT_MIN_OBJECTS,extraEnv[0].value=50000' \
+  --set-string 'extraEnv[1].name=FULL_CRAWL_INTERVAL,extraEnv[1].value=240' \
+  --set crawler.recrawlInterval=60 || { echo "helm upgrade (intervals) failed"; exit 1; }
+"$HERE/run_variant.sh" "$TAG" "$HERE/spec-1m.json" --for 900 >/dev/null 2>&1
+ENVS=$(kubectl -n lab exec deploy/sairo -- sh -c 'echo "$FULL_CRAWL_INTERVAL/$RECRAWL_INTERVAL"' 2>/dev/null)
+[ "$ENVS" = "240/60" ] || { echo "FAIL: pod intervals are '$ENVS', expected 240/60 — gate cannot time its cycles"; exit 1; }
+sim(){ kubectl -n lab exec deploy/s3sim -- python3 -c "import json,urllib.request as u; r=u.Request('http://127.0.0.1:9001$1', data=json.dumps($2).encode() if '$2' else None, headers={'Content-Type':'application/json'}); print(u.urlopen(r).read().decode())" 2>/dev/null; }
+truth(){ sim "/truth?bucket=$B" '' | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])"; }
+field(){ kubectl -n lab exec -i deploy/sairo -- python3 - <<PY 2>/dev/null
+import sqlite3; c=sqlite3.connect("/data/$B.db")
+r=dict(zip(("status","total_objects","last_crawl_end","last_attempt_at","last_error","gen","fts_gen"), c.execute("SELECT status,total_objects,last_crawl_end,last_attempt_at,last_error,current_crawl_gen,fts_ready_gen FROM crawl_status").fetchone()))
+r["rows"]=c.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+print(r["$1"])
+PY
+}
+snapshot(){ echo "status=$(field status) rows=$(field rows) end=$(field last_crawl_end) attempt=$(field last_attempt_at) err=$(field last_error) gen=$(field gen) fts=$(field fts_gen)"; }
+completes(){ kubectl -n lab logs deploy/sairo --tail=50000 2>/dev/null | grep -c "\[default:$B\] Crawl complete"; }
+wait_for(){ # wait_for "<cmd returning 0 when done>" <seconds> <label>
+  local t=0; while [ $t -lt $2 ]; do eval "$1" && return 0; sleep 10; t=$((t+10)); done; fail "$3 timed out after $2 s"; return 1; }
+
+say "initial: $(snapshot)"
+check '[ "$(field status)" = complete ]' "initial crawl complete" '$(field status)'
+check '[ "$(field rows)" = "$(truth)" ]' "initial rows == truth" '$(field rows) vs $(truth)'
+END0=$(field last_crawl_end)
+
+# ── cycle 1: 1,000 keys deleted at the provider + 5 % LIST failures during the reconcile ──
+say "cycle 1: delete 1000 keys, error_rate 0.05"; sim /delete_positions '{"bucket":"'$B'","n":1000}' >/dev/null; sim /error_rate '{"rate":0.05}' >/dev/null
+N=$(completes); wait_for '[ "$(completes)" -gt '$N' ]' 900 "cycle 1 reconcile"
+say "after cycle 1: $(snapshot)"; sim /error_rate '{"rate":0}' >/dev/null
+S1=$(field status)
+check '[ "$S1" = degraded ] || [ "$S1" = complete ]' "cycle 1 ends degraded (failed prefixes) or complete, never anything else" '$S1'
+if [ "$S1" = degraded ]; then
+  check '[ "$(field last_crawl_end)" = "$END0" ]' "degraded did not advance last_crawl_end" '$(field last_crawl_end)'
+  check '[ -n "$(field last_error)" ] && [ "$(field last_error)" != None ]' "degraded recorded last_error" '$(field last_error)'
+  check '[ "$(field rows)" -ge "$(truth)" ]' "degraded pruned nothing it could not vouch for (rows >= truth)" '$(field rows) vs $(truth)'
+fi
+
+# ── cycle 2: clean reconcile → complete, rows == truth, success timestamp advanced ──
+N=$(completes); wait_for '[ "$(field status)" = complete ] && [ "$(completes)" -gt '$N' ]' 900 "cycle 2 clean reconcile"
+say "after cycle 2: $(snapshot)"
+check '[ "$(field status)" = complete ]' "cycle 2 complete" '$(field status)'
+check '[ "$(field rows)" = "$(truth)" ]' "cycle 2 rows == truth (deletions pruned)" '$(field rows) vs $(truth)'
+check '[[ "$(field last_crawl_end)" > "$END0" ]]' "cycle 2 advanced last_crawl_end" '$(field last_crawl_end) vs $END0'
+check '[ "$(field last_error)" = None ]' "cycle 2 cleared last_error" '$(field last_error)'
+# The search marker is stamped by the post-crawl rebuild step seconds after 'complete' (search_ready is
+# honestly false meanwhile): wait for it, bounded, instead of racing it.
+wait_for '[ "$(field fts_gen)" = "$(field gen)" ]' 300 "search generation catching up to catalogue generation"
+check '[ "$(field fts_gen)" = "$(field gen)" ]' "search generation matches catalogue generation" '$(field fts_gen) vs $(field gen)'
+GEN2=$(field gen)
+
+# ── cycle 3: kill the pod mid-RECONCILE (a full crawl bumps current_crawl_gen; deltas do not, and both
+#    show status=crawling, so the generation is the only reliable signal) ──
+wait_for '[ "$(field gen)" -gt '$GEN2' ]' 600 "cycle 3 full reconcile start (generation > $GEN2)"
+sleep 15; END_PRE=$(field last_crawl_end)   # baseline immediately before the kill (a clean delta may have advanced it since cycle 2)
+say "killing pod mid-reconcile: $(snapshot)"
+kubectl -n lab delete pod -l app=sairo --wait=false >/dev/null
+# Check the state the moment the replacement is Ready, not after a fixed pause: checkpoint resume is
+# fast enough that a 45 s pause let the resumed crawl finish before the "still interrupted" check.
+kubectl -n lab rollout status deploy/sairo --timeout=180s >/dev/null 2>&1
+say "after restart: $(snapshot)"
+S3=$(field status); END_NOW=$(field last_crawl_end)
+check 'kubectl -n lab logs deploy/sairo --tail=2000 2>/dev/null | grep -q "Resuming interrupted crawl"' "resumed from checkpoints" ''
+# Completion-aware: checkpoint resume can finish before this check runs. Either the crawl is still
+# running (state interrupted/crawling, success timestamp untouched) or it has already completed
+# (timestamp advanced past the pre-kill value). What is never acceptable: 'complete' with an
+# unchanged or earlier timestamp, or any state that pretends the kill itself was a success.
+if [ "$S3" = complete ]; then
+  check '[[ "$END_NOW" > "$END_PRE" ]]' "resume completed before the check; last_crawl_end advanced only via the resumed crawl" '$END_NOW vs $END_PRE'
+else
+  check '[ "$S3" = interrupted ] || [ "$S3" = crawling ]' "after the kill the state is interrupted/crawling, not complete" '$S3'
+  check '[ "$END_NOW" = "$END_PRE" ]' "kill did not advance last_crawl_end" '$END_NOW vs $END_PRE'
+fi
+wait_for '[ "$(field status)" = complete ]' 900 "cycle 3 completion after resume"
+say "after cycle 3: $(snapshot)"
+check '[ "$(field rows)" = "$(truth)" ]' "cycle 3 rows == truth after kill+resume" '$(field rows) vs $(truth)'
+check '[[ "$(field last_crawl_end)" > "$END_PRE" ]]' "cycle 3 advanced last_crawl_end only after the resumed crawl completed" '$(field last_crawl_end) vs $END_PRE'
+check '[ "$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")" = 0 ]' "no unplanned container restarts (OOM/crash)" '$(kubectl -n lab get pod -l app=sairo -o jsonpath="{.items[0].status.containerStatuses[0].restartCount}")'
+# Operational failures only. "Prefix ... failed after N retries" (ERROR level) is the EXPECTED outcome of the injected
+# LIST failures in cycle 1, and every pod logs one trapped passlib/bcrypt version traceback at startup.
+LOGS=$(kubectl -n lab logs deploy/sairo --tail=50000 2>/dev/null)
+OPS=$(echo "$LOGS" | grep -cE "database is locked|Crawl error:|Delta crawl error|FTS rebuild failed|Post-crawl .* failed")
+TB=$(( $(echo "$LOGS" | grep -c "^Traceback") - $(echo "$LOGS" | grep -A5 "^Traceback" | grep -c "module 'bcrypt'") ))
+check '[ "$OPS" = 0 ] && [ "$TB" -le 0 ]' "zero lock errors, crawl/delta errors, rebuild failures, or unexpected tracebacks" '"ops=$OPS tracebacks=$TB"'
+say "RESULT: $FAILS failure(s)"; exit $FAILS

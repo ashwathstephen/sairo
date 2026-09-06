@@ -78,6 +78,7 @@ def register(mcp):
                         "crawling": "Currently indexing...",
                         "interrupted": "Index interrupted by a restart — resuming (serving last valid index)",
                         "complete": "Up to date",
+                        "degraded": "Partial — some folders failed to list; serving what was indexed, retrying next cycle",
                         "idle": "Up to date",
                     }.get(status, status)
 
