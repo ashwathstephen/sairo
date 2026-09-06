@@ -1439,6 +1439,17 @@ def _fts_consistent(db):
         return False
 
 
+def _seed_offset(i, n, dur):
+    """Spread seeded schedules over the bucket's OWN cadence: bucket i of n falls due at (1 - i/n) of it.
+    Large buckets (full crawl slower than LARGE_BUCKET_SECONDS) reconcile every FULL_CRAWL_INTERVAL; small
+    ones recrawl every RECRAWL_INTERVAL — staggering small buckets by the large interval put all but one of
+    them past their cadence at the first tick. Seeding every bucket as fresh "now" made all reconciles fall
+    due together (the upgrade rehearsal: 12 concurrent, 791 MB anonymous in a 1 GiB pod). last_full is moved
+    back by this amount, so the first pass streams and each bucket's own completion keeps them apart after."""
+    interval = FULL_CRAWL_INTERVAL if dur > LARGE_BUCKET_SECONDS else RECRAWL_INTERVAL
+    return interval * i / max(1, n)
+
+
 def _seed_from_existing(prev_status, total, dur):
     """Startup trusts an existing index as fresh only when its last full crawl finished COMPLETE.
     Interrupted/degraded resume from their checkpoints; an error is retried; anything else is a first crawl."""
@@ -2911,7 +2922,8 @@ def startup():
             try:
                 client = _s3_manager.get_client(eid)
                 resp = client.list_buckets()
-                for b in resp.get("Buckets", []):
+                buckets = resp.get("Buckets", [])
+                for i, b in enumerate(buckets):
                     name = b["Name"]
                     _init_db(name, eid)
                     # If this bucket already has an index from a previous run, seed the
@@ -2939,7 +2951,7 @@ def startup():
                         # an interrupted index marked it "fresh" and left large buckets delta-only for
                         # FULL_CRAWL_INTERVAL while a third of the data was missing.
                         if _seed_from_existing(prev_status, total, dur):
-                            _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time(), "duration": dur}
+                            _crawl_meta[f"{eid}:{name}"] = {"last_full": time.time() - _seed_offset(i, len(buckets), dur), "duration": dur}
                             seeded = True
                             # legacy NULL marker → verify and backfill; stale → repair now. Off the startup
                             # thread and bounded by the rebuild pool (the check reads the whole index).
