@@ -1399,11 +1399,26 @@ def _rebuild_fts_locked(bucket, eid, t0):
         log.warning("[%s:%s] FTS rebuild failed (old index kept): %s", eid, bucket, e)
 
 
+def _fts_rebuild_concurrency():
+    """How many trigram rebuilds may run at once. Default 1: a 9.9M-row build holds ~330 MB and the chart's
+    pod limit is 1 GiB; raise it once two simultaneous multi-million-object builds have been measured.
+    Clamped to at least 1 — 0 would park every rebuild thread forever."""
+    return max(1, int(os.environ.get("FTS_REBUILD_CONCURRENCY", "1")))
+
+
+FTS_REBUILD_CONCURRENCY = _fts_rebuild_concurrency()
+_fts_rebuild_slots = threading.BoundedSemaphore(FTS_REBUILD_CONCURRENCY)
+
+
 def _rebuild_fts_async(bucket, endpoint_id=None, done=None):
-    """Run _rebuild_fts on a daemon thread; `done()` runs when it finishes, success or not. Returns the thread."""
+    """Run _rebuild_fts on a daemon thread; `done()` runs when it finishes, success or not. Returns the thread.
+    At most FTS_REBUILD_CONCURRENCY rebuilds run at once: the first boot after an upgrade can find every
+    bucket's index in need of one (the upgrade rehearsal did), so unbounded threads would take a 1 GiB pod
+    down before the first reconcile."""
     def _run():
         try:
-            _rebuild_fts(bucket, endpoint_id)
+            with _fts_rebuild_slots:
+                _rebuild_fts(bucket, endpoint_id)
         finally:
             if done is not None:
                 done()
