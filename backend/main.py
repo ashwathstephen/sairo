@@ -98,17 +98,25 @@ async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/assets/") and response.status_code == 200:   # content-hashed bundles: cache for a year;
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # a 404 mid-rollout must not be cached that long
-    connect_src = ("connect-src 'self' " + _csp_connect_origins()).rstrip()
+    s3 = _csp_connect_origins()   # every configured S3 endpoint origin (and its subdomains)
+    connect_src = f"connect-src 'self' {s3}".rstrip()
     logo = urlparse(os.environ.get("APP_LOGO", ""))   # a documented external logo URL must be allowed by img-src
-    img_src = "img-src 'self' blob: data:" + (f" {logo.scheme}://{logo.netloc}" if logo.scheme in ("http", "https") and logo.netloc else "")
+    logo_origin = f" {logo.scheme}://{logo.netloc}" if logo.scheme in ("http", "https") and logo.netloc else ""
+    # Previews load presigned URLs straight from the bucket — <img> for images, <iframe> for PDFs and
+    # text, <video>/<audio> for media — so those directives need the S3 origins too, or every preview
+    # fails with "Failed to load image" (issue #27).
+    img_src = f"img-src 'self' blob: data:{logo_origin} {s3}".rstrip()
+    media_src = f"media-src 'self' blob: {s3}".rstrip()
+    frame_src = f"frame-src 'self' blob: {s3}".rstrip()
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         f"{img_src}; "
+        f"{media_src}; "
         f"{connect_src}; "
-        "frame-src blob:;"
+        f"{frame_src};"
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
