@@ -34,6 +34,7 @@ services:
       # Test stack only: every spec logs in from the same IP within minutes, which the production
       # defaults (10 logins / 5 min, 120 requests / min) are meant to stop.
       LOGIN_RATE_MAX: "1000"
+      LOGIN_RATE_LIMIT: "1000/minute"
       RATE_LIMIT: "10000/minute"
     depends_on:
       minio:
