@@ -13,6 +13,18 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.7.0
+
+**The crawler keeps up with the storage instead of re-copying it** (Core program: SAE-63…SAE-85)
+
+- **Zero-write reconcile** — a periodic recrawl now writes only what changed. On an unchanged 1M-object bucket: 31 MB of disk writes instead of 1,101 MB and 0 rows rewritten instead of 1,000,000; on 9.9M objects: 36 MB and a 326 MB memory peak where 3.6.0 was OOM-killed at 1 GiB. Deleted objects leave the index as soon as their prefix is listed; a failed prefix never prunes.
+- **Truthful crawl states** — `interrupted`, `degraded`, "finishing search index", `last_error`/`last_attempt_at`; a restart mid-crawl resumes from checkpoints instead of reporting a partial index as complete; a delta crawl can no longer fake freshness.
+- **Faster first crawls** — single-prefix buckets are split into sub-prefixes so all 16 listing threads work (9.9M objects in ~8 minutes on the lab provider).
+- **Steadier memory** — search-index rebuilds run one at a time by default; seeded reconciles are spread across their interval instead of stampeding after a restart.
+- **UI** — a recrawl of a served index shows as a refresh, not a first build; a full disk no longer flips indexed buckets to "Index error".
+- **Re-applied from 3.6.1–3.6.3** — activation metric recorded on the search request, complete white-label branding (server-side title/manifest/theme colour, share page accent), no-cache SPA shell with immutable hashed assets.
+- **CI** — backend, frontend, MCP, CLI and a browser critical path now run on every pull request.
+
 ## v3.6.0
 
 **OpenID Connect SSO + a real per-bucket access UI** (issue #9)
