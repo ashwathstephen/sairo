@@ -2537,7 +2537,12 @@ DELTA_NEWEST_K = int(os.environ.get("DELTA_NEWEST_K", "2"))             # partit
 DELTA_MAX_DEPTH = int(os.environ.get("DELTA_MAX_DEPTH", "12"))          # safety cap on walk depth
 DELTA_LIST_CONCURRENCY = int(os.environ.get("DELTA_LIST_CONCURRENCY", "16"))  # parallel S3 list calls per level
 DELTA_MAX_NODES = int(os.environ.get("DELTA_MAX_NODES", "2000"))        # safety cap on folders visited per delta
-DELTA_NODE_MAX_PAGES = int(os.environ.get("DELTA_NODE_MAX_PAGES", "2"))   # delimiter pages per discovery node before the node is left unvisited (partial)
+# Delimiter pages per discovery node before the node is left unvisited (and the walk
+# reported partial). Two pages caps a node at 2,000 children, which silently truncated
+# every delta on a bucket whose datasources hold 2,500 interval prefixes: the walk could
+# never certify a complete refresh. Three pages covers 2,500 while still bounding a
+# genuinely oversized node.
+DELTA_NODE_MAX_PAGES = int(os.environ.get("DELTA_NODE_MAX_PAGES", "3"))
 DELTA_ROOT_MAX_PAGES = int(os.environ.get("DELTA_ROOT_MAX_PAGES", "200"))  # root listing pages per delta before the delta is degraded (200k entries; production has 62k-prefix roots)
 
 

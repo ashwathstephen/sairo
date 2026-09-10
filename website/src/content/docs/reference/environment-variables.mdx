@@ -57,6 +57,7 @@ These bound how the incremental delta crawler discovers new data on large bucket
 | `LIST_CONCURRENCY` | `16` | **Total** S3 list calls in flight across every bucket the crawler is working on, covering initial crawls, reconciles, delta discovery and delta target listing. The per-bucket settings below bound one bucket; this bounds the process. Raising it raises peak memory, since each in-flight listing holds a response body and a batch buffer. Clamped to `S3_MAX_POOL_CONNECTIONS` so concurrent lists never overflow the connection pool. |
 | `DELTA_LIST_CONCURRENCY` | `16` | Parallel S3 list calls per level during delta discovery, within the `LIST_CONCURRENCY` total |
 | `DELTA_MAX_NODES` | `2000` | Safety cap on folders visited per delta crawl |
+| `DELTA_NODE_MAX_PAGES` | `3` | Delimiter pages read per folder during delta discovery, at 1,000 entries each. A folder wider than this is left unvisited and the delta is reported partial rather than certified. Raise it if a single folder legitimately holds more than 3,000 children. |
 
 ## LDAP
 
