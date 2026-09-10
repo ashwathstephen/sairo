@@ -1492,7 +1492,17 @@ def _seed_from_existing(prev_status, total, dur):
     return total > 0 and dur > 0 and prev_status == "complete"
 
 
-def _ensure_fts_ready(bucket, endpoint_id=None):
+def _reserve_rebuild(crawl_key):
+    """Claim a bucket for a search-index rebuild. False when a crawl, a delta or another rebuild
+    already owns it. Callers that get True must release it."""
+    with _crawl_lock:
+        if crawl_key in _rebuilding or crawl_key in _crawling:
+            return False
+        _rebuilding.add(crawl_key)
+        return True
+
+
+def _ensure_fts_ready(bucket, endpoint_id=None, reserved=False):
     """Startup repair for a served index whose search generation is absent or stale.
 
     Databases from before fts_ready_gen existed have NULL: the marker is backfilled only after SQLite's
@@ -1507,10 +1517,8 @@ def _ensure_fts_ready(bucket, endpoint_id=None):
     # reserving afterwards left a window: a delta started during the check, the rebuild then took
     # the write lock for its swap, and the delta died with "database is locked" (seen in production
     # on the first boot after 3.7.0, when every bucket is verified at once).
-    with _crawl_lock:
-        if crawl_key in _rebuilding:
-            return None
-        _rebuilding.add(crawl_key)
+    if not reserved and not _reserve_rebuild(crawl_key):
+        return None
     def _release():
         with _crawl_lock:
             _rebuilding.discard(crawl_key)
@@ -2639,10 +2647,12 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             # for a real bucket is guesswork.
             for _cur, _kids in listed:
                 if _kids is None:
-                    log.warning("[%s:%s] Delta discovery bound hit at '%s': more than %d pages "
-                                "(%d children); raise DELTA_NODE_MAX_PAGES to cover it",
-                                endpoint_id or "default", bucket, _cur[:80], DELTA_NODE_MAX_PAGES,
-                                DELTA_NODE_MAX_PAGES * 1000)
+                    # MaxKeys counts returned entries, objects and rolled-up prefixes together,
+                    # so the page budget does not translate to a child count. All this proves is
+                    # that results remained after the budget ran out.
+                    log.warning("[%s:%s] Delta discovery bound hit at '%s': still more results after "
+                                "%d pages of %d entries; raise DELTA_NODE_MAX_PAGES to cover it",
+                                endpoint_id or "default", bucket, _cur[:80], DELTA_NODE_MAX_PAGES, 1000)
             nxt = []
             for cur, children in listed:
                 if children is None:
@@ -3031,7 +3041,16 @@ def startup():
                             seeded = True
                             # legacy NULL marker → verify and backfill; stale → repair now. Off the startup
                             # thread and bounded by the rebuild pool (the check reads the whole index).
-                            _rebuild_pool.submit(_ensure_fts_ready, name, eid)
+                            # Reserve before submitting, not when the worker starts: these checks
+                            # share a 4-worker pool, so a queued bucket could begin a delta first
+                            # and then collide when its check finally ran.
+                            if _reserve_rebuild(f"{eid}:{name}"):
+                                try:
+                                    _rebuild_pool.submit(_ensure_fts_ready, name, eid, reserved=True)
+                                except Exception:
+                                    with _crawl_lock:
+                                        _rebuilding.discard(f"{eid}:{name}")
+                                    raise
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
                                      eid, name, f"{total:,}")
                     except Exception:
