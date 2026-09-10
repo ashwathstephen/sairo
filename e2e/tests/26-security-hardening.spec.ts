@@ -15,7 +15,7 @@ test.describe('Security Hardening', () => {
       expect(csp).toBeDefined();
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("script-src 'self'");
-      expect(csp).toContain("frame-src blob:");
+      expect(csp).toMatch(/frame-src [^;]*blob:/);   // may also name the S3 endpoint origins (previews, #27)
     });
 
     test('26.2 responses include X-Content-Type-Options header', async ({ page }) => {

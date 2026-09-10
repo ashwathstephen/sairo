@@ -100,17 +100,21 @@ test.describe('File Operations', () => {
   });
 
   test('4.4 previews image file', async ({ page }) => {
+    // #40: the preview loads a presigned URL straight from the S3 origin, so this
+    // fails if CSP img-src omits that origin. A broken image is still "visible",
+    // so assert the browser actually decoded pixels rather than accepting a
+    // placeholder or the error fallback.
     const pngRow = page.locator(`${SEL.tableRow}:has-text("sample.png")`).first();
-    if (await pngRow.isVisible().catch(() => false)) {
-      await pngRow.locator(`${SEL.colActions} button`).first().click();
-      await expect(page.locator(SEL.modal)).toBeVisible();
-      // Image preview: img may fail to load if presigned URL uses Docker-internal hostname
-      // Accept either a visible img or the error fallback
-      const img = page.locator(`${SEL.modal} img`);
-      const errorFallback = page.locator(`${SEL.modal} :has-text("Failed to load")`);
-      await expect(img.or(errorFallback).first()).toBeVisible({ timeout: 10_000 });
-      await page.locator(SEL.modalDismissButton).click();
-    }
+    await expect(pngRow).toBeVisible({ timeout: 15_000 });
+    await pngRow.locator(`${SEL.colActions} button`).first().click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+    const img = page.locator(`${SEL.modal} img`).first();
+    await expect(img).toBeVisible({ timeout: 10_000 });
+    await expect.poll(
+      () => img.evaluate((el: HTMLImageElement) => (el.complete ? el.naturalWidth : 0)),
+      { timeout: 15_000, message: 'presigned image preview never decoded' },
+    ).toBeGreaterThan(0);
+    await page.locator(SEL.modalDismissButton).click();
   });
 
   test('4.5 opens ObjectInfo modal on info button click', async ({ page }) => {

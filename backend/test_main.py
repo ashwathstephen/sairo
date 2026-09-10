@@ -728,10 +728,20 @@ class TestBrandingInjection:
 
     def test_csp_allows_the_configured_external_logo(self, client, monkeypatch):
         csp = client.get("/healthz").headers["content-security-policy"]
-        assert "img-src 'self' blob: data:;" in csp
+        assert "img-src 'self' blob: data: http://" in csp and "cdn.example.com" not in csp
         monkeypatch.setenv("APP_LOGO", "https://cdn.example.com/brand/logo.svg")
         csp = client.get("/healthz").headers["content-security-policy"]
-        assert "img-src 'self' blob: data: https://cdn.example.com;" in csp
+        assert "img-src 'self' blob: data: https://cdn.example.com http://" in csp
+
+    def test_csp_allows_presigned_previews_from_the_s3_endpoint(self, client):
+        """Issue #27: previews load presigned bucket URLs into <img>/<iframe>/<video>; the CSP must name the
+        configured S3 endpoint origin in img-src, media-src and frame-src, not only connect-src."""
+        import re
+        csp = client.get("/healthz").headers["content-security-policy"]
+        origins = _main_module()._csp_connect_origins(); assert origins, "test app has a configured S3 endpoint"
+        for directive in ("img-src", "media-src", "frame-src", "connect-src"):
+            value = re.search(directive + r" ([^;]*)", csp).group(1)
+            assert all(o in value for o in origins.split()), f"{directive}: {value}"
 
     def test_manifest_branded(self):
         m = _main_module()
