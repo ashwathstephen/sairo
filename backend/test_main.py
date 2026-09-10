@@ -1217,3 +1217,75 @@ class TestBucketDiscoveryErrors:
         with m._bucket_list_cache_lock:
             m._bucket_list_cache["data"] = None
             m._bucket_list_cache["ts"] = 0
+
+
+class TestGlobalListingBudget:
+    """The per-bucket listing pools used to multiply: 12 concurrent bucket tasks x 16
+    listing threads each put a 19-bucket / 15.5M-object deployment past a 1 GiB limit
+    (OOMKilled). One budget now caps how many prefixes are listed at once across every
+    bucket, which is what bounds the in-flight buffers."""
+
+    def _main(self):
+        return _main_module()
+
+    def test_concurrent_listing_stays_within_the_budget_across_buckets(self, app):
+        import threading as _t
+        m = self._main()
+        # More buckets than the budget, so the root-discovery listings alone breach it
+        # if any discovery path runs outside the semaphore.
+        budget = 3
+        buckets = [f"budget{c}" for c in "abcde"]
+        prefixes = [f"p{i}/" for i in range(4)]
+
+        for b in buckets:
+            for suffix in ("", "-wal", "-shm"):
+                try: os.remove(m._db_path(b, "default") + suffix)
+                except FileNotFoundError: pass
+            m._init_db(b, "default")
+            with m._get_db(b, "default") as db:
+                db.execute("DELETE FROM objects"); db.execute("DELETE FROM crawl_progress")
+                db.execute("DELETE FROM discovered_prefixes")
+                db.commit()
+
+        live = 0
+        peak = 0
+        guard = _t.Lock()
+
+        def list_objects_v2(**p):
+            # Every LIST counts, delimiter ones included. Measuring only the object
+            # listings hid three unguarded discovery paths behind a green test.
+            nonlocal live, peak
+            with guard:
+                live += 1
+                peak = max(peak, live)
+            try:
+                time.sleep(0.05)   # hold the slot long enough for real overlap
+                if "Delimiter" in p:
+                    kids = [{"Prefix": q} for q in prefixes] if not p.get("Prefix") else []
+                    return {"CommonPrefixes": kids, "Contents": [], "IsTruncated": False}
+                return {"Contents": [{"Key": f"{p['Prefix']}{i}", "Size": 1,
+                                      "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                      "ETag": '"e"'} for i in range(2)],
+                        "IsTruncated": False}
+            finally:
+                with guard:
+                    live -= 1
+
+        client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
+        with patch.object(m, "_list_slots", _t.BoundedSemaphore(budget)), \
+             patch.object(m._s3_manager, "get_client", return_value=client), \
+             patch.object(m._rebuild_pool, "submit"):
+            threads = [_t.Thread(target=m._run_crawl, args=(b, "default")) for b in buckets]
+            for t in threads: t.start()
+            for t in threads: t.join(timeout=120)
+
+        assert peak > 1, "test did not actually run listings concurrently"
+        assert peak <= budget, f"listing concurrency {peak} exceeded the global budget {budget}"
+        for b in buckets:
+            with m._get_db(b, "default") as db:
+                assert db.execute("SELECT COUNT(*) FROM objects").fetchone()[0] == len(prefixes) * 2, b
+
+    def test_budget_never_exceeds_the_connection_pool(self):
+        m = self._main()
+        pool = int(os.environ.get("S3_MAX_POOL_CONNECTIONS", "32"))
+        assert 1 <= m.LIST_CONCURRENCY <= pool, (m.LIST_CONCURRENCY, pool)

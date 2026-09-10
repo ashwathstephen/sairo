@@ -1209,6 +1209,19 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
 
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
 _crawl_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="crawler")
+# One listing budget shared by every bucket, because the per-bucket pools multiply: 12
+# concurrent bucket tasks each opening 16 listing threads is 192 listers in flight, which
+# took a 19-bucket / 15.5M-object deployment past a 1 GiB limit (OOMKilled) and overflowed
+# the boto connection pool. The memory lives in the in-flight buffers — response bodies,
+# parsed key lists, batch accumulators — so bounding how many list at once is what bounds
+# the pod. Throughput does not suffer: listing is capped by XML parsing and SQLite in a
+# single process well below this many threads. Kept at or under S3_MAX_POOL_CONNECTIONS so
+# concurrent LISTs never queue on the connection pool.
+LIST_CONCURRENCY = max(1, min(
+    int(os.environ.get("LIST_CONCURRENCY", "16")),
+    int(os.environ.get("S3_MAX_POOL_CONNECTIONS", "32")),
+))
+_list_slots = threading.BoundedSemaphore(LIST_CONCURRENCY)
 _rebuild_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rebuild")
 _crawling = {}       # crawl_key -> timestamp when crawl started
 _crawl_futures = {}  # crawl_key -> Future of the running _run_crawl (for cancel/shutdown)
@@ -1728,23 +1741,24 @@ def _run_crawl(bucket, endpoint_id=None):
         root_failed = False     # the root listing raised: root-level objects were not reconciled this attempt
         try:
             token = None
-            while True:
-                params = {"Bucket": bucket, "Delimiter": "/", "MaxKeys": 1000}
-                if token:
-                    params["ContinuationToken"] = token
-                resp = client.list_objects_v2(**params)
-                for cp in resp.get("CommonPrefixes", []):
-                    known_prefixes.add(cp["Prefix"])
-                root_files.extend(resp.get("Contents", []))
-                if not resp.get("IsTruncated", False):
-                    root_complete = True
-                    break
-                token = resp.get("NextContinuationToken")
-                # On recrawl with saved prefixes, skip slow full pagination
-                if existing_count > 0 and len(saved) > 0:
-                    log.info("[%s:%s] Recrawl: using %d saved prefixes (skipping full pagination)",
-                             eid, bucket, len(known_prefixes))
-                    break
+            with _list_slots:   # discovery lists too: it must share the budget, not sit outside it
+                while True:
+                    params = {"Bucket": bucket, "Delimiter": "/", "MaxKeys": 1000}
+                    if token:
+                        params["ContinuationToken"] = token
+                    resp = client.list_objects_v2(**params)
+                    for cp in resp.get("CommonPrefixes", []):
+                        known_prefixes.add(cp["Prefix"])
+                    root_files.extend(resp.get("Contents", []))
+                    if not resp.get("IsTruncated", False):
+                        root_complete = True
+                        break
+                    token = resp.get("NextContinuationToken")
+                    # On recrawl with saved prefixes, skip slow full pagination
+                    if existing_count > 0 and len(saved) > 0:
+                        log.info("[%s:%s] Recrawl: using %d saved prefixes (skipping full pagination)",
+                                 eid, bucket, len(known_prefixes))
+                        break
         except Exception as e:
             log.warning("[%s:%s] Delimiter listing failed, using known prefixes only: %s", eid, bucket, e)
             root_files = []
@@ -1778,8 +1792,9 @@ def _run_crawl(bucket, endpoint_id=None):
             for p in list(prefixes):
                 direct = []
                 try:
-                    kids = _list_children(client, bucket, p, max_children=SUBPREFIX_SPLIT_MAX_CHILDREN,
-                                          max_pages=3, contents=direct)
+                    with _list_slots:   # expansion is discovery listing: same budget
+                        kids = _list_children(client, bucket, p, max_children=SUBPREFIX_SPLIT_MAX_CHILDREN,
+                                              max_pages=3, contents=direct)
                 except Exception as e:
                     expanded.add(p)  # Keep original on error
                     log.warning("[%s:%s] Sub-prefix discovery failed for '%s': %s", eid, bucket, p, e)
@@ -1847,7 +1862,8 @@ def _run_crawl(bucket, endpoint_id=None):
             if existing_count > 0:
                 # The whole bucket is one listing unit: everything the listing does not return is pruned.
                 rc = _PrefixReconcile(bucket, eid, crawl_gen, _write_lock(crawl_key))
-                total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=rc.batch, should_stop=stop)
+                with _list_slots:   # an unsplittable bucket is still one lister against the budget
+                    total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=rc.batch, should_stop=stop)
                 stale_count = rc.finish(); written_total = rc.written
                 index_changed = written_total > 0 or stale_count > 0
             else:
@@ -1857,7 +1873,8 @@ def _run_crawl(bucket, endpoint_id=None):
                             "INSERT OR REPLACE INTO objects (key,size,last_modified,etag,prefix,depth,crawl_gen) VALUES (?,?,?,?,?,?,?)",
                             [row + (crawl_gen,) for row in batch])
                         db.commit()
-                total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb, should_stop=stop)
+                with _list_slots:
+                    total_count = _crawl_prefix(bucket, "", endpoint_id=eid, batch_callback=_simple_batch_cb, should_stop=stop)
             if stale_count:
                 log.info("[%s:%s] Removed %s stale keys", eid, bucket, f"{stale_count:,}")
             with _get_db(bucket, eid) as db:
@@ -1933,12 +1950,14 @@ def _run_crawl(bucket, endpoint_id=None):
         def _crawl_unit(p):
             """List one prefix in a pool thread. Returns (objects listed, stale rows pruned, rows written)."""
             if not incremental:
-                return _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=_initial_batch_cb, should_stop=stop), 0, 0
+                with _list_slots:   # the initial crawl is the heaviest user of the budget
+                    return _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=_initial_batch_cb, should_stop=stop), 0, 0
             rc = _PrefixReconcile(bucket, eid, crawl_gen, wlock, lo=p, hi=_prefix_upper(p))
             def cb(batch):
                 rc.batch(batch)
                 _note_progress()
-            count = _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=cb, should_stop=stop)
+            with _list_slots:   # global budget, not per-bucket: see LIST_CONCURRENCY
+                count = _crawl_prefix(bucket, p, endpoint_id=eid, batch_callback=cb, should_stop=stop)
             return count, rc.finish(), rc.written   # reached only when every page of p was listed
 
         with ThreadPoolExecutor(max_workers=16, thread_name_prefix=f"pfx-{bucket[:8]}") as pool:
@@ -1946,8 +1965,16 @@ def _run_crawl(bucket, endpoint_id=None):
             for future in futures:
                 p = futures[future]
                 try:
-                    # Scale timeout: 900s base + 1s per 5000 objects expected
-                    prefix_timeout = max(900, 900 + existing_count // 5000)
+                    # 900s base + 1s per 5000 objects expected, plus room to sit in the
+                    # global listing queue: under the budget a healthy prefix can wait behind
+                    # other buckets, and waiting is not failing. This is only a backstop
+                    # against a non-cooperative hang. The real bounds are the stall detector,
+                    # which cancels a crawl that completes no prefix or batch for
+                    # _CRAWL_STALL_SECONDS and so lets this future finish, and boto's own
+                    # read timeout on each call. (_CRAWL_MAX_DURATION does NOT cap a
+                    # progressing crawl; it only frees a stale lock once the future is gone.)
+                    # A prefix that trips this is retried sequentially below, never dropped.
+                    prefix_timeout = max(900, 900 + existing_count // 5000) + _CRAWL_STALL_SECONDS * 2
                     count, pruned, written = future.result(timeout=prefix_timeout)
                     total_new += count
                     stale_count += pruned
@@ -2579,7 +2606,10 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             # Per-node bound too: the node budget alone did not bound remote work — one node with
             # 20,000 children cost 20 LIST pages and 20,000 names in memory. A node wider than
             # DELTA_NODE_MAX_PAGES pages is left unvisited and the walk is reported partial.
-            listed = list(ex.map(lambda p: (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES)), frontier))
+            def _list_one(p):
+                with _list_slots:   # deltas share the budget with full crawls
+                    return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES))
+            listed = list(ex.map(_list_one, frontier))
             nxt = []
             for cur, children in listed:
                 if children is None:
@@ -2647,7 +2677,8 @@ def _delta_crawl(bucket, endpoint_id):
     root_objs = []
     new_tops = set()
     try:
-        kids = _list_children(client, bucket, "", max_pages=DELTA_ROOT_MAX_PAGES, contents=root_objs)
+        with _list_slots:   # delta root discovery is a listing too
+            kids = _list_children(client, bucket, "", max_pages=DELTA_ROOT_MAX_PAGES, contents=root_objs)
         if kids is None:
             failed_targets.append("root")   # oversized root listing: what we saw is ingested, but not certified
         else:
@@ -2703,7 +2734,8 @@ def _delta_crawl(bucket, endpoint_id):
         flush(root_objs)
     def _list_or_fail(tp):
         try:
-            res = _delta_list_prefix(client, bucket, tp, sink=flush)
+            with _list_slots:   # delta target listing draws on the same global budget
+                res = _delta_list_prefix(client, bucket, tp, sink=flush)
             if isinstance(res, list):   # a listing helper that returns objects instead of streaming
                 flush(res)
             return tp, True
