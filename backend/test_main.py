@@ -1289,3 +1289,51 @@ class TestGlobalListingBudget:
         m = self._main()
         pool = int(os.environ.get("S3_MAX_POOL_CONNECTIONS", "32"))
         assert 1 <= m.LIST_CONCURRENCY <= pool, (m.LIST_CONCURRENCY, pool)
+
+
+class TestDeltaDiscoveryPaging:
+    """seg-main holds 2,500 interval prefixes per datasource and S3 pages at 1,000, so a
+    two-page cap abandoned every datasource at 2,000 and no delta could ever certify a
+    complete refresh — the bucket reported discovery:truncated forever. Three pages
+    covers 2,500; a genuinely oversized node must still degrade rather than walk it all."""
+
+    def _client(self, n_children):
+        """A delimiter listing of n_children prefixes, paged at 1,000 like S3."""
+        pages = [[f"ds/i{i:05d}/" for i in range(s, min(s + 1000, n_children))]
+                 for s in range(0, n_children, 1000)]
+        calls = {"n": 0}
+        def list_objects_v2(**p):
+            i = calls["n"]; calls["n"] += 1
+            return {"CommonPrefixes": [{"Prefix": q} for q in pages[i]], "Contents": [],
+                    "IsTruncated": i + 1 < len(pages),
+                    "NextContinuationToken": f"t{i}" if i + 1 < len(pages) else None}
+        c = MagicMock(); c.list_objects_v2.side_effect = list_objects_v2
+        return c, calls
+
+    def test_2500_children_complete_within_the_default_page_budget(self):
+        m = _main_module()
+        assert m.DELTA_NODE_MAX_PAGES >= 3, "2,500 children need three 1,000-key pages"
+        c, calls = self._client(2500)
+        kids = m._list_children(c, "seg-main", "ds/", max_pages=m.DELTA_NODE_MAX_PAGES)
+        assert kids is not None, "a 2,500-child node must not be abandoned as oversized"
+        assert len(kids) == 2500 and calls["n"] == 3
+
+    def test_two_pages_would_have_truncated_it(self):
+        """Pins the regression: the old default could not see past 2,000."""
+        m = _main_module()
+        c, _ = self._client(2500)
+        assert m._list_children(c, "seg-main", "ds/", max_pages=2) is None
+
+    def test_genuinely_oversized_node_still_degrades(self):
+        m = _main_module()
+        c, calls = self._client(4000)
+        assert m._list_children(c, "seg-main", "ds/", max_pages=m.DELTA_NODE_MAX_PAGES) is None
+        assert calls["n"] == m.DELTA_NODE_MAX_PAGES, "must stop at the budget, not read on"
+
+    def test_newest_branches_are_chosen_from_a_full_2500_listing(self):
+        """Seeing all 2,500 is only useful if the newest partitions are the ones followed."""
+        m = _main_module()
+        c, _ = self._client(2500)
+        kids = m._list_children(c, "seg-main", "ds/", max_pages=m.DELTA_NODE_MAX_PAGES)
+        chosen = sorted(kids, key=m._natural_key)[-m.DELTA_NEWEST_K:]
+        assert chosen == ["ds/i02498/", "ds/i02499/"], chosen
