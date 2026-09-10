@@ -1189,3 +1189,31 @@ class TestS3KeyAuth:
         finally:
             with m._s3_manager._lock:
                 m._s3_manager._endpoints.pop("ep-b", None)
+
+
+class TestBucketDiscoveryErrors:
+    """#44: an object-scoped token (Cloudflare R2's 'Object Read & Write') can list
+    objects but not buckets. The raw AccessDenied told users nothing, so both the
+    add-endpoint path and the bucket list now explain what to change."""
+
+    def test_hint_names_the_r2_token_tier(self):
+        m = _main_module()
+        hint = m._bucket_discovery_error(Exception("An error occurred (AccessDenied) when calling ListBuckets"))
+        assert "cannot list buckets" in hint
+        assert "Admin Read" in hint
+        # An unrelated failure is passed through untouched, not mislabelled.
+        assert "Admin Read" not in m._bucket_discovery_error(Exception("Connect timeout on endpoint URL"))
+
+    def test_bucket_listing_explains_denied_discovery(self, client, admin_cookies):
+        from unittest.mock import patch
+        m = _main_module()
+        with m._bucket_list_cache_lock:
+            m._bucket_list_cache["data"] = None
+            m._bucket_list_cache["ts"] = 0
+        with patch.object(m.s3, "list_buckets", side_effect=Exception("An error occurred (AccessDenied) when calling ListBuckets")):
+            r = client.get("/api/buckets", cookies=admin_cookies)
+        assert r.status_code == 502, r.text
+        assert "Admin Read" in r.json()["detail"]
+        with m._bucket_list_cache_lock:
+            m._bucket_list_cache["data"] = None
+            m._bucket_list_cache["ts"] = 0

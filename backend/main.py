@@ -5005,6 +5005,23 @@ def list_endpoints(user: dict = Depends(require_admin)):
         eps.append(d)
     return {"endpoints": eps}
 
+def _bucket_discovery_error(e: Exception) -> str:
+    """Explain a failed ListBuckets instead of passing the raw provider error through.
+
+    Sairo discovers buckets with ListBuckets. Object-scoped credentials can read and
+    list objects inside named buckets but cannot enumerate buckets, so the provider
+    answers AccessDenied and the user is left guessing (#44). Cloudflare R2 is the
+    common case: its "Object Read & Write" token cannot list buckets, only the
+    Admin tiers can.
+    """
+    msg = str(e)[:200]
+    if "AccessDenied" in msg or "not authorized" in msg.lower():
+        return (f"{msg} — these credentials cannot list buckets, which Sairo needs to "
+                "discover them. On Cloudflare R2 that means an Object token: use "
+                "Admin Read & Write, or Admin Read only for read-only browsing.")
+    return msg
+
+
 @app.post("/api/endpoints")
 def create_endpoint(req: EndpointCreateRequest, user: dict = Depends(require_admin)):
     """Add a new S3 endpoint. Tests connectivity before saving."""
@@ -5021,7 +5038,7 @@ def create_endpoint(req: EndpointCreateRequest, user: dict = Depends(require_adm
         )
         test_client.list_buckets()
     except Exception as e:
-        raise HTTPException(400, f"Connection test failed: {str(e)[:200]}")
+        raise HTTPException(400, f"Connection test failed: {_bucket_discovery_error(e)}")
     with _get_users_db() as db:
         existing = db.execute("SELECT id FROM s3_endpoints WHERE id=?", (req.id,)).fetchone()
         if existing:
@@ -5151,19 +5168,25 @@ _BUCKET_LIST_TTL = 30  # seconds
 def list_buckets(user: dict = Depends(get_current_user)):
     now = time.time()
     s3_creds = _user_creds_ctx.get(None)
-    if s3_creds and s3_creds.get("ak"):
-        # AUTH_MODE=s3: list with the USER's keys so the provider IAM scopes the result.
-        # Never use the shared cache here — it's keyed by nothing and would leak one
-        # user's bucket list to another.
-        resp = s3.list_buckets()
-    else:
-        with _bucket_list_cache_lock:
-            if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
-                resp = _bucket_list_cache["data"]
-            else:
-                resp = s3.list_buckets()
-                _bucket_list_cache["data"] = resp
-                _bucket_list_cache["ts"] = now
+    try:
+        if s3_creds and s3_creds.get("ak"):
+            # AUTH_MODE=s3: list with the USER's keys so the provider IAM scopes the result.
+            # Never use the shared cache here — it's keyed by nothing and would leak one
+            # user's bucket list to another.
+            resp = s3.list_buckets()
+        else:
+            with _bucket_list_cache_lock:
+                if _bucket_list_cache["data"] and now - _bucket_list_cache["ts"] < _BUCKET_LIST_TTL:
+                    resp = _bucket_list_cache["data"]
+                else:
+                    resp = s3.list_buckets()
+                    _bucket_list_cache["data"] = resp
+                    _bucket_list_cache["ts"] = now
+    except Exception as e:
+        # A raw AccessDenied here reads as "Sairo is broken". Say what is actually
+        # wrong: the credentials cannot enumerate buckets (#44).
+        log.warning("Bucket listing failed: %s", e)
+        raise HTTPException(502, _bucket_discovery_error(e))
     # Non-admin: only show buckets with explicit permissions. S3-key users are already
     # scoped by their keys above, so no extra filter (their role is admin).
     allowed = None
