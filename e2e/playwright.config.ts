@@ -18,6 +18,13 @@ export default defineConfig({
 
   use: {
     baseURL: process.env.SAIRO_URL || 'http://localhost:8888',
+    // The stack signs presigned URLs for the compose-internal host "minio:9000",
+    // which the host browser cannot resolve. Map it to the published port so
+    // previews really load, as they do in production where S3 is reachable.
+    // The Host header stays "minio:9000", so the SigV4 signature still matches.
+    launchOptions: {
+      args: [`--host-resolver-rules=MAP minio:9000 127.0.0.1:${process.env.MINIO_PORT || 9100}`],
+    },
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on',
