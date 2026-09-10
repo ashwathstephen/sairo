@@ -456,8 +456,12 @@ class TestAsyncFTSRebuild:
         source = inspect.getsource(_rebuild_fts_async)
         assert "Thread" in source
         assert "daemon=True" in source
-        body = inspect.getsource(sys.modules["main"]._rebuild_fts_locked)
+        m = sys.modules["main"]
+        # The swap lives in its own helper so the bucket write lock wraps exactly the transaction.
+        body = inspect.getsource(m._rebuild_fts_locked) + inspect.getsource(m._fts_swap)
         assert "objects_fts_new" in body and "RENAME TO objects_fts" in body and "FTS_REBUILD_CHUNK" in body   # shadow-table, bounded-memory rebuild
+        assert "_write_lock" in inspect.getsource(m._rebuild_fts_locked), \
+            "the swap must hold the bucket write lock, or a concurrent delta races it in SQLite"
 
     def test_fts_rebuild_runs_in_background(self):
         """Test that _rebuild_fts_async actually rebuilds the FTS index."""

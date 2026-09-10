@@ -1384,6 +1384,21 @@ def _rebuild_fts(bucket, endpoint_id=None):
         _rebuild_fts_locked(bucket, eid, t0)
 
 
+def _fts_swap(db, start_max):
+    """Catch up rows written during the build, then swap the shadow table in. One transaction, and
+    the caller holds the bucket's write lock so a concurrent delta waits instead of erroring."""
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO objects_fts_new(rowid, key) SELECT rowid, key FROM objects WHERE rowid > ?", (start_max,))
+    for trg in ("objects_fts_ai", "objects_fts_ad", "objects_fts_au"):
+        db.execute(f"DROP TRIGGER IF EXISTS {trg}")
+    db.execute("DROP TABLE IF EXISTS objects_fts")
+    db.execute("ALTER TABLE objects_fts_new RENAME TO objects_fts")
+    _create_fts_triggers(db)
+    # Persisted readiness: the search index now covers this generation (survives restarts).
+    db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen WHERE id=1")
+    db.commit()
+
+
 def _rebuild_fts_locked(bucket, eid, t0):
     try:
         with _get_db(bucket, eid) as db:
@@ -1408,16 +1423,13 @@ def _rebuild_fts_locked(bucket, eid, t0):
                 last = hi
             # One transaction: catch up rows added during the build, swap the tables, recreate the sync
             # triggers (they name objects_fts, so the table cannot be dropped underneath them).
-            db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT INTO objects_fts_new(rowid, key) SELECT rowid, key FROM objects WHERE rowid > ?", (start_max,))
-            for trg in ("objects_fts_ai", "objects_fts_ad", "objects_fts_au"):
-                db.execute(f"DROP TRIGGER IF EXISTS {trg}")
-            db.execute("DROP TABLE IF EXISTS objects_fts")
-            db.execute("ALTER TABLE objects_fts_new RENAME TO objects_fts")
-            _create_fts_triggers(db)
-            # Persisted readiness: the search index now covers this generation (survives restarts).
-            db.execute("UPDATE crawl_status SET fts_ready_gen = current_crawl_gen WHERE id=1")
-            db.commit()
+            #
+            # Hold the bucket's write lock across it. BEGIN IMMEDIATE takes SQLite's write lock and
+            # keeps it through a DROP of a multi-million-row FTS table, which on a 10M-object bucket
+            # outlasts busy_timeout. Without this lock a concurrent delta write does not queue behind
+            # the swap in-process, it races it in SQLite and fails with "database is locked".
+            with _write_lock(f"{eid}:{bucket}"):
+                _fts_swap(db, start_max)
         log.info("[%s:%s] FTS index rebuilt in %.1fs (shadow table, %d-row chunks)", eid, bucket, time.monotonic() - t0, FTS_REBUILD_CHUNK)
     except Exception as e:
         log.warning("[%s:%s] FTS rebuild failed (old index kept): %s", eid, bucket, e)
@@ -1490,29 +1502,36 @@ def _ensure_fts_ready(bucket, endpoint_id=None):
     full reconcile. Returns the rebuild thread when one was started, else None."""
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
-    try:
-        with _get_db(bucket, eid) as db:
-            row = db.execute("SELECT status, fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
-            if not row or row["status"] not in ("complete", "degraded"):
-                return None
-            ready, gen = row["fts_ready_gen"], (row["current_crawl_gen"] or 0)
-            healthy = _fts_healthy(db)
-            if ready == gen and healthy:
-                return None
-            if ready is None and healthy and _fts_consistent(db):
-                db.execute("UPDATE crawl_status SET fts_ready_gen=? WHERE id=1", (gen,))
-                db.commit()
-                log.info("[%s:%s] Search index verified against the catalogue; readiness marker backfilled for generation %d", eid, bucket, gen)
-                return None
-    except Exception as e:
-        log.warning("[%s:%s] Could not check search readiness: %s", eid, bucket, e)
-        return None
-    log.info("[%s:%s] Search index generation %s behind catalogue generation %d (or unhealthy) — repairing now", eid, bucket, ready, gen)
+    # Reserve the bucket BEFORE the integrity check, not after it. The check reads the whole
+    # catalogue, and _queue_delta_crawl only declines while the key sits in _rebuilding, so
+    # reserving afterwards left a window: a delta started during the check, the rebuild then took
+    # the write lock for its swap, and the delta died with "database is locked" (seen in production
+    # on the first boot after 3.7.0, when every bucket is verified at once).
     with _crawl_lock:
+        if crawl_key in _rebuilding:
+            return None
         _rebuilding.add(crawl_key)
     def _release():
         with _crawl_lock:
             _rebuilding.discard(crawl_key)
+    try:
+        with _get_db(bucket, eid) as db:
+            row = db.execute("SELECT status, fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
+            if not row or row["status"] not in ("complete", "degraded"):
+                _release(); return None
+            ready, gen = row["fts_ready_gen"], (row["current_crawl_gen"] or 0)
+            healthy = _fts_healthy(db)
+            if ready == gen and healthy:
+                _release(); return None
+            if ready is None and healthy and _fts_consistent(db):
+                db.execute("UPDATE crawl_status SET fts_ready_gen=? WHERE id=1", (gen,))
+                db.commit()
+                log.info("[%s:%s] Search index verified against the catalogue; readiness marker backfilled for generation %d", eid, bucket, gen)
+                _release(); return None
+    except Exception as e:
+        log.warning("[%s:%s] Could not check search readiness: %s", eid, bucket, e)
+        _release(); return None
+    log.info("[%s:%s] Search index generation %s behind catalogue generation %d (or unhealthy) — repairing now", eid, bucket, ready, gen)
     return _rebuild_fts_async(bucket, eid, done=_release)
 
 
@@ -2615,6 +2634,15 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
                 with _list_slots:   # deltas share the budget with full crawls
                     return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES))
             listed = list(ex.map(_list_one, frontier))
+            # Name the folder that tripped the bound. Without this, "discovery:truncated" says the
+            # walk was partial but not which prefix or what to raise, so sizing DELTA_NODE_MAX_PAGES
+            # for a real bucket is guesswork.
+            for _cur, _kids in listed:
+                if _kids is None:
+                    log.warning("[%s:%s] Delta discovery bound hit at '%s': more than %d pages "
+                                "(%d children); raise DELTA_NODE_MAX_PAGES to cover it",
+                                endpoint_id or "default", bucket, _cur[:80], DELTA_NODE_MAX_PAGES,
+                                DELTA_NODE_MAX_PAGES * 1000)
             nxt = []
             for cur, children in listed:
                 if children is None:
