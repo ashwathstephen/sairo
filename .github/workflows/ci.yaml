@@ -100,6 +100,6 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # 29 runs last: it changes the admin password and restores it, so a failure
       # part-way through must not cascade into the specs after it.
-      - run: npx playwright test 01-auth.spec.ts 02-bucket-list.spec.ts 03-object-browser.spec.ts 04-file-operations.spec.ts 26-security-hardening.spec.ts 29-change-password.spec.ts --project=chromium --project=no-auth
+      - run: npx playwright test --project=chromium --project=no-auth
       - if: always()
         run: docker compose -f docker-compose.test.yml down -v
