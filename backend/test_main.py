@@ -51,6 +51,19 @@ def client(app):
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_rate():
+    """Login attempts are counted per IP in a module-level dict, and every test in
+    this suite shares one client IP. Without a reset the 10-per-window cap is used
+    up by earlier tests and unrelated logins start coming back 429."""
+    try:
+        import backend.main as m
+    except ModuleNotFoundError:
+        import main as m
+    m._login_attempts.clear()
+    yield
+
+
 @pytest.fixture(scope="module")
 def admin_cookies(client):
     """Login as admin and return cookies."""
@@ -1101,3 +1114,34 @@ class TestCrawlerCorrectness:
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
         assert client.get(f"/api/buckets/{bucket}/crawl-status", cookies=admin_cookies).json()["full_crawl_complete"] is True
+
+
+class TestChangeOwnPassword:
+    """Issue #29: a user changes their own password; wrong current → 401, short → 400, and the new one logs in."""
+
+    def test_change_password_flow(self, client, admin_cookies):
+        client.post("/api/auth/users", json={"username": "pw-user", "password": "firstpass1", "role": "viewer"}, cookies=admin_cookies)
+        cookies = client.post("/api/auth/login", json={"username": "pw-user", "password": "firstpass1"}).cookies
+        assert client.put("/api/auth/change-password", json={"old_password": "wrong", "new_password": "secondpass2"}, cookies=cookies).status_code == 401
+        assert client.put("/api/auth/change-password", json={"old_password": "firstpass1", "new_password": "short"}, cookies=cookies).status_code == 400
+        assert client.put("/api/auth/change-password", json={"old_password": "firstpass1", "new_password": "secondpass2"}, cookies=cookies).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "pw-user", "password": "firstpass1"}).status_code == 401
+        assert client.post("/api/auth/login", json={"username": "pw-user", "password": "secondpass2"}).status_code == 200
+
+    def test_s3_key_session_is_not_reported_as_local(self, client, admin_cookies):
+        """An S3-key session has no local account, so /auth/me must not let the UI offer
+        a password change. A missing auth_source used to be read as 'local'."""
+        from unittest.mock import patch, MagicMock
+        from datetime import datetime, timezone
+        m = _main_module()
+        ok = MagicMock()
+        ok.list_buckets.return_value = {"Buckets": [{"Name": "b", "CreationDate": datetime(2026, 1, 1, tzinfo=timezone.utc)}]}
+        with patch.object(m._s3_manager, "_build_client", return_value=ok):
+            cookies = client.post("/api/auth/login-s3", json={"access_key": "AKIAKEY12345", "secret_key": "s3cr3t"}).cookies
+        me = client.get("/api/auth/me", cookies=cookies).json()
+        assert me["auth_source"] == "s3key", me
+        assert me["totp_enabled"] is False
+        # A real local account still reports "local" so the button keeps working for it.
+        client.post("/api/auth/users", json={"username": "local-src", "password": "localpass1", "role": "viewer"}, cookies=admin_cookies)
+        local = client.post("/api/auth/login", json={"username": "local-src", "password": "localpass1"}).cookies
+        assert client.get("/api/auth/me", cookies=local).json()["auth_source"] == "local"

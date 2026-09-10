@@ -13,7 +13,10 @@ function endpointBase() {
 
 // ── Auth-aware fetch wrapper ─────────────────────────────
 // On 401 (session expired), dispatch event so App can show re-login dialog
-async function apiFetch(url, options) {
+// sessionExpiryOn401: a 401 normally means the session died. A few endpoints use
+// 401 to reject a credential the user just typed (changing your own password with
+// the wrong current one). Those must not sign the user out mid-form.
+async function apiFetch(url, options, { sessionExpiryOn401 = true } = {}) {
   let res;
   try {
     res = await fetch(url, options);
@@ -25,7 +28,7 @@ async function apiFetch(url, options) {
     }
     throw err;
   }
-  if (res.status === 401) {
+  if (res.status === 401 && sessionExpiryOn401) {
     window.dispatchEvent(new CustomEvent("session-expired"));
     throw new Error("Session expired");
   }
@@ -904,6 +907,17 @@ export async function ldapLogin(username, password) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || "LDAP login failed");
   }
+  return res.json();
+}
+
+export async function changePassword(oldPassword, newPassword) {
+  // A wrong current password comes back 401; surface it in the form rather than
+  // treating it as an expired session and signing the user out.
+  const res = await apiFetch(`${BASE}/auth/change-password`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  }, { sessionExpiryOn401: false });
   return res.json();
 }
 

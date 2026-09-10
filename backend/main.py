@@ -752,7 +752,10 @@ def get_current_user(request: Request):
         # Reject 2FA pending tokens for normal endpoints
         if payload.get("purpose") == "2fa":
             raise HTTPException(401, "2FA verification required")
-        return {"username": payload["sub"], "role": payload["role"]}
+        # s3ak marks a session authenticated by the user's own S3 keys: no local
+        # account row exists, so there is no local password or TOTP to manage.
+        return {"username": payload["sub"], "role": payload["role"],
+                "s3_session": bool(payload.get("s3ak"))}
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "Session expired")
     except jwt.InvalidTokenError:
@@ -3605,10 +3608,15 @@ def auth_logout(request: Request):
 @app.get("/api/auth/me")
 def auth_me(user: dict = Depends(get_current_user), request: Request = None):
     result = {"username": user["username"], "role": user["role"]}
+    # An S3-key session has no users row; report it explicitly so the UI never
+    # offers local-password or TOTP management for it.
+    if user.get("s3_session"):
+        result["auth_source"] = "s3key"
+        result["totp_enabled"] = False
     # Include 2FA status + which provider this account authenticates against
     with _get_users_db() as db:
         row = db.execute("SELECT totp_enabled, auth_source FROM users WHERE username=?", (user["username"],)).fetchone()
-    if row:
+    if row and not user.get("s3_session"):
         result["totp_enabled"] = bool(row["totp_enabled"])
         result["auth_source"] = row["auth_source"] or "local"
     token = request.cookies.get("access_token") if request else None

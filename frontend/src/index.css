@@ -3471,6 +3471,16 @@ button.btn-danger:disabled { background: var(--bg-surface); }
 .tfa-badge-off { background: var(--bg-secondary); color: var(--text-light); }
 
 /* ── Login Auth Toggle (sliding pill) ────────────────── */
+.login-ldap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: -4px 0 10px;
+  cursor: pointer;
+}
+
 .login-auth-toggle {
   position: relative;
   display: flex;

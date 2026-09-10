@@ -26,6 +26,7 @@ export const SEL = {
   userRole: '.user-role',
   logoutButton: '.user-badge button:has-text("Logout")',
   tfaHeaderButton: '.user-badge button:has-text("2FA")',
+  passwordHeaderButton: '.user-badge button:has-text("Password")',
   bucketNameSpan: '.bucket-name',
 
   // ── Admin buttons (bucket list view) ──
