@@ -5,6 +5,10 @@ import { loginAsAdmin } from '../helpers/wait-helpers';
 // Issue #29: a user changes their own password from the header, and the new password works.
 test.describe('Change own password', () => {
   test.describe.configure({ mode: 'serial' });
+  // These tests sign in and out themselves, so they must start from a signed-out
+  // browser. The chromium project otherwise loads a stored admin session and the
+  // login form is never rendered.
+  test.use({ storageState: { cookies: [], origins: [] } });
 
   async function changePassword(page, current: string, next: string) {
     await page.locator(SEL.passwordHeaderButton).click();
