@@ -22,7 +22,6 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 - **A rebuild killed mid-flight left its whole shadow index on disk.** `objects_fts_new` was dropped
   only when that same bucket next rebuilt, which might be never. It is now dropped as part of the
   post-crawl maintenance.
-
 - **A bucket whose search-index rebuild never finished stopped being crawled at all.** `_rebuilding`
   had no timestamp and no ceiling — unlike a crawl, which has both — so a rebuild that hung left the
   bucket refused by every later crawl and delta for the life of the process. Observed in production:
