@@ -1337,3 +1337,93 @@ class TestDeltaDiscoveryPaging:
         kids = m._list_children(c, "seg-main", "ds/", max_pages=m.DELTA_NODE_MAX_PAGES)
         chosen = sorted(kids, key=m._natural_key)[-m.DELTA_NEWEST_K:]
         assert chosen == ["ds/i02498/", "ds/i02499/"], chosen
+
+
+class TestRebuildDeltaRace:
+    """Production hit `database is locked` on the first boot after 3.7.0: startup verified every
+    bucket's search index while the 120s scheduler fired deltas at the same buckets. The guard that
+    should stop that was reserved only AFTER the integrity check, which reads the whole catalogue,
+    so a delta could start inside that window and then lose the race to the rebuild's swap."""
+
+    def test_verification_reserves_the_bucket_before_checking(self, app):
+        """A delta queued while the check is still running must be declined."""
+        import threading as _t
+        m = _main_module()
+        bucket, key = "racebkt", "default:racebkt"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=1, current_crawl_gen=9")
+            db.commit()
+        m._rebuilding.discard(key)
+
+        during_check = {}
+        real_healthy = m._fts_healthy
+        def slow_healthy(db):
+            # stand-in for the real check reading millions of rows
+            during_check["delta_allowed"] = m._queue_delta_crawl(bucket, "default")
+            return real_healthy(db)
+
+        started = []
+        with patch.object(m, "_fts_healthy", slow_healthy), \
+             patch.object(m, "_rebuild_fts_async", lambda b, e, done=None: started.append(b)):
+            m._ensure_fts_ready(bucket, "default")
+
+        assert during_check.get("delta_allowed") is False, \
+            "a delta was allowed to start while the search index was being verified"
+        m._rebuilding.discard(key)
+
+    def test_every_early_return_releases_the_bucket(self, app):
+        """Reserving early must not strand the key when no rebuild is needed."""
+        m = _main_module()
+        bucket, key = "racebkt2", "default:racebkt2"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:   # already current => early return, no rebuild
+            db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=3, current_crawl_gen=3")
+            db.commit()
+        m._rebuilding.discard(key)
+        with patch.object(m, "_fts_healthy", lambda db: True):
+            assert m._ensure_fts_ready(bucket, "default") is None
+        assert key not in m._rebuilding, "bucket left reserved after an early return"
+
+    def test_a_delta_already_running_blocks_the_readiness_check(self, app):
+        """The inverse race: startup queues 22 checks onto a 4-worker pool, so a bucket can start a
+        delta while its own check is still queued. When the worker finally runs it must not rebuild
+        underneath the delta."""
+        m = _main_module()
+        bucket, key = "racebkt3", "default:racebkt3"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=1, current_crawl_gen=9")
+            db.commit()
+        m._rebuilding.discard(key)
+        m._crawling[key] = time.time()          # a delta started while this check sat in the queue
+        started = []
+        try:
+            with patch.object(m, "_rebuild_fts_async", lambda b, e, done=None: started.append(b)):
+                m._ensure_fts_ready(bucket, "default")
+            assert started == [], "rebuilt underneath a running delta"
+            assert key not in m._rebuilding
+        finally:
+            m._crawling.pop(key, None)
+
+    def test_reservation_happens_at_submit_not_at_worker_start(self, app):
+        """Reserving only when the worker starts leaves the queue window open."""
+        m = _main_module()
+        key = "default:racebkt4"
+        m._rebuilding.discard(key); m._crawling.pop(key, None)
+        assert m._reserve_rebuild(key) is True
+        try:
+            # while reserved, neither a delta nor a second rebuild may claim the bucket
+            assert m._queue_delta_crawl("racebkt4", "default") is False
+            assert m._reserve_rebuild(key) is False
+        finally:
+            m._rebuilding.discard(key)
