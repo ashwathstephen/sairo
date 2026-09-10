@@ -1231,9 +1231,11 @@ class TestGlobalListingBudget:
     def test_concurrent_listing_stays_within_the_budget_across_buckets(self, app):
         import threading as _t
         m = self._main()
+        # More buckets than the budget, so the root-discovery listings alone breach it
+        # if any discovery path runs outside the semaphore.
         budget = 3
-        buckets = ["budgeta", "budgetb"]
-        prefixes = [f"p{i}/" for i in range(8)]
+        buckets = [f"budget{c}" for c in "abcde"]
+        prefixes = [f"p{i}/" for i in range(4)]
 
         for b in buckets:
             for suffix in ("", "-wal", "-shm"):
@@ -1250,15 +1252,17 @@ class TestGlobalListingBudget:
         guard = _t.Lock()
 
         def list_objects_v2(**p):
-            if "Delimiter" in p:
-                kids = [{"Prefix": q} for q in prefixes] if not p.get("Prefix") else []
-                return {"CommonPrefixes": kids, "Contents": [], "IsTruncated": False}
+            # Every LIST counts, delimiter ones included. Measuring only the object
+            # listings hid three unguarded discovery paths behind a green test.
             nonlocal live, peak
             with guard:
                 live += 1
                 peak = max(peak, live)
             try:
                 time.sleep(0.05)   # hold the slot long enough for real overlap
+                if "Delimiter" in p:
+                    kids = [{"Prefix": q} for q in prefixes] if not p.get("Prefix") else []
+                    return {"CommonPrefixes": kids, "Contents": [], "IsTruncated": False}
                 return {"Contents": [{"Key": f"{p['Prefix']}{i}", "Size": 1,
                                       "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc),
                                       "ETag": '"e"'} for i in range(2)],

@@ -1741,23 +1741,24 @@ def _run_crawl(bucket, endpoint_id=None):
         root_failed = False     # the root listing raised: root-level objects were not reconciled this attempt
         try:
             token = None
-            while True:
-                params = {"Bucket": bucket, "Delimiter": "/", "MaxKeys": 1000}
-                if token:
-                    params["ContinuationToken"] = token
-                resp = client.list_objects_v2(**params)
-                for cp in resp.get("CommonPrefixes", []):
-                    known_prefixes.add(cp["Prefix"])
-                root_files.extend(resp.get("Contents", []))
-                if not resp.get("IsTruncated", False):
-                    root_complete = True
-                    break
-                token = resp.get("NextContinuationToken")
-                # On recrawl with saved prefixes, skip slow full pagination
-                if existing_count > 0 and len(saved) > 0:
-                    log.info("[%s:%s] Recrawl: using %d saved prefixes (skipping full pagination)",
-                             eid, bucket, len(known_prefixes))
-                    break
+            with _list_slots:   # discovery lists too: it must share the budget, not sit outside it
+                while True:
+                    params = {"Bucket": bucket, "Delimiter": "/", "MaxKeys": 1000}
+                    if token:
+                        params["ContinuationToken"] = token
+                    resp = client.list_objects_v2(**params)
+                    for cp in resp.get("CommonPrefixes", []):
+                        known_prefixes.add(cp["Prefix"])
+                    root_files.extend(resp.get("Contents", []))
+                    if not resp.get("IsTruncated", False):
+                        root_complete = True
+                        break
+                    token = resp.get("NextContinuationToken")
+                    # On recrawl with saved prefixes, skip slow full pagination
+                    if existing_count > 0 and len(saved) > 0:
+                        log.info("[%s:%s] Recrawl: using %d saved prefixes (skipping full pagination)",
+                                 eid, bucket, len(known_prefixes))
+                        break
         except Exception as e:
             log.warning("[%s:%s] Delimiter listing failed, using known prefixes only: %s", eid, bucket, e)
             root_files = []
@@ -1791,8 +1792,9 @@ def _run_crawl(bucket, endpoint_id=None):
             for p in list(prefixes):
                 direct = []
                 try:
-                    kids = _list_children(client, bucket, p, max_children=SUBPREFIX_SPLIT_MAX_CHILDREN,
-                                          max_pages=3, contents=direct)
+                    with _list_slots:   # expansion is discovery listing: same budget
+                        kids = _list_children(client, bucket, p, max_children=SUBPREFIX_SPLIT_MAX_CHILDREN,
+                                              max_pages=3, contents=direct)
                 except Exception as e:
                     expanded.add(p)  # Keep original on error
                     log.warning("[%s:%s] Sub-prefix discovery failed for '%s': %s", eid, bucket, p, e)
@@ -1963,11 +1965,16 @@ def _run_crawl(bucket, endpoint_id=None):
             for future in futures:
                 p = futures[future]
                 try:
-                    # Scale timeout: 900s base + 1s per 5000 objects expected. The global
-                    # listing budget can also hold this prefix in a queue behind other
-                    # buckets, so allow for that; the deadline is here to catch a stuck
-                    # prefix, not a waiting one, and the crawl's own 2-hour cap still bounds it.
-                    prefix_timeout = max(900, 900 + existing_count // 5000) + _CRAWL_MAX_DURATION
+                    # 900s base + 1s per 5000 objects expected, plus room to sit in the
+                    # global listing queue: under the budget a healthy prefix can wait behind
+                    # other buckets, and waiting is not failing. This is only a backstop
+                    # against a non-cooperative hang. The real bounds are the stall detector,
+                    # which cancels a crawl that completes no prefix or batch for
+                    # _CRAWL_STALL_SECONDS and so lets this future finish, and boto's own
+                    # read timeout on each call. (_CRAWL_MAX_DURATION does NOT cap a
+                    # progressing crawl; it only frees a stale lock once the future is gone.)
+                    # A prefix that trips this is retried sequentially below, never dropped.
+                    prefix_timeout = max(900, 900 + existing_count // 5000) + _CRAWL_STALL_SECONDS * 2
                     count, pruned, written = future.result(timeout=prefix_timeout)
                     total_new += count
                     stale_count += pruned
@@ -2670,7 +2677,8 @@ def _delta_crawl(bucket, endpoint_id):
     root_objs = []
     new_tops = set()
     try:
-        kids = _list_children(client, bucket, "", max_pages=DELTA_ROOT_MAX_PAGES, contents=root_objs)
+        with _list_slots:   # delta root discovery is a listing too
+            kids = _list_children(client, bucket, "", max_pages=DELTA_ROOT_MAX_PAGES, contents=root_objs)
         if kids is None:
             failed_targets.append("root")   # oversized root listing: what we saw is ingested, but not certified
         else:
