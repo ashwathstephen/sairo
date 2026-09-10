@@ -40,12 +40,23 @@ It is also shown on the R2 overview page under **Account ID**.
 2. Navigate to **R2 > Overview**
 3. Click **Manage R2 API Tokens** in the right sidebar
 4. Click **Create API token**
-5. Set permissions to **Object Read & Write**
-6. Optionally restrict to specific buckets
-7. Click **Create API Token**
-8. Copy the **Access Key ID** and **Secret Access Key**
+5. Set permissions to **Admin Read & Write**, or **Admin Read only** if you want
+   browsing without any writes
+6. Click **Create API Token**
+7. Copy the **Access Key ID** and **Secret Access Key**
 
 Use the Access Key ID as `S3_ACCESS_KEY` and the Secret Access Key as `S3_SECRET_KEY`.
+
+:::caution[Object tokens will not work]
+Sairo discovers your buckets by calling `ListBuckets`. On R2 only the **Admin**
+permission tiers can list buckets. The **Object Read & Write** and **Object Read
+only** tiers can read and list objects inside buckets you name up front, but they
+cannot enumerate buckets, so R2 answers `AccessDenied` and no buckets appear.
+
+If you need to restrict Sairo to specific buckets, do it with Sairo's own
+[per-bucket access management](/security/user-management/) rather than by scoping
+the R2 token, since the token still needs to list buckets.
+:::
 
 ## Docker Compose Example
 
