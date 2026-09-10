@@ -895,6 +895,12 @@ def _init_db(bucket, endpoint_id=None):
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(_db_path(bucket, endpoint_id), timeout=30)
     conn.execute("PRAGMA page_size = 8192")          # larger pages → shallower B-trees (new DBs only)
+    # Freed pages must come back. Without this SQLite only ever grows the file to its high-water
+    # mark: a 12,479-object bucket in production reached 21.9 GB of which 21.90 GB — 99.92% — was
+    # free pages, because a backup bucket deletes as fast as it writes. INCREMENTAL rather than FULL
+    # so reclaim happens in bounded steps we choose, not on every commit. Only takes effect on a
+    # database with no tables yet; existing ones are converted by _reclaim_free_pages().
+    conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout = 30000")      # wait up to 30s for locks (heavy parallel crawl contends)
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -1049,6 +1055,9 @@ def _get_db(bucket, endpoint_id=None):
     conn.execute("PRAGMA synchronous = NORMAL")      # safe under WAL; fewer fsyncs on the crawl write path
     conn.execute("PRAGMA cache_size = -64000")       # 64MB page cache (default 2MB)
     conn.execute("PRAGMA mmap_size = 268435456")     # 256MB memory-mapped I/O
+    # Checkpointing returns WAL pages to the file but never shrinks the WAL itself: production had a
+    # 22 GB -wal next to a 21.9 GB database. With a limit set, each checkpoint truncates back to it.
+    conn.execute(f"PRAGMA journal_size_limit = {WAL_SIZE_LIMIT}")
     # temp_store stays DEFAULT (file-backed): the post-crawl GROUP BY rebuilds sort the whole objects table
     # in a temp b-tree, which in RAM is a full-table copy (OOM at 9.9M rows under the 1Gi chart limit).
     try:
@@ -1205,7 +1214,60 @@ def _record_storage_snapshot(bucket, endpoint_id=None):
                    (ts, "", (row[0] if row else 0) or 0, (row[1] if row else 0) or 0))
         db.execute("INSERT INTO storage_history (timestamp, prefix, object_count, total_size) "
                    "SELECT ?, prefix, object_count, total_size FROM folder_stats WHERE prefix != ''", (ts,))
+        # This table had no retention and one row per prefix per crawl: a bucket recrawled every
+        # 120 s writes ~700 identical snapshots a day, and production reached 3.1M rows. The chart
+        # groups by day, so anything finer than one row per prefix per day is never read — collapse
+        # completed days to their last sample and drop whatever falls outside the window.
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - STORAGE_HISTORY_DAYS * 86400))
+        db.execute("DELETE FROM storage_history WHERE timestamp < ?", (cutoff,))
+        today = ts[:10]
+        db.execute("DELETE FROM storage_history WHERE substr(timestamp,1,10) < ? AND id NOT IN "
+                   "(SELECT MAX(id) FROM storage_history WHERE substr(timestamp,1,10) < ? "
+                   " GROUP BY substr(timestamp,1,10), prefix)", (today, today))
         db.commit()
+
+
+def _reclaim_free_pages(bucket, endpoint_id=None):
+    """Give a bucket's dead pages back to the filesystem when the file is mostly free space.
+
+    SQLite reuses free pages but never shrinks the file, so a bucket that deletes as fast as it
+    writes ratchets up forever. Production: a 12,479-object backup bucket at 21.9 GB, of which
+    21.90 GB (99.92%) was free pages, on a volume that was 86% full.
+
+    VACUUM writes a *compacted* copy, so the temporary file is the size of the result rather than
+    the source — on exactly these pathological files it costs megabytes and seconds, not a second
+    copy of the database. Gated on ratio AND absolute win so a healthy large bucket is never
+    rewritten for a few percent. It is also the only way to switch an existing database to
+    incremental auto-vacuum, so from here on it reclaims without a full rewrite.
+
+    Runs as a post-crawl step, where the bucket is already reserved, so nothing else is writing.
+    """
+    path = _db_path(bucket, endpoint_id)
+    if not os.path.exists(path):
+        return
+    eid = endpoint_id or "default"
+    try:
+        with _get_db(bucket, endpoint_id) as db:
+            # A rebuild killed mid-flight leaves its whole shadow index behind; it is only dropped
+            # when that same bucket next rebuilds, which may be never.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects_fts_new'").fetchone():
+                db.execute("DROP TABLE objects_fts_new")
+                db.commit()
+                log.info("[%s:%s] Dropped an orphaned search-index shadow table left by an interrupted rebuild", eid, bucket)
+            page = db.execute("PRAGMA page_size").fetchone()[0]
+            total = page * db.execute("PRAGMA page_count").fetchone()[0]
+            free = page * db.execute("PRAGMA freelist_count").fetchone()[0]
+            if total <= 0 or free < VACUUM_MIN_FREE_BYTES or free / total < VACUUM_MIN_FREE_RATIO:
+                return
+            t0 = time.monotonic()
+            db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            db.execute("VACUUM")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = os.path.getsize(path)
+        log.info("[%s:%s] Compacted index: %.2f GB → %.2f GB (%.0f%% was free pages) in %.1fs",
+                 eid, bucket, total / 1e9, after / 1e9, free * 100.0 / total, time.monotonic() - t0)
+    except Exception as e:
+        log.warning("[%s:%s] Could not compact index (kept as-is): %s", eid, bucket, e)
 
 
 # ── Background Crawler (per-bucket) ──────────────────────────────────────
@@ -1234,6 +1296,10 @@ _CRAWL_STALL_SECONDS = int(os.environ.get("CRAWL_STALL_SECONDS", "1800"))  # no 
 _crawl_cancel = {}   # crawl_key -> threading.Event requesting a cooperative stop
 _shutting_down = threading.Event()
 MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
+WAL_SIZE_LIMIT = int(os.environ.get("WAL_SIZE_LIMIT_BYTES", str(256 * 1024 * 1024)))   # truncate the -wal back to this at each checkpoint
+VACUUM_MIN_FREE_RATIO = float(os.environ.get("VACUUM_MIN_FREE_RATIO", "0.5"))          # compact a bucket once this much of its file is free pages
+VACUUM_MIN_FREE_BYTES = int(os.environ.get("VACUUM_MIN_FREE_BYTES", str(512 * 1024 * 1024)))  # ...and there is at least this much to win
+STORAGE_HISTORY_DAYS = int(os.environ.get("STORAGE_HISTORY_DAYS", "365"))              # storage_history retention
 
 
 class CrawlInterrupted(Exception):
@@ -2244,7 +2310,7 @@ def _run_crawl(bucket, endpoint_id=None):
                 steps = [_rebuild_folder_stats, _rebuild_prefix_children] if index_changed else []
                 if not index_changed:
                     log.info("[%s:%s] Folder aggregates unchanged — rebuild skipped", eid, bucket)
-                for step in steps + [_record_storage_snapshot]:
+                for step in steps + [_record_storage_snapshot, _reclaim_free_pages]:
                     try:
                         step(bucket, eid)
                     except Exception as step_e:

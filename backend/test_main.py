@@ -1608,3 +1608,119 @@ class TestRebuildStallGuard:
             elapsed = time.monotonic() - t0
         assert elapsed < 5.0, f"probe ran unbounded ({elapsed:.1f}s)"
         assert result is False, "a timed-out probe was reported as a healthy index"
+
+
+class TestIndexDiskReclaim:
+    """The index volume only ever grew. SQLite reuses free pages but never shrinks the file, the
+    WAL had no size limit, storage_history had no retention, and a rebuild killed mid-flight left
+    its whole shadow index behind. Production reached 86% of a 98 GB volume, with one 12,479-object
+    backup bucket holding 21.9 GB of which 99.92% was free pages, beside a 22 GB WAL."""
+
+    def _churned(self, m, bucket, live=2_000, grown=60_000):
+        """A backup-style bucket: grow the file, then expire almost everything."""
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        with m._get_db(bucket, "default") as db:
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth) VALUES (?,?,?,?,?,?)",
+                           [(f"backupstore/volumes/{i%256:02x}/pvc-{i//256:05d}/blocks/{i:012x}.blk",
+                             4096, "2026-09-10T00:00:00Z", "e", f"backupstore/volumes/{i%256:02x}/", 3)
+                            for i in range(grown)])
+            db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS objects_fts USING fts5"
+                       "(key, content='objects', content_rowid='rowid', tokenize='trigram')")
+            db.execute("INSERT INTO objects_fts(rowid,key) SELECT rowid,key FROM objects")
+            db.commit()
+            db.execute("DELETE FROM objects WHERE rowid > ?", (live,))
+            db.execute("UPDATE crawl_status SET status='complete' WHERE id=1")
+            db.commit()
+
+    def test_a_mostly_free_index_is_compacted_and_keeps_every_row(self, app):
+        m = _main_module()
+        b = "reclaimbkt"
+        self._churned(m, b)
+        path = m._db_path(b, "default")
+        before = os.path.getsize(path)
+        with m._get_db(b, "default") as db:
+            n = db.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+            ps = db.execute("PRAGMA page_size").fetchone()[0]
+            free = ps * db.execute("PRAGMA freelist_count").fetchone()[0]
+        assert free / before > 0.4, f"fixture did not bloat ({free/before:.0%} free)"
+        with patch.object(m, "VACUUM_MIN_FREE_BYTES", 1024):
+            m._reclaim_free_pages(b, "default")
+        after = os.path.getsize(path)
+        assert after < before * 0.6, f"index was not compacted ({before} -> {after})"
+        with m._get_db(b, "default") as db:
+            assert db.execute("SELECT COUNT(*) FROM objects").fetchone()[0] == n, "compaction lost rows"
+            assert db.execute("PRAGMA auto_vacuum").fetchone()[0] == 2, "not converted to incremental"
+
+    def test_a_healthy_index_is_never_rewritten(self, app):
+        """A big bucket with a normal amount of slack must not be rewritten every crawl."""
+        m = _main_module()
+        b = "healthyidx"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(b, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(b, "default")
+        with m._get_db(b, "default") as db:
+            db.executemany("INSERT INTO objects (key,size,last_modified,etag,prefix,depth) VALUES (?,?,?,?,?,?)",
+                           [(f"data/p{i:07d}.parquet", 1024, "t", "e", "data/", 1) for i in range(20_000)])
+            db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
+        path = m._db_path(b, "default"); before = os.path.getsize(path)
+        m._reclaim_free_pages(b, "default")
+        assert os.path.getsize(path) == before, "a healthy index was rewritten for nothing"
+
+    def test_orphaned_shadow_index_is_dropped(self, app):
+        """A rebuild killed mid-flight leaves objects_fts_new behind — a full duplicate index that
+        is otherwise only dropped when that same bucket next rebuilds, which may be never."""
+        m = _main_module()
+        b = "orphanbkt"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(b, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(b, "default")
+        with m._get_db(b, "default") as db:
+            db.execute("INSERT INTO objects (key,size,last_modified,etag,prefix,depth) VALUES ('a',1,'t','e','',0)")
+            db.execute("CREATE VIRTUAL TABLE objects_fts_new USING fts5(key, tokenize='trigram')")
+            db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
+        m._reclaim_free_pages(b, "default")
+        with m._get_db(b, "default") as db:
+            assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='objects_fts_new'").fetchone(), \
+                "orphaned shadow index survived"
+
+    def test_storage_history_is_bounded(self, app):
+        """One row per prefix per crawl, no retention: a bucket recrawled every 120s wrote ~700
+        identical snapshots a day and production reached 3.1M rows. The chart groups by day."""
+        m = _main_module()
+        b = "histbkt"
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(b, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(b, "default")
+        with m._get_db(b, "default") as db:
+            for d in range(20):
+                db.executemany("INSERT INTO storage_history (timestamp,prefix,object_count,total_size) VALUES (?,?,?,?)",
+                               [(f"2026-08-{(d%28)+1:02d}T{h:02d}:00:00Z", f"p{i}/", 10, 1000)
+                                for i in range(5) for h in range(12)])
+            db.execute("INSERT INTO storage_history (timestamp,prefix,object_count,total_size) "
+                       "VALUES ('2019-01-01T00:00:00Z','ancient/',1,1)")   # outside any window
+            db.execute("UPDATE crawl_status SET status='complete' WHERE id=1"); db.commit()
+            before = db.execute("SELECT COUNT(*) FROM storage_history").fetchone()[0]
+        m._record_storage_snapshot(b, "default")
+        with m._get_db(b, "default") as db:
+            after = db.execute("SELECT COUNT(*) FROM storage_history").fetchone()[0]
+            dupes = db.execute("SELECT COUNT(*) FROM (SELECT substr(timestamp,1,10) d, prefix "
+                               "FROM storage_history WHERE substr(timestamp,1,10) < ? "
+                               "GROUP BY d, prefix HAVING COUNT(*) > 1)",
+                               (time.strftime('%Y-%m-%d'),)).fetchone()[0]
+            ancient = db.execute("SELECT COUNT(*) FROM storage_history WHERE timestamp < '2020-01-01'").fetchone()[0]
+        assert after < before, f"history not pruned ({before} -> {after})"
+        assert dupes == 0, "completed days still hold more than one sample per prefix"
+        assert ancient == 0, "rows outside the retention window survived"
+
+    def test_wal_is_capped_on_every_connection(self, app):
+        m = _main_module()
+        b = "walbkt"
+        m._init_db(b, "default")
+        with m._get_db(b, "default") as db:
+            assert db.execute("PRAGMA journal_size_limit").fetchone()[0] == m.WAL_SIZE_LIMIT

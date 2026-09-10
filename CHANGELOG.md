@@ -6,6 +6,23 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ### Fixed
 
+- **The index volume only ever grew.** Four separate paths had no ceiling, and together they took a
+  98 GB volume to 86% full holding 16 GB of real data. SQLite reuses free pages but never shrinks
+  the file, so a bucket that deletes as fast as it writes ratchets up forever — one 12,479-object
+  backup bucket reached 21.9 GB of which 21.90 GB (99.92%) was free pages. New databases are created
+  with incremental auto-vacuum, and a bucket whose file is mostly free space is compacted after a
+  crawl (`VACUUM_MIN_FREE_RATIO` / `VACUUM_MIN_FREE_BYTES`), which also converts existing ones.
+- **The write-ahead log had no size limit.** Checkpointing returns WAL pages to the database but
+  never shrinks the WAL itself; production carried a 22 GB `-wal` beside a 21.9 GB database. Capped
+  by `WAL_SIZE_LIMIT_BYTES`.
+- **`storage_history` had no retention.** One row per prefix per crawl, so a bucket recrawled every
+  120 s wrote hundreds of identical snapshots a day and production reached 3.1M rows. Completed days
+  are collapsed to one row per prefix — the granularity the chart actually reads — and anything past
+  `STORAGE_HISTORY_DAYS` is dropped.
+- **A rebuild killed mid-flight left its whole shadow index on disk.** `objects_fts_new` was dropped
+  only when that same bucket next rebuilt, which might be never. It is now dropped as part of the
+  post-crawl maintenance.
+
 - **A bucket whose search-index rebuild never finished stopped being crawled at all.** `_rebuilding`
   had no timestamp and no ceiling — unlike a crawl, which has both — so a rebuild that hung left the
   bucket refused by every later crawl and delta for the life of the process. Observed in production:

@@ -44,6 +44,10 @@ All Sairo configuration is done through environment variables. This page lists e
 | `LARGE_BUCKET_SECONDS` | `60` | A bucket whose full crawl takes longer than this is treated as "large" and kept fresh with delta crawls + periodic full reconcile, instead of full re-crawls every interval |
 | `REBUILD_MAX_DURATION` | `7200` | Seconds a search-index rebuild may hold its bucket. Past this the reservation is abandoned so crawls and deltas can resume, mirroring the equivalent ceiling on a crawl. Raise it only if a single bucket's rebuild legitimately runs longer than two hours. |
 | `FTS_PROBE_MS` | `10000` | Milliseconds the search-index health probe may run before it gives up. The probe is three constant-time queries, so only an unreadable or corrupt index reaches this; one that does is treated as unhealthy and rebuilt rather than blocking the caller. |
+| `WAL_SIZE_LIMIT_BYTES` | `268435456` | Size the write-ahead log is truncated back to at each checkpoint. Without a limit the WAL only ever grows to its high-water mark and stays there. |
+| `VACUUM_MIN_FREE_RATIO` | `0.5` | Compact a bucket's index once this fraction of its file is free pages. SQLite reuses free pages but never shrinks the file, so a bucket that deletes as fast as it writes grows forever. |
+| `VACUUM_MIN_FREE_BYTES` | `536870912` | ...and only when at least this much space would actually be returned, so a healthy large bucket is never rewritten for a few percent. |
+| `STORAGE_HISTORY_DAYS` | `365` | Retention for `storage_history`. Completed days are also collapsed to one row per prefix, the granularity the chart reads. |
 
 ### Delta-crawl tuning
 
