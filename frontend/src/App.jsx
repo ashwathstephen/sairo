@@ -631,7 +631,7 @@ function MainApp() {
     <div className="user-badge">
       <span className="user-name">{user.username}</span>
       <span className="user-role">{user.role}</span>
-      {(user.auth_source || "local") === "local" && (
+      {user.auth_source === "local" && (
         <button onClick={() => setShowChangePassword(true)} className="btn-settings">Password</button>
       )}
       <button onClick={() => setShowTwoFactor(true)} className="btn-settings">2FA</button>
