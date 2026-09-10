@@ -30,6 +30,12 @@ services:
       JWT_SECRET: e2e-test-secret-key-32chars-long!
       SECURE_COOKIE: "false"
       SESSION_HOURS: "24"
+      # #35: the login form only offers LDAP when the server reports it enabled.
+      # The directory is deliberately unreachable — the smoke proves the form
+      # routes to the LDAP endpoint and fails there, never falling back to local.
+      LDAP_ENABLED: "true"
+      LDAP_SERVER: "ldap://127.0.0.1:3899"
+      LDAP_BASE_DN: "dc=example,dc=com"
       RECRAWL_INTERVAL: "30"
       # Test stack only: every spec logs in from the same IP within minutes, which the production
       # defaults (10 logins / 5 min, 120 requests / min) are meant to stop.

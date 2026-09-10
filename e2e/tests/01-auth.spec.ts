@@ -6,6 +6,29 @@ import { dismissWelcomeIfPresent } from '../helpers/wait-helpers';
 test.describe('Authentication & Session', () => {
   test.use({ storageState: { cookies: [], origins: [] } }); // No auth for login tests
 
+  test('1.6 LDAP is selectable and does not fall back to local auth', async ({ page }) => {
+    // #35: the LDAP option vanished from the login form. It is back, so prove two
+    // things in a real browser: the control renders, and choosing it really sends
+    // the request to the LDAP endpoint. The test stack points at an unreachable
+    // directory, so a correct local password must still be rejected here — if it
+    // logged in, the form would be silently falling back to local auth.
+    await page.goto('/');
+    const ldapToggle = page.getByLabel('Sign in with LDAP');
+    await expect(ldapToggle).toBeVisible();
+
+    const ldapCall = page.waitForRequest(r => r.url().includes('/api/auth/ldap') && r.method() === 'POST');
+    await ldapToggle.check();
+    await expect(page.locator(SEL.signInButton)).toContainText('LDAP');
+    await page.locator(SEL.usernameInput).fill(ADMIN.username);
+    await page.locator(SEL.passwordInput).fill(ADMIN.password);
+    await page.locator(SEL.signInButton).click();
+
+    await ldapCall;                                   // it used the LDAP route
+    await expect(page.locator(SEL.loginError)).toBeVisible();
+    await expect(page.locator(SEL.loginForm)).toBeVisible();
+    await expect(page.locator(SEL.bucketCard)).toHaveCount(0);
+  });
+
   test('1.1 shows error on wrong password', async ({ page }) => {
     await page.goto('/');
     await page.locator(SEL.usernameInput).fill(ADMIN.username);
