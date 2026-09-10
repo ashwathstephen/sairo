@@ -42,6 +42,8 @@ All Sairo configuration is done through environment variables. This page lists e
 | `DB_DIR` | `/data` | Directory where SQLite index databases are stored |
 | `FULL_CRAWL_INTERVAL` | `3600` | Seconds between full reconcile crawls for large buckets (delta crawls run on `RECRAWL_INTERVAL` in between) |
 | `LARGE_BUCKET_SECONDS` | `60` | A bucket whose full crawl takes longer than this is treated as "large" and kept fresh with delta crawls + periodic full reconcile, instead of full re-crawls every interval |
+| `REBUILD_MAX_DURATION` | `7200` | Seconds a search-index rebuild may hold its bucket. Past this the reservation is abandoned so crawls and deltas can resume, mirroring the equivalent ceiling on a crawl. Raise it only if a single bucket's rebuild legitimately runs longer than two hours. |
+| `FTS_PROBE_MS` | `10000` | Milliseconds the search-index health probe may run before it gives up. The probe is three constant-time queries, so only an unreadable or corrupt index reaches this; one that does is treated as unhealthy and rebuilt rather than blocking the caller. |
 
 ### Delta-crawl tuning
 

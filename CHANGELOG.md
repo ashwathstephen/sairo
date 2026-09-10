@@ -4,6 +4,23 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bucket whose search-index rebuild never finished stopped being crawled at all.** `_rebuilding`
+  had no timestamp and no ceiling — unlike a crawl, which has both — so a rebuild that hung left the
+  bucket refused by every later crawl and delta for the life of the process. Observed in production:
+  one 12,479-object bucket went over an hour with zero crawls and zero deltas while the other 24 stayed
+  fresh. A rebuild is now abandoned after `REBUILD_MAX_DURATION` (default 2 h, the same ceiling a crawl
+  already had) so the scheduler can make progress; the bucket's own rebuild lock still serialises any
+  later rebuild against the orphan.
+- **The search-index health probe could block indefinitely.** A corrupt index makes an ordinary scan run
+  without end, which hung the crawl-status endpoint for that bucket — the poll behind the UI's index
+  state — with no timeout at any layer. The probe is now bounded by `FTS_PROBE_MS` (default 10 s) using
+  SQLite's own progress handler; an index that cannot be verified reads as unhealthy and is rebuilt,
+  rather than stalling the caller.
+- The same probe counted every row in the bucket to decide whether any objects existed. At 10M keys that
+  full scan cost seconds on the status path; it is now a constant-time existence check.
+
 ## [3.7.0] - 2026-09-10
 
 ### Rollout
