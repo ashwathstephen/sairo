@@ -1421,11 +1421,11 @@ class TestRebuildDeltaRace:
         m = _main_module()
         key = "default:racebkt4"
         m._rebuilding.pop(key, None); m._crawling.pop(key, None)
-        assert m._reserve_rebuild(key) is True
+        assert m._reserve_rebuild(key) is not None
         try:
             # while reserved, neither a delta nor a second rebuild may claim the bucket
             assert m._queue_delta_crawl("racebkt4", "default") is False
-            assert m._reserve_rebuild(key) is False
+            assert m._reserve_rebuild(key) is None
         finally:
             m._rebuilding.pop(key, None)
 
@@ -1443,11 +1443,11 @@ class TestRebuildStallGuard:
         m._rebuilding.pop(key, None); m._crawling.pop(key, None)
         try:
             with m._crawl_lock:
-                m._rebuilding[key] = time.time()
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time())
             assert m._queue_crawl("stallbkt", "default") is False, \
                 "a running rebuild must still block a crawl"
             with m._crawl_lock:                       # same rebuild, now past the ceiling
-                m._rebuilding[key] = time.time() - m._REBUILD_MAX_DURATION - 1
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION - 1)
             with m._crawl_lock:
                 assert m._rebuild_blocked(key) is False, \
                     "a rebuild past _REBUILD_MAX_DURATION must not block the bucket forever"
@@ -1461,7 +1461,7 @@ class TestRebuildStallGuard:
         m._rebuilding.pop(key, None); m._crawling.pop(key, None)
         try:
             with m._crawl_lock:
-                m._rebuilding[key] = time.time() - m._REBUILD_MAX_DURATION - 1
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION - 1)
             assert m._queue_delta_crawl("stallbkt2", "default") is not False, \
                 "delta stayed blocked by a rebuild that will never finish"
         finally:
@@ -1473,9 +1473,9 @@ class TestRebuildStallGuard:
         m._rebuilding.pop(key, None)
         try:
             with m._crawl_lock:
-                m._rebuilding[key] = time.time() - m._REBUILD_MAX_DURATION + 60
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION + 60)
                 assert m._rebuild_blocked(key) is True
-            assert m._reserve_rebuild(key) is False, "a second rebuild claimed a live bucket"
+            assert m._reserve_rebuild(key) is None, "a second rebuild claimed a live bucket"
         finally:
             m._rebuilding.pop(key, None)
 
@@ -1551,3 +1551,60 @@ class TestRebuildStallGuard:
         m._fts_healthy(conn)
         conn.execute("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<300000) "
                      "SELECT COUNT(*) FROM c").fetchall()
+
+    def test_late_release_cannot_clear_a_replacement_reservation(self, app):
+        """An expired rebuild can still return after the ceiling handed its bucket to a
+        replacement. A blind delete on release strips the replacement's claim and lets a crawl run
+        underneath it, which is the collision the reservation exists to prevent."""
+        m = _main_module()
+        key = "default:handoverbkt"
+        m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+        try:
+            first = m._reserve_rebuild(key)
+            assert first is not None
+            # first overruns; the ceiling hands the bucket on
+            with m._crawl_lock:
+                m._rebuilding[key] = (first, time.time() - m._REBUILD_MAX_DURATION - 1)
+                assert m._rebuild_blocked(key) is False
+            second = m._reserve_rebuild(key)
+            assert second is not None and second != first, "replacement could not claim the bucket"
+
+            m._release_rebuild(key, first)          # the late finisher returns at last
+
+            assert key in m._rebuilding, "a late release cleared the replacement's reservation"
+            with m._crawl_lock:
+                assert m._rebuild_blocked(key) is True
+            assert m._queue_delta_crawl("handoverbkt", "default") is False, \
+                "a delta started underneath a live rebuild"
+            m._release_rebuild(key, second)         # the real owner can still release
+            assert key not in m._rebuilding
+        finally:
+            m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+
+    def test_probe_timeout_inside_fts_is_empty_is_not_reported_healthy(self, app):
+        """_fts_is_empty() answers False on ANY exception, the deadline's own abort included, and
+        `not False` reads as healthy — certifying the very index the bound exists to catch."""
+        m = _main_module()
+        real = sqlite3.connect(":memory:")
+        real.row_factory = sqlite3.Row
+        real.execute("CREATE TABLE objects (key TEXT)")
+        real.execute("INSERT INTO objects VALUES ('a')")
+        real.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, tokenize='trigram')")
+        forever = ("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<100000000) "
+                   "SELECT COUNT(*) FROM c")
+
+        class SlowOnlyInIsEmpty:
+            """Everything answers fast except the objects_fts_data read inside _fts_is_empty()."""
+            def __init__(self, c): self._c = c
+            def execute(self, sql, *a, **k):
+                if "objects_fts_data" in sql:
+                    return self._c.execute(forever)
+                return self._c.execute(sql, *a, **k)
+            def __getattr__(self, n): return getattr(self._c, n)
+
+        with patch.object(m, "FTS_PROBE_MS", 1500):
+            t0 = time.monotonic()
+            result = m._fts_healthy(SlowOnlyInIsEmpty(real))
+            elapsed = time.monotonic() - t0
+        assert elapsed < 5.0, f"probe ran unbounded ({elapsed:.1f}s)"
+        assert result is False, "a timed-out probe was reported as a healthy index"
