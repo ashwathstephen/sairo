@@ -2641,6 +2641,10 @@ DELTA_MAX_NODES = int(os.environ.get("DELTA_MAX_NODES", "2000"))        # safety
 # never certify a complete refresh. Three pages covers 2,500 while still bounding a
 # genuinely oversized node.
 DELTA_NODE_MAX_PAGES = int(os.environ.get("DELTA_NODE_MAX_PAGES", "3"))
+# A folder that trips the page bound is "flat" when most of what came back were objects rather than
+# sub-folders. Half a 1000-entry page per page read is a clear majority either way, and the decision
+# only picks between streaming the prefix whole and reporting the walk partial.
+_FLAT_PREFIX_MIN_OBJECTS_PER_PAGE = 500
 DELTA_ROOT_MAX_PAGES = int(os.environ.get("DELTA_ROOT_MAX_PAGES", "200"))  # root listing pages per delta before the delta is degraded (200k entries; production has 62k-prefix roots)
 
 
@@ -2710,24 +2714,40 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             # 20,000 children cost 20 LIST pages and 20,000 names in memory. A node wider than
             # DELTA_NODE_MAX_PAGES pages is left unvisited and the walk is reported partial.
             def _list_one(p):
+                direct = []   # the delimiter listing's own objects, to tell a flat prefix from a wide branch
                 with _list_slots:   # deltas share the budget with full crawls
-                    return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES))
+                    return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES,
+                                              contents=direct), direct)
             listed = list(ex.map(_list_one, frontier))
-            # Name the folder that tripped the bound. Without this, "discovery:truncated" says the
-            # walk was partial but not which prefix or what to raise, so sizing DELTA_NODE_MAX_PAGES
-            # for a real bucket is guesswork.
-            for _cur, _kids in listed:
-                if _kids is None:
-                    # MaxKeys counts returned entries, objects and rolled-up prefixes together,
-                    # so the page budget does not translate to a child count. All this proves is
-                    # that results remained after the budget ran out.
-                    log.warning("[%s:%s] Delta discovery bound hit at '%s': still more results after "
-                                "%d pages of %d entries; raise DELTA_NODE_MAX_PAGES to cover it",
-                                endpoint_id or "default", bucket, _cur[:80], DELTA_NODE_MAX_PAGES, 1000)
             nxt = []
-            for cur, children in listed:
+            for cur, children, direct in listed:
                 if children is None:
-                    truncated = True
+                    # The per-node page bound tripped. MaxKeys counts returned entries — objects and
+                    # rolled-up prefixes together — so this only proves results remained, not that the
+                    # folder has many CHILDREN.
+                    #
+                    # When what we read back was mostly OBJECTS, the folder is flat and no page budget
+                    # will ever cover it: production's `druid/indexing-logs/` holds 789,345 objects
+                    # directly, so it tripped the bound on every delta, reported discovery:truncated
+                    # and never certified — raising the knob would need ~790 pages. Hand it to the
+                    # target phase instead, which streams a prefix whole with a sink and bounded
+                    # memory. _minimal_prefixes() drops it when it is already a hot target, so this
+                    # usually converts a listing we were going to do anyway from permanently degraded
+                    # into certifiable, rather than adding one.
+                    #
+                    # A folder wide in SUB-PREFIXES is a different animal: streaming it has no
+                    # delimiter, so it would walk the whole subtree — a full crawl by another name.
+                    # Those still report the walk as partial.
+                    if len(direct) >= DELTA_NODE_MAX_PAGES * _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE:
+                        targets.add(cur)
+                        log.info("[%s:%s] Delta discovery: '%s' is flat (%d+ objects directly under it, "
+                                 "no sub-folders to walk) — listing it whole instead of reporting the "
+                                 "walk truncated", endpoint_id or "default", bucket, cur[:80], len(direct))
+                    else:
+                        truncated = True
+                        log.warning("[%s:%s] Delta discovery bound hit at '%s': still more results after "
+                                    "%d pages of %d entries; raise DELTA_NODE_MAX_PAGES to cover it",
+                                    endpoint_id or "default", bucket, cur[:80], DELTA_NODE_MAX_PAGES, 1000)
                     continue
                 if not children:
                     targets.add(cur)  # leaf: objects live directly under cur

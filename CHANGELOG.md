@@ -6,6 +6,18 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ### Fixed
 
+- **A folder holding only objects could never be covered by delta discovery, so its bucket never
+  certified freshness.** The delimiter walk bounds each folder at `DELTA_NODE_MAX_PAGES` pages and
+  abandoned anything wider, but that bound counts returned entries — objects and rolled-up prefixes
+  together — so a *flat* folder trips it no matter how the knob is set. Production's
+  `druid/indexing-logs/` holds 789,345 objects directly under one prefix: every delta on that 10.3M
+  object bucket reported `discovery:truncated` and degraded, 21 times in a row, and covering it by
+  raising the budget would have taken about 790 pages. A folder that trips the bound on objects
+  rather than sub-folders is now handed to the delta's target phase, which already streams a prefix
+  whole with a bounded sink, and the delta certifies only once that listing succeeds. A folder wide
+  in sub-prefixes still reports the walk partial, because streaming one has no delimiter and would
+  walk its entire subtree.
+
 - **A bucket whose search-index rebuild never finished stopped being crawled at all.** `_rebuilding`
   had no timestamp and no ceiling — unlike a crawl, which has both — so a rebuild that hung left the
   bucket refused by every later crawl and delta for the life of the process. Observed in production:
