@@ -1,6 +1,9 @@
 services:
   minio:
-    image: minio/minio:latest
+    # MinIO no longer serves this image to anonymous pulls from Docker Hub, so CI died on
+    # `pull access denied for minio/minio` while local runs kept working off a cached layer.
+    # quay.io is MinIO's own registry. Pinned, so a new upstream release cannot break CI again.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     ports:
       - "${MINIO_PORT:-9100}:9000"
