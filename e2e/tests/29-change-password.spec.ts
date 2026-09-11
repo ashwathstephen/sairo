@@ -59,6 +59,30 @@ test.describe('Change own password', () => {
     await expect(page.getByLabel('Current password', { exact: true })).toBeVisible();
   });
 
+  // The audit walked Tab eight times and focus left the dialog for a background Insights control.
+  // Nineteen dialogs carry role="dialog"; only three ever trapped focus.
+  test('29.5 keyboard stays inside the dialog and Escape closes it', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.locator(SEL.passwordHeaderButton).click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press('Tab');
+      const inside = await page.evaluate(() => {
+        const m = document.querySelector('.modal');
+        return !!(m && document.activeElement && m.contains(document.activeElement));
+      });
+      expect(inside, `focus escaped the dialog after ${i + 1} Tab presses`).toBe(true);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator(SEL.modal)).toBeHidden();
+    // focus must come back to the control that opened it, not the top of the document
+    const returned = await page.evaluate(() =>
+      document.activeElement?.textContent?.trim());
+    expect(returned).toBe('Password');
+  });
+
   // The fields used bare <input>, which this stylesheet gives no base style, so they rendered with
   // browser-default chrome and kept black text on the dark modal background.
   test('29.4 fields are styled and readable in dark mode', async ({ page }) => {

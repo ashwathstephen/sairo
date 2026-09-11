@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { changePassword } from "../api";
+import { useDialogKeys } from "../useDialog";
 
 export default function ChangePassword({ onClose }) {
   const [current, setCurrent] = useState("");
@@ -8,6 +9,7 @@ export default function ChangePassword({ onClose }) {
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
+  const dialogRef = useDialogKeys(onClose);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -31,8 +33,8 @@ export default function ChangePassword({ onClose }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="cp-title"
-           onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal modal-small" role="dialog" aria-modal="true"
+           aria-labelledby="cp-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="cp-title">Change Password</h2>
         {done ? (
           <>
@@ -46,7 +48,7 @@ export default function ChangePassword({ onClose }) {
             {error && <div className="form-error" role="alert">{error}</div>}
             <div className="form-field">
               <label htmlFor="cp-current">Current password</label>
-              <input id="cp-current" type="password" value={current} autoFocus
+              <input id="cp-current" type="password" value={current}
                      onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
             </div>
             <div className="form-field">
