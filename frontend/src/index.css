@@ -360,7 +360,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 [data-theme="dark"] textarea {
   background: rgba(24, 24, 27, 0.6);
   border-color: rgba(63, 63, 70, 0.5);
+  /* Without this the field takes a dark background but keeps the browser's default black text,
+     so anything typed into it is unreadable in dark mode (#54). */
+  color: var(--text);
 }
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder { color: var(--text-light); }
 [data-theme="dark"] input:not(.login-form input):not(.tfa-login-input):not(.search-input):focus,
 [data-theme="dark"] select:focus,
 [data-theme="dark"] textarea:focus {
@@ -754,6 +759,49 @@ button.btn-danger:disabled { background: var(--bg-surface); }
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+
+/* Shared form field for modal dialogs. Bare <input> has no base style in this sheet, so a dialog
+   that used one rendered with browser-default chrome — out of place next to everything else, and
+   unreadable in dark mode (#54). Mirrors .ep-form-field, which already solved this locally. */
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.form-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.form-field input {
+  padding: 8px 10px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--bg-input);
+  color: var(--text);
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.form-field input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-ring);
+}
+
+.form-field input[aria-invalid="true"] { border-color: var(--danger); }
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-light);
+  margin: -6px 0 12px;
 }
 
 .drop-zone {

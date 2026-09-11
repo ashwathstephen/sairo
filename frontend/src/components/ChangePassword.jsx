@@ -24,24 +24,49 @@ export default function ChangePassword({ onClose }) {
     setLoading(false);
   };
 
+  // Which field the message is about, so the border marks the right one and the input carries the
+  // description for a screen reader rather than the message floating unattached above the form.
+  const mismatch = error === "New passwords do not match";
+  const tooShort = error.startsWith("New password must be");
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h2>Change Password</h2>
+      <div className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="cp-title"
+           onClick={(e) => e.stopPropagation()}>
+        <h2 id="cp-title">Change Password</h2>
         {done ? (
           <>
-            <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 16px" }}>Your password has been updated.</p>
-            <div className="modal-actions"><button onClick={onClose} className="btn-primary">Done</button></div>
+            <p className="form-hint" style={{ margin: "0 0 16px" }}>Your password has been updated.</p>
+            <div className="modal-actions">
+              <button onClick={onClose} className="btn-primary" autoFocus>Done</button>
+            </div>
           </>
         ) : (
           <form onSubmit={submit}>
-            {error && <div className="form-error">{error}</div>}
-            <input type="password" placeholder="Current password" aria-label="Current password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
-            <input type="password" placeholder="New password (8+ characters)" aria-label="New password" value={next} onChange={(e) => setNext(e.target.value)} required minLength={8} autoComplete="new-password" />
-            <input type="password" placeholder="Confirm new password" aria-label="Confirm new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
+            {error && <div className="form-error" role="alert">{error}</div>}
+            <div className="form-field">
+              <label htmlFor="cp-current">Current password</label>
+              <input id="cp-current" type="password" value={current} autoFocus
+                     onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
+            </div>
+            <div className="form-field">
+              <label htmlFor="cp-new">New password</label>
+              <input id="cp-new" type="password" value={next} minLength={8} required
+                     aria-invalid={tooShort || undefined} aria-describedby="cp-new-hint"
+                     onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
+            </div>
+            <p className="form-hint" id="cp-new-hint">At least 8 characters.</p>
+            <div className="form-field">
+              <label htmlFor="cp-confirm">Confirm new password</label>
+              <input id="cp-confirm" type="password" value={confirm} required
+                     aria-invalid={mismatch || undefined}
+                     onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+            </div>
             <div className="modal-actions">
-              <button type="submit" disabled={loading} className="btn-primary">{loading ? "Updating..." : "Update Password"}</button>
               <button type="button" onClick={onClose}>Cancel</button>
+              <button type="submit" disabled={loading} className="btn-primary">
+                {loading ? "Updating…" : "Update Password"}
+              </button>
             </div>
           </form>
         )}
