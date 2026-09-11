@@ -29,6 +29,10 @@ services:
       ADMIN_PASS: password
       JWT_SECRET: e2e-test-secret-key-32chars-long!
       SECURE_COOKIE: "false"
+      # Every run of this stack is a fresh install that would otherwise report itself as a
+      # real deployment. The backend and frontend CI lanes already set this; the e2e lane
+      # brings the stack up through compose, so it has to be set here too.
+      TELEMETRY: "false"
       SESSION_HOURS: "24"
       # #35: the login form only offers LDAP when the server reports it enabled.
       # The directory is deliberately unreachable — the smoke proves the form
