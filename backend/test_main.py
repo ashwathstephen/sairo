@@ -1671,6 +1671,40 @@ class TestFlatPrefixDiscovery:
             "a folder with as many sub-prefixes as objects was promoted to a recursive listing"
         assert truncated is True, "a folder wide in sub-prefixes must report the walk partial"
 
+    def test_discovery_does_not_retain_the_objects_it_counts(self, app):
+        """Classifying a folder needs only how MANY objects came back, never the objects. ex.map
+        materialises every result before the loop runs, so returning the payloads keeps
+        DELTA_MAX_NODES x DELTA_NODE_MAX_PAGES x 1000 object dictionaries alive at once — six
+        million at the configured bounds, on a pod sized for one gigabyte.
+
+        Measured with tracemalloc rather than refcounts: the retained lists die when the walk
+        returns, so anything sampled afterwards looks identical either way."""
+        import tracemalloc
+        m = _main_module()
+        tops = [f"p{i:03d}/" for i in range(40)]          # 40 frontier nodes
+        def list_objects_v2(**p):
+            return {"CommonPrefixes": [],
+                    "Contents": [dict(Key=f"{p.get('Prefix','')}f{i:05d}.log", Size=1,
+                                      LastModified=_dt.datetime(2026, 9, 10), ETag="e" * 32)
+                                 for i in range(1000)],
+                    "IsTruncated": True, "NextContinuationToken": "t"}
+        cl = MagicMock(); cl.list_objects_v2.side_effect = list_objects_v2
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path("retainbkt", "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db("retainbkt", "default")
+
+        tracemalloc.start()
+        try:
+            m._discover_delta_targets(cl, "retainbkt", "default", tops)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        # 40 nodes x 3 pages x 1000 objects retained is tens of MB; counts are a few hundred bytes.
+        assert peak < 20 * 1024 * 1024, (
+            f"discovery peaked at {peak/1024/1024:.1f} MB — it is retaining object payloads "
+            f"instead of returning counts")
+
     def test_a_promoted_listing_is_bounded(self, app):
         """Objects sort before sub-prefixes, so a truncated sample cannot always see them. The
         promotion is a guess; without a ceiling a wrong one descends the whole subtree."""

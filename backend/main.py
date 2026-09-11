@@ -2739,11 +2739,16 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             def _list_one(p):
                 direct, kids = [], []   # both halves: a folder can be wide in objects AND sub-prefixes
                 with _list_slots:   # deltas share the budget with full crawls
-                    return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES,
-                                              contents=direct, seen=kids), direct, kids)
+                    children = _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES,
+                                              contents=direct, seen=kids)
+                # Return COUNTS, never the payloads. Classifying a folder needs only how many of
+                # each came back, and ex.map materialises every result before the loop runs: at the
+                # configured bounds that is DELTA_MAX_NODES x DELTA_NODE_MAX_PAGES x 1000 object
+                # dictionaries — six million — alive at once. The lists die with this frame.
+                return (p, children, len(direct), len(kids))
             listed = list(ex.map(_list_one, frontier))
             nxt = []
-            for cur, children, direct, kids_seen in listed:
+            for cur, children, n_direct, n_kids in listed:
                 if children is None:
                     # The per-node page bound tripped. MaxKeys counts returned entries — objects and
                     # rolled-up prefixes together — so this only proves results remained, not that the
@@ -2766,14 +2771,14 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
                     # it streams every one of those sub-trees. Objects must DOMINATE what we read,
                     # and the promoted listing carries a ceiling for the case the sample cannot see
                     # (objects sort before sub-prefixes, so a truncated page may show only objects).
-                    entries = len(direct) + len(kids_seen)
-                    dominant = entries > 0 and len(kids_seen) <= entries * (1.0 - _FLAT_PREFIX_MIN_OBJECT_SHARE)
-                    if len(direct) >= DELTA_NODE_MAX_PAGES * _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE and dominant:
+                    entries = n_direct + n_kids
+                    dominant = entries > 0 and n_kids <= entries * (1.0 - _FLAT_PREFIX_MIN_OBJECT_SHARE)
+                    if n_direct >= DELTA_NODE_MAX_PAGES * _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE and dominant:
                         targets.add(cur); promoted.add(cur)
                         log.info("[%s:%s] Delta discovery: '%s' is flat (%d objects directly under it "
                                  "beside %d sub-folders) — listing it whole instead of reporting the "
                                  "walk truncated", endpoint_id or "default", bucket, cur[:80],
-                                 len(direct), len(kids_seen))
+                                 n_direct, n_kids)
                     else:
                         truncated = True
                         log.warning("[%s:%s] Delta discovery bound hit at '%s': still more results after "
