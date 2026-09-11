@@ -639,6 +639,17 @@ function MainApp() {
     </div>
   );
 
+  // Rendered wherever userBadge is. These two are opened from that badge, which appears in every
+  // view, but their dialogs used to be mounted only in the bucket-list branch — so from inside a
+  // bucket the Password button set state and nothing appeared (#54). Keeping them beside the badge
+  // means adding a view cannot separate a button from the dialog it opens.
+  const accountModals = (
+    <>
+      {showChangePassword && <ChangePassword onClose={() => setShowChangePassword(false)} />}
+      {showTwoFactor && <TwoFactorSetup onClose={() => setShowTwoFactor(false)} totpEnabled={user.totp_enabled} onStatusChange={(enabled) => setUser(prev => ({ ...prev, totp_enabled: enabled }))} />}
+    </>
+  );
+
   // Bucket list view
   if (!bucket) {
     return (
@@ -700,8 +711,7 @@ function MainApp() {
         {showLicense && <LicenseManager onClose={() => setShowLicense(false)} />}
         {showUserManager && <UserManager onClose={() => setShowUserManager(false)} currentUser={user} />}
         {showHealthCheck && <HealthCheck onClose={() => setShowHealthCheck(false)} />}
-        {showChangePassword && <ChangePassword onClose={() => setShowChangePassword(false)} />}
-        {showTwoFactor && <TwoFactorSetup onClose={() => setShowTwoFactor(false)} totpEnabled={user.totp_enabled} onStatusChange={(enabled) => setUser(prev => ({ ...prev, totp_enabled: enabled }))} />}
+        {accountModals}
         {showEndpointManager && <EndpointManager onClose={() => setShowEndpointManager(false)} />}
         <ToastContainer />
       </div>
@@ -907,7 +917,7 @@ function MainApp() {
           </div>
         </div>
       )}
-      {showTwoFactor && <TwoFactorSetup onClose={() => setShowTwoFactor(false)} totpEnabled={user.totp_enabled} onStatusChange={(enabled) => setUser(prev => ({ ...prev, totp_enabled: enabled }))} />}
+      {accountModals}
       <ToastContainer />
     </div>
   );

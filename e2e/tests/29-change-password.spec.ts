@@ -13,9 +13,9 @@ test.describe('Change own password', () => {
   async function changePassword(page, current: string, next: string) {
     await page.locator(SEL.passwordHeaderButton).click();
     await expect(page.locator(SEL.modal)).toBeVisible();
-    await page.locator('input[aria-label="Current password"]').fill(current);
-    await page.locator('input[aria-label="New password"]').fill(next);
-    await page.locator('input[aria-label="Confirm new password"]').fill(next);
+    await page.getByLabel('Current password', { exact: true }).fill(current);
+    await page.getByLabel('New password', { exact: true }).fill(next);
+    await page.getByLabel('Confirm new password', { exact: true }).fill(next);
     await page.locator(SEL.modal).getByRole('button', { name: 'Update Password' }).click();
     await expect(page.locator(SEL.modal)).toContainText('has been updated');
     await page.locator(SEL.modal).getByRole('button', { name: 'Done' }).click();
@@ -24,9 +24,9 @@ test.describe('Change own password', () => {
   test('29.1 wrong current password is rejected in place', async ({ page }) => {
     await loginAsAdmin(page);
     await page.locator(SEL.passwordHeaderButton).click();
-    await page.locator('input[aria-label="Current password"]').fill('not-the-password');
-    await page.locator('input[aria-label="New password"]').fill('brandnewpass1');
-    await page.locator('input[aria-label="Confirm new password"]').fill('brandnewpass1');
+    await page.getByLabel('Current password', { exact: true }).fill('not-the-password');
+    await page.getByLabel('New password', { exact: true }).fill('brandnewpass1');
+    await page.getByLabel('Confirm new password', { exact: true }).fill('brandnewpass1');
     await page.locator(SEL.modal).getByRole('button', { name: 'Update Password' }).click();
     await expect(page.locator(SEL.modal)).toContainText('Current password is incorrect');
   });
@@ -44,5 +44,65 @@ test.describe('Change own password', () => {
     await page.locator(SEL.signInButton).click();
     await expect(page.locator(SEL.bucketCard).first()).toBeVisible({ timeout: 15_000 });
     await changePassword(page, 'brandnewpass1', 'password');   // leave the stack as we found it
+  });
+
+  // Issue #54: the Password button sits in the header, which renders in every view, but the dialog
+  // itself was only mounted in the bucket-list branch — so inside a bucket the button set state and
+  // nothing appeared.
+  test('29.3 opens from inside a bucket, not just the overview', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.locator(SEL.bucketCard).first().click();
+    await expect(page.locator(SEL.passwordHeaderButton)).toBeVisible();
+    await page.locator(SEL.passwordHeaderButton).click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+    await expect(page.locator(SEL.modal)).toContainText('Change Password');
+    await expect(page.getByLabel('Current password', { exact: true })).toBeVisible();
+  });
+
+  // The audit walked Tab eight times and focus left the dialog for a background Insights control.
+  // Nineteen dialogs carry role="dialog"; only three ever trapped focus.
+  test('29.5 keyboard stays inside the dialog and Escape closes it', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.locator(SEL.passwordHeaderButton).click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press('Tab');
+      const inside = await page.evaluate(() => {
+        const m = document.querySelector('.modal');
+        return !!(m && document.activeElement && m.contains(document.activeElement));
+      });
+      expect(inside, `focus escaped the dialog after ${i + 1} Tab presses`).toBe(true);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator(SEL.modal)).toBeHidden();
+    // focus must come back to the control that opened it, not the top of the document
+    const returned = await page.evaluate(() =>
+      document.activeElement?.textContent?.trim());
+    expect(returned).toBe('Password');
+  });
+
+  // The fields used bare <input>, which this stylesheet gives no base style, so they rendered with
+  // browser-default chrome and kept black text on the dark modal background.
+  test('29.4 fields are styled and readable in dark mode', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+    await page.locator(SEL.passwordHeaderButton).click();
+    await expect(page.locator(SEL.modal)).toBeVisible();
+    const field = page.getByLabel('Current password', { exact: true });
+    const seen = await field.evaluate((el) => {
+      const s = getComputedStyle(el);
+      const lum = (c: string) => {
+        const [r, g, b] = (c.match(/[\d.]+/g) || ['0', '0', '0']).map(Number);
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      };
+      return { text: lum(s.color), bg: lum(s.backgroundColor), radius: s.borderTopLeftRadius, pad: s.paddingLeft };
+    });
+    // text and background must not both be dark, or the value is invisible
+    expect(Math.abs(seen.text - seen.bg)).toBeGreaterThan(0.4);
+    expect(seen.radius).not.toBe('0px');   // styled, not browser-default
+    expect(seen.pad).not.toBe('0px');
   });
 });
