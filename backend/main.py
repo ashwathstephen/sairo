@@ -2601,12 +2601,20 @@ def _hot_target_prefixes(bucket, endpoint_id, sample=None, max_targets=None):
     return _minimal_prefixes({p for (p,) in rows})[:max_targets]
 
 
-def _delta_list_prefix(client, bucket, prefix, sink=None, batch_size=5000):
+class DeltaListTooLarge(Exception):
+    """A delimiter-less listing ran past its ceiling, so it is a subtree crawl, not a target."""
+
+
+def _delta_list_prefix(client, bucket, prefix, sink=None, batch_size=5000, max_objects=None):
     """Recursively list every object under `prefix` (no delimiter).
 
     Without `sink`, returns the raw S3 objects. With `sink`, hands them over in batches of at most
     `batch_size` as pages arrive and returns the count — a brand-new dataset with millions of objects
-    must not be held in memory (that is the large-bucket OOM path)."""
+    must not be held in memory (that is the large-bucket OOM path).
+
+    `max_objects` stops a listing that has clearly stopped being a target: this has no delimiter, so
+    a prefix promoted here on a wrong guess about its shape would drag the whole subtree in. Raising
+    beats running — the caller records a failed target and the delta degrades honestly."""
     objs = []
     total = 0
     token = None
@@ -2620,6 +2628,8 @@ def _delta_list_prefix(client, bucket, prefix, sink=None, batch_size=5000):
                 objs.append(o)
         if sink is not None and len(objs) >= batch_size:
             total += len(objs); sink(objs); objs = []
+        if max_objects is not None and total + len(objs) > max_objects:
+            raise DeltaListTooLarge(f"{prefix!r} exceeded {max_objects:,} objects without a delimiter")
         if not resp.get("IsTruncated", False):
             break
         token = resp.get("NextContinuationToken")
@@ -2645,6 +2655,13 @@ DELTA_NODE_MAX_PAGES = int(os.environ.get("DELTA_NODE_MAX_PAGES", "3"))
 # sub-folders. Half a 1000-entry page per page read is a clear majority either way, and the decision
 # only picks between streaming the prefix whole and reporting the walk partial.
 _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE = 500
+# ...and those objects must be at least this share of what the listing returned. A folder that is
+# half sub-prefixes is not flat in any sense that makes a delimiter-less listing safe.
+_FLAT_PREFIX_MIN_OBJECT_SHARE = float(os.environ.get("FLAT_PREFIX_MIN_OBJECT_SHARE", "0.9"))
+# A promoted prefix is listed without a delimiter, so a wrong guess descends its whole subtree.
+# Production's worst real case is ~789k objects under one prefix; past this it is not a delta
+# target any more and the delta degrades rather than quietly becoming a full crawl.
+DELTA_FLAT_MAX_OBJECTS = int(os.environ.get("DELTA_FLAT_MAX_OBJECTS", "2000000"))
 DELTA_ROOT_MAX_PAGES = int(os.environ.get("DELTA_ROOT_MAX_PAGES", "200"))  # root listing pages per delta before the delta is degraded (200k entries; production has 62k-prefix roots)
 
 
@@ -2658,12 +2675,14 @@ def _natural_key(prefix):
     return [(0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", s) if t]
 
 
-def _list_children(client, bucket, prefix, max_children=None, max_pages=None, contents=None):
+def _list_children(client, bucket, prefix, max_children=None, max_pages=None, contents=None, seen=None):
     """Immediate child 'folders' of prefix (delimiter list, fully paginated).
 
     Returns None when a bound trips (more than max_children children, or max_pages pages read
     without finishing) so callers keep the prefix as one unit. The listing's direct objects
-    (Contents) are appended to `contents` when given."""
+    (Contents) are appended to `contents` when given, and the child prefixes seen before the bound
+    tripped to `seen` — a caller deciding what KIND of folder this is needs both halves, because
+    `None` alone cannot distinguish a flat folder from one wide in sub-prefixes."""
     out, token, pages = [], None, 0
     while True:
         params = {"Bucket": bucket, "Prefix": prefix, "Delimiter": "/", "MaxKeys": 1000}
@@ -2671,7 +2690,10 @@ def _list_children(client, bucket, prefix, max_children=None, max_pages=None, co
             params["ContinuationToken"] = token
         resp = client.list_objects_v2(**params)
         pages += 1
-        out.extend(cp["Prefix"] for cp in resp.get("CommonPrefixes", []))
+        kids = [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+        out.extend(kids)
+        if seen is not None:
+            seen.extend(kids)
         if contents is not None:
             contents.extend(resp.get("Contents", []))
         if max_children is not None and len(out) > max_children:
@@ -2695,8 +2717,9 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
     brand-new hour folder — even when it sits beyond the first 1000 siblings and in a
     dataset that isn't the globally most-recently-modified one)."""
     if not tops:
-        return set(), False
+        return set(), False, set()
     targets, frontier, visited, truncated = set(), list(tops), 0, False
+    promoted = set()   # listed without a delimiter, so they carry a ceiling
     with _get_db(bucket, endpoint_id) as db, \
          ThreadPoolExecutor(max_workers=DELTA_LIST_CONCURRENCY) as ex:
         depth = 0
@@ -2714,13 +2737,13 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             # 20,000 children cost 20 LIST pages and 20,000 names in memory. A node wider than
             # DELTA_NODE_MAX_PAGES pages is left unvisited and the walk is reported partial.
             def _list_one(p):
-                direct = []   # the delimiter listing's own objects, to tell a flat prefix from a wide branch
+                direct, kids = [], []   # both halves: a folder can be wide in objects AND sub-prefixes
                 with _list_slots:   # deltas share the budget with full crawls
                     return (p, _list_children(client, bucket, p, max_pages=DELTA_NODE_MAX_PAGES,
-                                              contents=direct), direct)
+                                              contents=direct, seen=kids), direct, kids)
             listed = list(ex.map(_list_one, frontier))
             nxt = []
-            for cur, children, direct in listed:
+            for cur, children, direct, kids_seen in listed:
                 if children is None:
                     # The per-node page bound tripped. MaxKeys counts returned entries — objects and
                     # rolled-up prefixes together — so this only proves results remained, not that the
@@ -2738,11 +2761,19 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
                     # A folder wide in SUB-PREFIXES is a different animal: streaming it has no
                     # delimiter, so it would walk the whole subtree — a full crawl by another name.
                     # Those still report the walk as partial.
-                    if len(direct) >= DELTA_NODE_MAX_PAGES * _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE:
-                        targets.add(cur)
-                        log.info("[%s:%s] Delta discovery: '%s' is flat (%d+ objects directly under it, "
-                                 "no sub-folders to walk) — listing it whole instead of reporting the "
-                                 "walk truncated", endpoint_id or "default", bucket, cur[:80], len(direct))
+                    # Counting objects alone is not enough: a folder can be wide in BOTH. 1,500
+                    # objects beside 1,500 sub-prefixes clears any absolute threshold, and promoting
+                    # it streams every one of those sub-trees. Objects must DOMINATE what we read,
+                    # and the promoted listing carries a ceiling for the case the sample cannot see
+                    # (objects sort before sub-prefixes, so a truncated page may show only objects).
+                    entries = len(direct) + len(kids_seen)
+                    dominant = entries > 0 and len(kids_seen) <= entries * (1.0 - _FLAT_PREFIX_MIN_OBJECT_SHARE)
+                    if len(direct) >= DELTA_NODE_MAX_PAGES * _FLAT_PREFIX_MIN_OBJECTS_PER_PAGE and dominant:
+                        targets.add(cur); promoted.add(cur)
+                        log.info("[%s:%s] Delta discovery: '%s' is flat (%d objects directly under it "
+                                 "beside %d sub-folders) — listing it whole instead of reporting the "
+                                 "walk truncated", endpoint_id or "default", bucket, cur[:80],
+                                 len(direct), len(kids_seen))
                     else:
                         truncated = True
                         log.warning("[%s:%s] Delta discovery bound hit at '%s': still more results after "
@@ -2768,7 +2799,7 @@ def _discover_delta_targets(client, bucket, endpoint_id, tops):
             frontier = nxt
         if frontier:
             truncated = True   # depth or node budget exhausted with folders still unvisited
-    return targets, truncated
+    return targets, truncated, promoted
 
 
 def _delta_write(db, objs, gen):
@@ -2844,7 +2875,7 @@ def _delta_crawl(bucket, endpoint_id):
         row = db.execute("SELECT current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
         gen = (row[0] if row else 0) or 0
     try:
-        discovered, partial = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
+        discovered, partial, promoted = _discover_delta_targets(client, bucket, eid, tops)  # opens its own per-thread connections
         if partial:
             failed_targets.append("discovery:truncated")   # bounded walk did not cover every folder → not a clean delta
     except Exception as e:
@@ -2852,6 +2883,7 @@ def _delta_crawl(bucket, endpoint_id):
         # freshness: keep the hot-prefix refresh, but report the delta as degraded.
         log.warning("[%s:%s] delta target discovery failed: %s", eid, bucket, e)
         discovered = set()
+        promoted = set()
         failed_targets.append("discovery")
     targets = _minimal_prefixes(set(hot) | discovered | new_tops)   # new top-level prefixes are listed in full
 
@@ -2869,7 +2901,10 @@ def _delta_crawl(bucket, endpoint_id):
     def _list_or_fail(tp):
         try:
             with _list_slots:   # delta target listing draws on the same global budget
-                res = _delta_list_prefix(client, bucket, tp, sink=flush)
+                # Only a promoted prefix carries the ceiling: an ordinary hot target came from the
+                # index and is known-small; a promotion is a guess about folder shape.
+                res = _delta_list_prefix(client, bucket, tp, sink=flush,
+                                         max_objects=DELTA_FLAT_MAX_OBJECTS if tp in promoted else None)
             if isinstance(res, list):   # a listing helper that returns objects instead of streaming
                 flush(res)
             return tp, True

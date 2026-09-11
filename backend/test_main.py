@@ -1618,10 +1618,14 @@ class TestFlatPrefixDiscovery:
     on a 10.3M-object bucket. No page budget fixes that: covering it would take ~790 pages. A flat
     prefix must instead be handed to the target phase, which streams a prefix whole with a sink."""
 
-    def _client(self, n_objects=0, n_children=0, per_page=1000):
+    def _client(self, n_objects=0, n_children=0, per_page=1000, interleave=False):
         """A delimiter listing paged at 1,000 like S3, holding objects, sub-folders, or both."""
-        entries = ([("o", f"logs/f{i:07d}.log") for i in range(n_objects)]
-                   + [("p", f"logs/s{i:05d}/") for i in range(n_children)])
+        objs = [("o", f"logs/f{i:07d}.log") for i in range(n_objects)]
+        kids = [("p", f"logs/s{i:05d}/") for i in range(n_children)]
+        if interleave:      # S3 returns keys in sort order; a real mixed folder alternates
+            entries = [x for pair in zip(objs, kids) for x in pair] + objs[len(kids):] + kids[len(objs):]
+        else:
+            entries = objs + kids
         pages = [entries[s:s + per_page] for s in range(0, len(entries), per_page)] or [[]]
         calls = {"n": 0}
         def list_objects_v2(**p):
@@ -1650,24 +1654,52 @@ class TestFlatPrefixDiscovery:
         m = _main_module()
         # far more objects than any page budget can cover, and no sub-folders at all
         c, _ = self._client(n_objects=m.DELTA_NODE_MAX_PAGES * 1000 + 5000)
-        targets, truncated = self._discover(m, c)
+        targets, truncated, _ = self._discover(m, c)
         assert "logs/" in targets, "a flat prefix must become a streaming target"
         assert truncated is False, \
             "a flat prefix reported the whole delta truncated, so the bucket could never certify"
+
+    def test_a_mixed_folder_is_not_mistaken_for_flat(self, app):
+        """A folder can be wide in BOTH at once. Counting only its objects and calling it flat
+        promotes it to a delimiter-less listing that walks every sub-tree — a delta silently
+        becoming a full crawl."""
+        m = _main_module()
+        half = m.DELTA_NODE_MAX_PAGES * 1000
+        c, _ = self._client(n_objects=half, n_children=half, per_page=1000, interleave=True)
+        targets, truncated, promoted = self._discover(m, c, bucket="mixedbkt")
+        assert "logs/" not in promoted, \
+            "a folder with as many sub-prefixes as objects was promoted to a recursive listing"
+        assert truncated is True, "a folder wide in sub-prefixes must report the walk partial"
+
+    def test_a_promoted_listing_is_bounded(self, app):
+        """Objects sort before sub-prefixes, so a truncated sample cannot always see them. The
+        promotion is a guess; without a ceiling a wrong one descends the whole subtree."""
+        m = _main_module()
+        pages = {"n": 0}
+        def list_objects_v2(**p):
+            pages["n"] += 1
+            return {"Contents": [{"Key": f"logs/x{pages['n']:05d}-{i}.log", "Size": 1,
+                                  "LastModified": _dt.datetime(2026, 9, 10), "ETag": "e"}
+                                 for i in range(1000)],
+                    "CommonPrefixes": [], "IsTruncated": True, "NextContinuationToken": f"t{pages['n']}"}
+        cl = MagicMock(); cl.list_objects_v2.side_effect = list_objects_v2
+        with pytest.raises(m.DeltaListTooLarge):
+            m._delta_list_prefix(cl, "b", "logs/", sink=lambda o: None, batch_size=1000, max_objects=5000)
+        assert pages["n"] < 50, "the ceiling did not stop an endless listing"
 
     def test_a_wide_branch_still_degrades_rather_than_walking_the_subtree(self, app):
         """The inverse must not regress: streaming has no delimiter, so promoting a folder that is
         wide in SUB-PREFIXES would walk its entire subtree — a full crawl by another name."""
         m = _main_module()
         c, _ = self._client(n_children=m.DELTA_NODE_MAX_PAGES * 1000 + 5000)
-        targets, truncated = self._discover(m, c, bucket="widebkt")
+        targets, truncated, _ = self._discover(m, c, bucket="widebkt")
         assert truncated is True, "an oversized branch must still report the walk partial"
         assert "logs/" not in targets, "a wide branch must not be streamed whole"
 
     def test_a_prefix_within_the_budget_is_unaffected(self, app):
         m = _main_module()
         c, calls = self._client(n_children=2500)
-        targets, truncated = self._discover(m, c, bucket="normalbkt")
+        targets, truncated, _ = self._discover(m, c, bucket="normalbkt")
         assert truncated is False and calls["n"] >= 3, "a 2,500-child node must still walk normally"
 
     def test_the_streaming_lister_can_actually_take_the_promoted_prefix(self, app):

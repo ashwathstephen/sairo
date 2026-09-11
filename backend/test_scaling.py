@@ -1123,7 +1123,7 @@ class TestTruthfulStates:
             if tp == "b/":
                 raise ConnectionError("provider went away")
             return [{"Key": f"{tp}new", "Size": 1, "LastModified": lm, "ETag": '"n"'}]
-        with patch.object(m, "_hot_target_prefixes", return_value=["a/", "b/"]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=["a/", "b/"]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m, "_list_children", return_value=[]), \
              patch.object(m, "_delta_list_prefix", side_effect=listing), patch.object(m._s3_manager, "get_client", return_value=object()):
             changed, failed = m._delta_crawl(bucket, "default")
@@ -1410,7 +1410,7 @@ class TestTruthfulStates:
         bucket = "truth-delta-root"
         m._init_db(bucket, "default")
         client, calls = self._root_client(m, root_objs=["fresh.bin"], tops=[])
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m._s3_manager, "get_client", return_value=client):
             changed, failed = m._delta_crawl(bucket, "default")
         assert calls and calls[0] == ("", True), "a delta must issue the root LIST even with no hot prefixes"
@@ -1427,7 +1427,7 @@ class TestTruthfulStates:
         with m._get_db(bucket, "default") as db:
             db.execute("INSERT OR IGNORE INTO discovered_prefixes (prefix) VALUES ('old/')"); db.commit()
         client, calls = self._root_client(m, root_objs=[], tops=["old/", "brandnew/"], prefix_objs={"brandnew/": ["brandnew/part-1.zip", "brandnew/part-2.zip"]})
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m._s3_manager, "get_client", return_value=client):
             changed, failed = m._delta_crawl(bucket, "default")
         assert (changed, failed) == (2, []), (changed, failed)
@@ -1444,13 +1444,13 @@ class TestTruthfulStates:
         bucket = "truth-delta-rootfail"
         m._init_db(bucket, "default")
         client, calls = self._root_client(m, root_objs=[], tops=[], fail_root=True, prefix_objs={"hot/": ["hot/x"]})
-        with patch.object(m, "_hot_target_prefixes", return_value=["hot/"]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=["hot/"]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m._s3_manager, "get_client", return_value=client):
             changed, failed = m._delta_crawl(bucket, "default")
         assert changed == 1 and failed == ["root"], (changed, failed)   # hot prefix still refreshed, delta not certified
         # oversized root (page bound) is reported the same way
         client2, _ = self._root_client(m, root_objs=[], tops=[])
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m, "_list_children", return_value=None), patch.object(m._s3_manager, "get_client", return_value=client2):
             assert m._delta_crawl(bucket, "default") == (0, ["root"])
 
@@ -1469,7 +1469,7 @@ class TestTruthfulStates:
                 raise ConnectionError("provider went away")
             return orig(**p)
         client.list_objects_v2.side_effect = failing
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m._s3_manager, "get_client", return_value=client):
             changed, failed = m._delta_crawl(bucket, "default")
         assert failed == ["brandnew/"], failed
@@ -1477,7 +1477,7 @@ class TestTruthfulStates:
             assert db.execute("SELECT COUNT(*) FROM discovered_prefixes WHERE prefix='brandnew/'").fetchone()[0] == 0, "must stay unknown until listed"
         # next delta: the prefix is still new, gets listed, and only then recorded
         client2, calls2 = self._root_client(m, root_objs=[], tops=["brandnew/"], prefix_objs={"brandnew/": ["brandnew/a"]})
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m._s3_manager, "get_client", return_value=client2):
             assert m._delta_crawl(bucket, "default") == (1, [])
         assert ("brandnew/", False) in calls2
@@ -1494,14 +1494,14 @@ class TestTruthfulStates:
         calls = []   # list.append is atomic under the GIL; MagicMock.call_count is not (16 listing threads lost increments on CI)
         client = MagicMock(); client.list_objects_v2.side_effect = lambda **p: calls.append(p) or {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
         with patch.object(m, "DELTA_MAX_NODES", 2000):
-            targets, partial = m._discover_delta_targets(client, bucket, "default", tops)
+            targets, partial, _ = m._discover_delta_targets(client, bucket, "default", tops)
         assert partial is True
         assert len(calls) == 2000, len(calls)
         assert len(targets) == 2000 and "p02036/" in targets and "p00000/" not in targets, "newest names are kept"
         # and the delta reports the partial walk instead of certifying itself
         with patch.object(m, "_hot_target_prefixes", return_value=["hot/"]), patch.object(m, "_list_children", return_value=[]), \
              patch.object(m, "_delta_list_prefix", return_value=[]), \
-             patch.object(m, "_discover_delta_targets", return_value=(set(), True)), patch.object(m._s3_manager, "get_client", return_value=object()):
+             patch.object(m, "_discover_delta_targets", return_value=(set(), True, set())), patch.object(m._s3_manager, "get_client", return_value=object()):
             assert m._delta_crawl(bucket, "default") == (0, ["discovery:truncated"])
 
     def test_delta_streams_a_large_new_prefix_in_bounded_batches(self):
@@ -1524,7 +1524,7 @@ class TestTruthfulStates:
         real = m._delta_write
         def spy(db, objs, gen):
             sizes.append(len(objs)); return real(db, objs, gen)
-        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False)), \
+        with patch.object(m, "_hot_target_prefixes", return_value=[]), patch.object(m, "_discover_delta_targets", return_value=(set(), False, set())), \
              patch.object(m, "_delta_write", side_effect=spy), patch.object(m._s3_manager, "get_client", return_value=client):
             changed, failed = m._delta_crawl(bucket, "default")
         assert (changed, failed) == (7000, []), (changed, failed)
@@ -1546,7 +1546,7 @@ class TestTruthfulStates:
                     "Contents": [], "IsTruncated": tok + 1 < 20, "NextContinuationToken": str(tok + 1)}
         client = MagicMock(); client.list_objects_v2.side_effect = list_objects_v2
         with patch.object(m, "DELTA_MAX_NODES", 1), patch.object(m, "DELTA_NODE_MAX_PAGES", 2):
-            targets, partial = m._discover_delta_targets(client, bucket, "default", ["wide/"])
+            targets, partial, _ = m._discover_delta_targets(client, bucket, "default", ["wide/"])
         assert partial is True and targets == set()
         assert client.list_objects_v2.call_count == 2, client.list_objects_v2.call_count
 
