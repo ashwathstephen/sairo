@@ -13,6 +13,7 @@ import json
 import base64
 import hashlib
 import time
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
@@ -1357,7 +1358,7 @@ class TestRebuildDeltaRace:
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=1, current_crawl_gen=9")
             db.commit()
-        m._rebuilding.discard(key)
+        m._rebuilding.pop(key, None)
 
         during_check = {}
         real_healthy = m._fts_healthy
@@ -1373,7 +1374,7 @@ class TestRebuildDeltaRace:
 
         assert during_check.get("delta_allowed") is False, \
             "a delta was allowed to start while the search index was being verified"
-        m._rebuilding.discard(key)
+        m._rebuilding.pop(key, None)
 
     def test_every_early_return_releases_the_bucket(self, app):
         """Reserving early must not strand the key when no rebuild is needed."""
@@ -1386,7 +1387,7 @@ class TestRebuildDeltaRace:
         with m._get_db(bucket, "default") as db:   # already current => early return, no rebuild
             db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=3, current_crawl_gen=3")
             db.commit()
-        m._rebuilding.discard(key)
+        m._rebuilding.pop(key, None)
         with patch.object(m, "_fts_healthy", lambda db: True):
             assert m._ensure_fts_ready(bucket, "default") is None
         assert key not in m._rebuilding, "bucket left reserved after an early return"
@@ -1404,7 +1405,7 @@ class TestRebuildDeltaRace:
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='complete', fts_ready_gen=1, current_crawl_gen=9")
             db.commit()
-        m._rebuilding.discard(key)
+        m._rebuilding.pop(key, None)
         m._crawling[key] = time.time()          # a delta started while this check sat in the queue
         started = []
         try:
@@ -1419,11 +1420,191 @@ class TestRebuildDeltaRace:
         """Reserving only when the worker starts leaves the queue window open."""
         m = _main_module()
         key = "default:racebkt4"
-        m._rebuilding.discard(key); m._crawling.pop(key, None)
-        assert m._reserve_rebuild(key) is True
+        m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+        assert m._reserve_rebuild(key) is not None
         try:
             # while reserved, neither a delta nor a second rebuild may claim the bucket
             assert m._queue_delta_crawl("racebkt4", "default") is False
-            assert m._reserve_rebuild(key) is False
+            assert m._reserve_rebuild(key) is None
         finally:
-            m._rebuilding.discard(key)
+            m._rebuilding.pop(key, None)
+
+
+class TestRebuildStallGuard:
+    """Production froze a 12,479-object bucket for over an hour: its startup search-index repair
+    never returned, and `_rebuilding` — unlike `_crawling`, which has _CRAWL_STALL_SECONDS and
+    _CRAWL_MAX_DURATION — had no timestamp and no escape, so _queue_crawl and _queue_delta_crawl
+    both refused for the life of the process. Every other bucket stayed fresh; that one never
+    crawled again. The probe that hung it was also unbounded."""
+
+    def test_a_rebuild_that_never_returns_stops_blocking_the_bucket(self, app):
+        m = _main_module()
+        key = "default:stallbkt"
+        m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+        try:
+            with m._crawl_lock:
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time())
+            assert m._queue_crawl("stallbkt", "default") is False, \
+                "a running rebuild must still block a crawl"
+            with m._crawl_lock:                       # same rebuild, now past the ceiling
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION - 1)
+            with m._crawl_lock:
+                assert m._rebuild_blocked(key) is False, \
+                    "a rebuild past _REBUILD_MAX_DURATION must not block the bucket forever"
+            assert key not in m._rebuilding, "the abandoned reservation must be dropped"
+        finally:
+            m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+
+    def test_a_stalled_rebuild_also_releases_the_delta_path(self, app):
+        m = _main_module()
+        key = "default:stallbkt2"
+        m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+        try:
+            with m._crawl_lock:
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION - 1)
+            assert m._queue_delta_crawl("stallbkt2", "default") is not False, \
+                "delta stayed blocked by a rebuild that will never finish"
+        finally:
+            m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+
+    def test_a_healthy_rebuild_is_never_abandoned_early(self, app):
+        m = _main_module()
+        key = "default:stallbkt3"
+        m._rebuilding.pop(key, None)
+        try:
+            with m._crawl_lock:
+                m._rebuilding[key] = (next(m._rebuild_seq), time.time() - m._REBUILD_MAX_DURATION + 60)
+                assert m._rebuild_blocked(key) is True
+            assert m._reserve_rebuild(key) is None, "a second rebuild claimed a live bucket"
+        finally:
+            m._rebuilding.pop(key, None)
+
+    def test_health_probe_is_bounded_and_reports_unhealthy_rather_than_hanging(self, app):
+        """A corrupt index makes an ordinary scan run without end. The probe must give up and read
+        as unhealthy (so the caller rebuilds), never block the caller."""
+        m = _main_module()
+        real = sqlite3.connect(":memory:")
+        real.row_factory = sqlite3.Row
+        real.execute("CREATE TABLE objects (key TEXT)")
+        real.execute("INSERT INTO objects VALUES ('a')")
+        real.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, tokenize='trigram')")
+        forever = ("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<100000000) "
+                   "SELECT COUNT(*) FROM c")
+
+        class CorruptIndex:
+            """Any read of objects_fts never finishes, as on the production bucket."""
+            def __init__(self, c): self._c = c
+            def execute(self, sql, *a, **k):
+                if "objects_fts" in sql and "sqlite_master" not in sql:
+                    return self._c.execute(forever)
+                return self._c.execute(sql, *a, **k)
+            def __getattr__(self, n): return getattr(self._c, n)
+
+        with patch.object(m, "FTS_PROBE_MS", 1500):
+            t0 = time.monotonic()
+            result = m._fts_healthy(CorruptIndex(real))
+            elapsed = time.monotonic() - t0
+        assert elapsed < 5.0, f"health probe ran unbounded ({elapsed:.1f}s)"
+        assert result is False, "an index that cannot be verified must not read as healthy"
+
+    def test_probe_does_not_scan_the_whole_table(self, app):
+        """The probe must stay O(1) in bucket size. It once counted every row, which at 10M keys
+        takes seconds — enough to trip its own deadline and trigger a needless full rebuild."""
+        m = _main_module()
+        big = sqlite3.connect(":memory:")
+        big.execute("CREATE TABLE objects (key TEXT PRIMARY KEY)")
+        big.executemany("INSERT INTO objects VALUES (?)", [(f"k/{i:07d}",) for i in range(200_000)])
+        big.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, content='objects', tokenize='trigram')")
+        big.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects")
+        big.commit()
+        t0 = time.monotonic()
+        assert m._fts_healthy(big) is True
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0, f"probe scales with bucket size ({elapsed:.2f}s at 200k rows)"
+
+    def test_probe_still_classifies_real_indexes_correctly(self, app):
+        """The deadline must not change any healthy/unhealthy verdict."""
+        m = _main_module()
+        empty = sqlite3.connect(":memory:")
+        empty.execute("CREATE TABLE objects (key TEXT)")
+        empty.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, content='objects', tokenize='trigram')")
+        assert m._fts_healthy(empty) is True, "empty bucket with an index is healthy"
+
+        populated = sqlite3.connect(":memory:")
+        populated.execute("CREATE TABLE objects (key TEXT)")
+        populated.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, content='objects', tokenize='trigram')")
+        populated.execute("INSERT INTO objects VALUES ('a/b.txt')")
+        populated.execute("INSERT INTO objects_fts(rowid, key) SELECT rowid, key FROM objects")
+        populated.commit()
+        assert m._fts_healthy(populated) is True
+
+        missing = sqlite3.connect(":memory:")
+        missing.execute("CREATE TABLE objects (key TEXT)")
+        missing.execute("INSERT INTO objects VALUES ('x')")
+        assert m._fts_healthy(missing) is False
+
+    def test_deadline_does_not_leak_onto_the_connection(self, app):
+        """The progress handler must be cleared, or every later query on that connection aborts."""
+        m = _main_module()
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE objects (key TEXT)")
+        m._fts_healthy(conn)
+        conn.execute("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<300000) "
+                     "SELECT COUNT(*) FROM c").fetchall()
+
+    def test_late_release_cannot_clear_a_replacement_reservation(self, app):
+        """An expired rebuild can still return after the ceiling handed its bucket to a
+        replacement. A blind delete on release strips the replacement's claim and lets a crawl run
+        underneath it, which is the collision the reservation exists to prevent."""
+        m = _main_module()
+        key = "default:handoverbkt"
+        m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+        try:
+            first = m._reserve_rebuild(key)
+            assert first is not None
+            # first overruns; the ceiling hands the bucket on
+            with m._crawl_lock:
+                m._rebuilding[key] = (first, time.time() - m._REBUILD_MAX_DURATION - 1)
+                assert m._rebuild_blocked(key) is False
+            second = m._reserve_rebuild(key)
+            assert second is not None and second != first, "replacement could not claim the bucket"
+
+            m._release_rebuild(key, first)          # the late finisher returns at last
+
+            assert key in m._rebuilding, "a late release cleared the replacement's reservation"
+            with m._crawl_lock:
+                assert m._rebuild_blocked(key) is True
+            assert m._queue_delta_crawl("handoverbkt", "default") is False, \
+                "a delta started underneath a live rebuild"
+            m._release_rebuild(key, second)         # the real owner can still release
+            assert key not in m._rebuilding
+        finally:
+            m._rebuilding.pop(key, None); m._crawling.pop(key, None)
+
+    def test_probe_timeout_inside_fts_is_empty_is_not_reported_healthy(self, app):
+        """_fts_is_empty() answers False on ANY exception, the deadline's own abort included, and
+        `not False` reads as healthy — certifying the very index the bound exists to catch."""
+        m = _main_module()
+        real = sqlite3.connect(":memory:")
+        real.row_factory = sqlite3.Row
+        real.execute("CREATE TABLE objects (key TEXT)")
+        real.execute("INSERT INTO objects VALUES ('a')")
+        real.execute("CREATE VIRTUAL TABLE objects_fts USING fts5(key, tokenize='trigram')")
+        forever = ("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<100000000) "
+                   "SELECT COUNT(*) FROM c")
+
+        class SlowOnlyInIsEmpty:
+            """Everything answers fast except the objects_fts_data read inside _fts_is_empty()."""
+            def __init__(self, c): self._c = c
+            def execute(self, sql, *a, **k):
+                if "objects_fts_data" in sql:
+                    return self._c.execute(forever)
+                return self._c.execute(sql, *a, **k)
+            def __getattr__(self, n): return getattr(self._c, n)
+
+        with patch.object(m, "FTS_PROBE_MS", 1500):
+            t0 = time.monotonic()
+            result = m._fts_healthy(SlowOnlyInIsEmpty(real))
+            elapsed = time.monotonic() - t0
+        assert elapsed < 5.0, f"probe ran unbounded ({elapsed:.1f}s)"
+        assert result is False, "a timed-out probe was reported as a healthy index"

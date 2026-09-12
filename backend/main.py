@@ -6,6 +6,7 @@ import os
 import secrets
 import sqlite3
 from urllib.parse import urlparse
+import itertools
 import threading
 import shutil
 import time
@@ -1256,10 +1257,13 @@ def _disk_low():
         return u.total > 0 and (u.free * 100.0 / u.total) < MIN_FREE_DISK_PCT
     except Exception:
         return False
-_rebuilding = set()  # crawl_keys whose post-crawl rebuild is in progress (blocks a colliding recrawl)
+_rebuilding = {}  # crawl_key -> (token, start time) of the in-progress rebuild (blocks a colliding recrawl)
+_rebuild_seq = itertools.count(1)  # reservation tokens, so a late release cannot clear a replacement's claim
 _fts_rebuild_locks = {}  # crawl_key -> Lock: one FTS rebuild per bucket at a time (guarded by _crawl_lock)
 _crawl_lock = threading.Lock()
 _CRAWL_MAX_DURATION = 7200  # 2 hours — if a crawl exceeds this, force-release the lock
+_REBUILD_MAX_DURATION = int(os.environ.get("REBUILD_MAX_DURATION", "7200"))  # 2 h, as for a crawl — a rebuild past this is abandoned so the bucket can crawl again
+FTS_PROBE_MS = int(os.environ.get("FTS_PROBE_MS", "10000"))  # cap on the search-index health probe (3 O(1) queries); only a pathological index reaches it
 
 
 def _crawl_prefix(bucket, prefix, max_retries=3, endpoint_id=None, batch_callback=None, batch_size=10000, should_stop=None):
@@ -1492,17 +1496,51 @@ def _seed_from_existing(prev_status, total, dur):
     return total > 0 and dur > 0 and prev_status == "complete"
 
 
-def _reserve_rebuild(crawl_key):
-    """Claim a bucket for a search-index rebuild. False when a crawl, a delta or another rebuild
-    already owns it. Callers that get True must release it."""
-    with _crawl_lock:
-        if crawl_key in _rebuilding or crawl_key in _crawling:
-            return False
-        _rebuilding.add(crawl_key)
+def _rebuild_blocked(crawl_key):
+    """True while a rebuild owns this bucket. Caller must hold _crawl_lock.
+
+    A rebuild that never returns used to freeze its bucket until the process restarted: _rebuilding
+    had no timestamp and no escape, unlike _crawling (_CRAWL_STALL_SECONDS/_CRAWL_MAX_DURATION), so
+    both _queue_crawl and _queue_delta_crawl refused forever. Seen in production on a 12k-object
+    bucket: zero crawls and zero deltas for over an hour while every other bucket stayed fresh.
+    Past _REBUILD_MAX_DURATION the reservation is abandoned so the scheduler can make progress; the
+    orphaned rebuild thread still holds the bucket's own _fts_rebuild_locks entry, so a later
+    rebuild waits for it rather than corrupting the shadow table."""
+    held = _rebuilding.get(crawl_key)
+    if held is None:
+        return False
+    if time.time() - held[1] <= _REBUILD_MAX_DURATION:
         return True
+    del _rebuilding[crawl_key]
+    log.warning("Search-index rebuild for %s has run for over %d min with no result; releasing the "
+                "bucket so crawls can resume", crawl_key, int(_REBUILD_MAX_DURATION // 60))
+    return False
 
 
-def _ensure_fts_ready(bucket, endpoint_id=None, reserved=False):
+def _reserve_rebuild(crawl_key):
+    """Claim a bucket for a search-index rebuild. Returns a token the caller must release with, or
+    None when a crawl, a delta or another rebuild already owns it."""
+    with _crawl_lock:
+        if _rebuild_blocked(crawl_key) or crawl_key in _crawling:
+            return None
+        token = next(_rebuild_seq)
+        _rebuilding[crawl_key] = (token, time.time())
+        return token
+
+
+def _release_rebuild(crawl_key, token):
+    """Drop a reservation, but only the one this caller made.
+
+    An expired rebuild can still return after the ceiling handed its bucket to a replacement, and a
+    blind delete would then strip the replacement's claim and let a crawl run underneath it. The
+    token makes release a compare-and-delete, so a late finisher clears nothing."""
+    with _crawl_lock:
+        held = _rebuilding.get(crawl_key)
+        if held is not None and held[0] == token:
+            del _rebuilding[crawl_key]
+
+
+def _ensure_fts_ready(bucket, endpoint_id=None, token=None):
     """Startup repair for a served index whose search generation is absent or stale.
 
     Databases from before fts_ready_gen existed have NULL: the marker is backfilled only after SQLite's
@@ -1517,11 +1555,12 @@ def _ensure_fts_ready(bucket, endpoint_id=None, reserved=False):
     # reserving afterwards left a window: a delta started during the check, the rebuild then took
     # the write lock for its swap, and the delta died with "database is locked" (seen in production
     # on the first boot after 3.7.0, when every bucket is verified at once).
-    if not reserved and not _reserve_rebuild(crawl_key):
-        return None
+    if token is None:
+        token = _reserve_rebuild(crawl_key)
+        if token is None:
+            return None
     def _release():
-        with _crawl_lock:
-            _rebuilding.discard(crawl_key)
+        _release_rebuild(crawl_key, token)
     try:
         with _get_db(bucket, eid) as db:
             row = db.execute("SELECT status, fts_ready_gen, current_crawl_gen FROM crawl_status WHERE id=1").fetchone()
@@ -1543,16 +1582,48 @@ def _ensure_fts_ready(bucket, endpoint_id=None, reserved=False):
     return _rebuild_fts_async(bucket, eid, done=_release)
 
 
+@contextmanager
+def _sqlite_deadline(db, ms):
+    """Abort SQLite work in this block once `ms` have passed. A corrupt FTS index makes an ordinary
+    scan run unboundedly (production: a 12k-object bucket whose probe never returned, freezing the
+    bucket and hanging every crawl-status poll on it). The handler runs between VM steps, so the
+    statement raises instead of blocking the caller forever."""
+    end = time.monotonic() + ms / 1000.0
+    fired = []
+    def _abort():
+        if time.monotonic() > end:
+            fired.append(True)
+            return 1
+        return 0
+    db.set_progress_handler(_abort, 2000)
+    try:
+        yield fired          # non-empty once the deadline aborted a statement
+    finally:
+        db.set_progress_handler(None, 0)
+
+
 def _fts_healthy(db):
     """The search index exists, is readable and is not empty while objects exist. A generation
-    marker alone is not proof: a missing or unreadable FTS table must never read as ready."""
+    marker alone is not proof: a missing or unreadable FTS table must never read as ready.
+
+    Bounded by FTS_PROBE_MS: a probe that cannot finish is not evidence of health, so it reads as
+    unhealthy and the caller rebuilds — never as a hang."""
     try:
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects_fts'").fetchone():
-            return False
-        db.execute("SELECT rowid FROM objects_fts LIMIT 1").fetchall()
-        if db.execute("SELECT COUNT(*) FROM objects").fetchone()[0] == 0:
-            return True
-        return not _fts_is_empty(db)
+        with _sqlite_deadline(db, FTS_PROBE_MS) as timed_out:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects_fts'").fetchone():
+                return False
+            db.execute("SELECT rowid FROM objects_fts LIMIT 1").fetchall()
+            # EXISTS, not COUNT(*): the probe only asks "are there any objects", and counting scans
+            # the whole primary key — seconds at 10M rows, which would push a healthy large bucket
+            # past the deadline and trigger a needless multi-minute rebuild.
+            if not db.execute("SELECT 1 FROM objects LIMIT 1").fetchone():
+                healthy = True
+            else:
+                healthy = not _fts_is_empty(db)
+            # A probe that ran out of time proves nothing. Checking the flag is not belt-and-braces:
+            # _fts_is_empty() answers False on ANY exception, the deadline's own abort included, and
+            # `not False` would certify exactly the unverifiable index this bound exists to catch.
+            return healthy and not timed_out
     except Exception:
         return False
 
@@ -2131,7 +2202,8 @@ def _run_crawl(bucket, endpoint_id=None):
             _write_locks.pop(crawl_key, None)
             _crawl_progress_ts.pop(crawl_key, None)
             if crawl_ok:
-                _rebuilding.add(crawl_key)
+                rebuild_token = next(_rebuild_seq)
+                _rebuilding[crawl_key] = (rebuild_token, time.time())
                 # Record full-crawl timing so the scheduler can decide between a
                 # cheap full recrawl (small buckets) and fast delta crawls (large).
                 m = _crawl_meta.setdefault(crawl_key, {})
@@ -2158,8 +2230,7 @@ def _run_crawl(bucket, endpoint_id=None):
     if crawl_ok:
         def _do_rebuilds():
             def _release():
-                with _crawl_lock:
-                    _rebuilding.discard(crawl_key)
+                _release_rebuild(crawl_key, rebuild_token)
             handed_off = False
             try:
                 # Run the fast metadata rebuilds FIRST and grab the writer quickly.
@@ -2814,7 +2885,7 @@ def _queue_delta_crawl(bucket, endpoint_id=None):
     eid = endpoint_id or "default"
     crawl_key = f"{eid}:{bucket}"
     with _crawl_lock:
-        if crawl_key in _rebuilding or crawl_key in _crawling:
+        if _rebuild_blocked(crawl_key) or crawl_key in _crawling:
             return False
         _crawling[crawl_key] = time.time()  # reuse crawl lock to block colliding full crawls
 
@@ -2880,7 +2951,7 @@ def _queue_crawl(bucket, endpoint_id=None):
         # Don't start a crawl while this bucket's post-crawl rebuild is still
         # running — they would contend on the single SQLite writer and the
         # rebuild would lose, leaving folder_stats/prefix_children empty.
-        if crawl_key in _rebuilding:
+        if _rebuild_blocked(crawl_key):
             return False
         started_at = _crawling.get(crawl_key)
         if started_at:
@@ -3044,12 +3115,12 @@ def startup():
                             # Reserve before submitting, not when the worker starts: these checks
                             # share a 4-worker pool, so a queued bucket could begin a delta first
                             # and then collide when its check finally ran.
-                            if _reserve_rebuild(f"{eid}:{name}"):
+                            _tok = _reserve_rebuild(f"{eid}:{name}")
+                            if _tok is not None:
                                 try:
-                                    _rebuild_pool.submit(_ensure_fts_ready, name, eid, reserved=True)
+                                    _rebuild_pool.submit(_ensure_fts_ready, name, eid, token=_tok)
                                 except Exception:
-                                    with _crawl_lock:
-                                        _rebuilding.discard(f"{eid}:{name}")
+                                    _release_rebuild(f"{eid}:{name}", _tok)
                                     raise
                             log.info("Seeded schedule for %s:%s from existing index (%s objects); will keep fresh via scheduler",
                                      eid, name, f"{total:,}")

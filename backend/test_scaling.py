@@ -1021,7 +1021,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")   # the rebuild pool was mocked, so release the post-crawl marker by hand
+            m._rebuilding.pop(f"default:{bucket}", None)   # the rebuild pool was mocked, so release the post-crawl marker by hand
         with m._get_db(bucket, "default") as db:
             before = dict(db.execute("SELECT status, last_crawl_end FROM crawl_status").fetchone())
         def boom(*a, **k): raise RuntimeError("SlowDown")
@@ -1043,7 +1043,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         d = m.crawl_status(bucket, user={})
         assert d["status"] == "complete" and d["fts_ready_gen"] is None and d["rebuilding"] is True and d["search_ready"] is False, d
         assert m._fts_should_rebuild(bucket, "default", False) is True, "no committed rebuild for this generation → rebuild"
@@ -1072,7 +1072,7 @@ class TestTruthfulStates:
         meta = m._crawl_meta.get(key, {})
         assert "last_full" not in meta and meta.get("degraded_at"), meta   # scheduler retries after RECRAWL_INTERVAL, no delta-only period
         with m._crawl_lock:
-            m._rebuilding.discard(key)
+            m._rebuilding.pop(key, None)
         healthy = self._mk(m, bucket)
         with patch.object(m._s3_manager, "get_client", return_value=healthy), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
@@ -1093,7 +1093,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(key)
+            m._rebuilding.pop(key, None)
         with m._get_db(bucket, "default") as db:
             end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
         # degraded delta: one target failed
@@ -1165,7 +1165,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         with m._get_db(bucket, "default") as db:
             end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
             db.execute("UPDATE crawl_status SET status='error: AccessDenied', last_error='AccessDenied'"); db.commit()
@@ -1186,7 +1186,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         # legacy database: the previous release built the index at completion but knew no marker.
         # Simulate: healthy index, fts_ready_gen NULL → verified backfill, no rebuild.
         m._rebuild_fts(bucket, "default")
@@ -1215,7 +1215,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         m._rebuild_fts(bucket, "default")
         assert m.crawl_status(bucket, user={})["search_ready"] is True
         # marker says ready, but the index has been emptied underneath it
@@ -1265,7 +1265,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         m._rebuild_fts(bucket, "default")   # generation N fully indexed
         with m._get_db(bucket, "default") as db:
             # catalogue moves to N+1 behind the index's back (triggers off, as during a crawl); marker NULL like a legacy DB
@@ -1319,7 +1319,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         with m._get_db(bucket, "default") as db:
             end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
         with patch.object(m, "_delta_crawl", return_value=(1, ["discovery"])), patch.object(m._crawl_pool, "submit", side_effect=lambda fn: fn()):
@@ -1338,7 +1338,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         with m._get_db(bucket, "default") as db:
             db.execute("UPDATE crawl_status SET status='degraded', last_error='x'"); db.commit()
             before = dict(db.execute("SELECT status, last_crawl_end, last_error FROM crawl_status").fetchone())
@@ -1369,7 +1369,7 @@ class TestTruthfulStates:
         with patch.object(m._s3_manager, "get_client", return_value=self._mk(m, bucket)), patch.object(m._rebuild_pool, "submit"):
             m._run_crawl(bucket, "default")
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         with m._get_db(bucket, "default") as db:
             end0 = db.execute("SELECT last_crawl_end FROM crawl_status").fetchone()[0]
         time.sleep(1.1)
@@ -1683,7 +1683,7 @@ class TestZeroWriteReconcile:
         layout["root.txt"] = 9
         self._crawl(m, bucket, layout)
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         m._rebuild_fts(bucket, "default")           # the first crawl's rebuild pool was mocked: build + certify its index now
         written = []
         _finish = m._PrefixReconcile.finish
@@ -1900,7 +1900,7 @@ class TestZeroWriteReconcile:
         bucket = "zw-disklow"; m._init_db(bucket, "default")
         self._crawl(m, bucket, {"a/x1": 1})
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")   # the mocked rebuild pool never released the post-crawl marker
+            m._rebuilding.pop(f"default:{bucket}", None)   # the mocked rebuild pool never released the post-crawl marker
         with patch.object(m, "_disk_low", return_value=True):
             assert m._queue_crawl(bucket, "default") is False
         with m._get_db(bucket, "default") as db:
@@ -1920,7 +1920,7 @@ class TestZeroWriteReconcile:
         layout = {"a/x1": 1, "b/y1": 2}
         self._crawl(m, bucket, layout)
         with m._crawl_lock:
-            m._rebuilding.discard(f"default:{bucket}")
+            m._rebuilding.pop(f"default:{bucket}", None)
         m._rebuild_fts(bucket, "default")                     # search index built and certified for gen 1
         layout["a/x2new"] = 3                                 # new object at the provider (trigram search needs 3+ chars)
         with m._get_db(bucket, "default") as db:              # the interrupted attempt: a/ finished (and wrote a/x2 with triggers off), b/ did not
