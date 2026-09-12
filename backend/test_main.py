@@ -14,6 +14,7 @@ import base64
 import hashlib
 import time
 import sqlite3
+import datetime as _dt
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
@@ -1608,3 +1609,140 @@ class TestRebuildStallGuard:
             elapsed = time.monotonic() - t0
         assert elapsed < 5.0, f"probe ran unbounded ({elapsed:.1f}s)"
         assert result is False, "a timed-out probe was reported as a healthy index"
+
+
+class TestFlatPrefixDiscovery:
+    """Production's `druid/indexing-logs/` holds 789,345 objects directly under one prefix and no
+    sub-folders. Delimiter discovery tripped its page bound on every single delta, reported
+    discovery:truncated, and the bucket never certified freshness — 21 consecutive degraded deltas
+    on a 10.3M-object bucket. No page budget fixes that: covering it would take ~790 pages. A flat
+    prefix must instead be handed to the target phase, which streams a prefix whole with a sink."""
+
+    def _client(self, n_objects=0, n_children=0, per_page=1000, interleave=False):
+        """A delimiter listing paged at 1,000 like S3, holding objects, sub-folders, or both."""
+        objs = [("o", f"logs/f{i:07d}.log") for i in range(n_objects)]
+        kids = [("p", f"logs/s{i:05d}/") for i in range(n_children)]
+        if interleave:      # S3 returns keys in sort order; a real mixed folder alternates
+            entries = [x for pair in zip(objs, kids) for x in pair] + objs[len(kids):] + kids[len(objs):]
+        else:
+            entries = objs + kids
+        pages = [entries[s:s + per_page] for s in range(0, len(entries), per_page)] or [[]]
+        calls = {"n": 0}
+        def list_objects_v2(**p):
+            # only the prefix under test has content; anything deeper is an empty leaf, so the
+            # walk terminates instead of recursing on the same canned pages forever
+            if p.get("Prefix") != "logs/":
+                return {"CommonPrefixes": [], "Contents": [], "IsTruncated": False}
+            i = min(calls["n"], len(pages) - 1); calls["n"] += 1
+            pg = pages[i]
+            return {"CommonPrefixes": [{"Prefix": k} for t, k in pg if t == "p"],
+                    "Contents": [{"Key": k, "Size": 1, "LastModified": _dt.datetime(2026, 9, 10),
+                                  "ETag": "e"} for t, k in pg if t == "o"],
+                    "IsTruncated": i + 1 < len(pages),
+                    "NextContinuationToken": f"t{i}" if i + 1 < len(pages) else None}
+        c = MagicMock(); c.list_objects_v2.side_effect = list_objects_v2
+        return c, calls
+
+    def _discover(self, m, client, bucket="flatbkt"):
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path(bucket, "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db(bucket, "default")
+        return m._discover_delta_targets(client, bucket, "default", ["logs/"])
+
+    def test_a_flat_prefix_is_listed_whole_instead_of_truncating_the_delta(self, app):
+        m = _main_module()
+        # far more objects than any page budget can cover, and no sub-folders at all
+        c, _ = self._client(n_objects=m.DELTA_NODE_MAX_PAGES * 1000 + 5000)
+        targets, truncated, _ = self._discover(m, c)
+        assert "logs/" in targets, "a flat prefix must become a streaming target"
+        assert truncated is False, \
+            "a flat prefix reported the whole delta truncated, so the bucket could never certify"
+
+    def test_a_mixed_folder_is_not_mistaken_for_flat(self, app):
+        """A folder can be wide in BOTH at once. Counting only its objects and calling it flat
+        promotes it to a delimiter-less listing that walks every sub-tree — a delta silently
+        becoming a full crawl."""
+        m = _main_module()
+        half = m.DELTA_NODE_MAX_PAGES * 1000
+        c, _ = self._client(n_objects=half, n_children=half, per_page=1000, interleave=True)
+        targets, truncated, promoted = self._discover(m, c, bucket="mixedbkt")
+        assert "logs/" not in promoted, \
+            "a folder with as many sub-prefixes as objects was promoted to a recursive listing"
+        assert truncated is True, "a folder wide in sub-prefixes must report the walk partial"
+
+    def test_discovery_does_not_retain_the_objects_it_counts(self, app):
+        """Classifying a folder needs only how MANY objects came back, never the objects. ex.map
+        materialises every result before the loop runs, so returning the payloads keeps
+        DELTA_MAX_NODES x DELTA_NODE_MAX_PAGES x 1000 object dictionaries alive at once — six
+        million at the configured bounds, on a pod sized for one gigabyte.
+
+        Measured with tracemalloc rather than refcounts: the retained lists die when the walk
+        returns, so anything sampled afterwards looks identical either way."""
+        import tracemalloc
+        m = _main_module()
+        tops = [f"p{i:03d}/" for i in range(40)]          # 40 frontier nodes
+        def list_objects_v2(**p):
+            return {"CommonPrefixes": [],
+                    "Contents": [dict(Key=f"{p.get('Prefix','')}f{i:05d}.log", Size=1,
+                                      LastModified=_dt.datetime(2026, 9, 10), ETag="e" * 32)
+                                 for i in range(1000)],
+                    "IsTruncated": True, "NextContinuationToken": "t"}
+        cl = MagicMock(); cl.list_objects_v2.side_effect = list_objects_v2
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(m._db_path("retainbkt", "default") + suffix)
+            except FileNotFoundError: pass
+        m._init_db("retainbkt", "default")
+
+        tracemalloc.start()
+        try:
+            m._discover_delta_targets(cl, "retainbkt", "default", tops)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        # 40 nodes x 3 pages x 1000 objects retained is tens of MB; counts are a few hundred bytes.
+        assert peak < 20 * 1024 * 1024, (
+            f"discovery peaked at {peak/1024/1024:.1f} MB — it is retaining object payloads "
+            f"instead of returning counts")
+
+    def test_a_promoted_listing_is_bounded(self, app):
+        """Objects sort before sub-prefixes, so a truncated sample cannot always see them. The
+        promotion is a guess; without a ceiling a wrong one descends the whole subtree."""
+        m = _main_module()
+        pages = {"n": 0}
+        def list_objects_v2(**p):
+            pages["n"] += 1
+            return {"Contents": [{"Key": f"logs/x{pages['n']:05d}-{i}.log", "Size": 1,
+                                  "LastModified": _dt.datetime(2026, 9, 10), "ETag": "e"}
+                                 for i in range(1000)],
+                    "CommonPrefixes": [], "IsTruncated": True, "NextContinuationToken": f"t{pages['n']}"}
+        cl = MagicMock(); cl.list_objects_v2.side_effect = list_objects_v2
+        with pytest.raises(m.DeltaListTooLarge):
+            m._delta_list_prefix(cl, "b", "logs/", sink=lambda o: None, batch_size=1000, max_objects=5000)
+        assert pages["n"] < 50, "the ceiling did not stop an endless listing"
+
+    def test_a_wide_branch_still_degrades_rather_than_walking_the_subtree(self, app):
+        """The inverse must not regress: streaming has no delimiter, so promoting a folder that is
+        wide in SUB-PREFIXES would walk its entire subtree — a full crawl by another name."""
+        m = _main_module()
+        c, _ = self._client(n_children=m.DELTA_NODE_MAX_PAGES * 1000 + 5000)
+        targets, truncated, _ = self._discover(m, c, bucket="widebkt")
+        assert truncated is True, "an oversized branch must still report the walk partial"
+        assert "logs/" not in targets, "a wide branch must not be streamed whole"
+
+    def test_a_prefix_within_the_budget_is_unaffected(self, app):
+        m = _main_module()
+        c, calls = self._client(n_children=2500)
+        targets, truncated, _ = self._discover(m, c, bucket="normalbkt")
+        assert truncated is False and calls["n"] >= 3, "a 2,500-child node must still walk normally"
+
+    def test_the_streaming_lister_can_actually_take_the_promoted_prefix(self, app):
+        """The promotion is only worth anything if the target phase streams rather than buffers:
+        789,345 objects held in memory is the large-bucket OOM path."""
+        m = _main_module()
+        c, _ = self._client(n_objects=4500)
+        seen = []
+        total = m._delta_list_prefix(c, "flatbkt", "logs/", sink=lambda objs: seen.append(len(objs)),
+                                     batch_size=1000)
+        assert total == 4500, f"streamed {total} of 4500"
+        assert max(seen) <= 1000, f"sink received a batch of {max(seen)} — not bounded"

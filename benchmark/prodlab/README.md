@@ -25,3 +25,21 @@ generates keys from a fixed grid so any position is O(1) and any prefix is a bin
 exactly the calls the crawler makes (ListBuckets, HeadBucket, ListObjectsV2 with prefix / delimiter /
 max-keys / continuation-token / start-after) and benign metadata for the UI. What it cannot do: byte
 operations, real provider latency profiles, real throttling policy. Use the read-only production run for those.
+
+## Flat-prefix shape (`spec-flatprefix.json`)
+
+Three top-level prefixes holding 100,000 objects **directly**, with no sub-folders — production's
+`druid/indexing-logs/`, which holds 789,345 objects that way. Delimiter discovery trips its page
+bound on *objects* rather than children here, which no other spec in this directory produces: the
+druid, hive, skew and deepwide layouts are all deep or wide in sub-prefixes.
+
+Append it to another spec to exercise that path alongside the usual gate:
+
+    python3 - <<'PY'
+    import json
+    a=json.load(open("spec-prod.json")); b=json.load(open("spec-flatprefix.json"))
+    a["buckets"] += b["buckets"]; json.dump(a, open("/tmp/spec-gate.json","w"))
+    PY
+
+Set `LARGE_BUCKET_SECONDS` below its full-crawl time (it indexes in ~12 s) or the scheduler treats
+it as a small bucket and full-recrawls it, and delta discovery never runs on it at all.

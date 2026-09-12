@@ -12,7 +12,12 @@ kubectl -n lab delete pvc sairo-data --wait=true >/dev/null 2>&1 || true
 kubectl -n lab create configmap s3sim --from-file=s3sim.py="$HERE/s3sim.py" --from-file=spec.json="$SPEC" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab rollout restart deploy/s3sim >/dev/null
 kubectl -n lab rollout status deploy/s3sim --timeout=180s >/dev/null
-helm upgrade sairo "$HERE/../../charts/sairo" -n lab --reuse-values --set image.tag="$TAG" --set replicaCount=1 --wait --timeout 240s >/dev/null
+# --reuse-values inherits whatever the release last had, so telemetry stays on unless it is
+# set explicitly. A gate run is a fresh install that would otherwise report itself to the
+# production dashboard on every restart.
+helm upgrade sairo "$HERE/../../charts/sairo" -n lab --reuse-values --set image.tag="$TAG" --set replicaCount=1 --set telemetry.enabled=false --wait --timeout 240s >/dev/null
+kubectl -n lab exec deploy/sairo -- printenv TELEMETRY 2>/dev/null | grep -qx false \
+  || { echo "REFUSING TO START: TELEMETRY is not false in the pod"; exit 1; }
 [ -d "$HERE/out" ] && mv "$HERE/out" "$HERE/out_$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$HERE/out"; echo "tag=$TAG spec=$(basename "$SPEC") started=$(date -u +%FT%TZ)" > "$HERE/out/RUN"
 kubectl -n lab logs deploy/s3sim --tail=1

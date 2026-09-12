@@ -1,0 +1,3 @@
+{"buckets": [
+  {"name": "seg-flatwide", "datasources": 3, "intervals": 100, "partitions": 1000, "layout": "wide"}
+]}
