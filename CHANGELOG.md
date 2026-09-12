@@ -4,6 +4,30 @@ All notable changes to Sairo are documented here. This project uses [Semantic Ve
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-09-13
+
+### Rollout
+
+This patch fixes freshness certification for buckets containing very large flat folders and prevents
+a stalled search-index verification from freezing a bucket. It has no schema migration; rollback to
+the 3.7.0 chart leaves the existing index usable.
+
+The exact release candidate was exercised as an in-place restart against an existing production-shaped
+index: 20 buckets and 18.5M objects in a 1 GiB pod. During the 68-minute crawler gate window, all
+20 buckets matched provider truth (18,500,000 of 18,500,000), the flat bucket completed six consecutive
+certified deltas, and the crawler recorded 21 flat-prefix promotions with zero truncated walks. A
+9.9M-object reconcile completed in 869.8 s and its FTS rebuild in 1,034.0 s. Peak anonymous memory was
+569 MiB, with zero crawler-window restarts, OOM kills, lock errors, or rebuilds abandoned to their ceiling.
+
+Cold reconstruction remains outside the supported 1 GiB envelope. A measured 15.8M-object build from
+an empty volume restarted twice, and 3.7.0 cannot complete the equivalent cold-build phase at 1 GiB
+either. Size the pod for reconstruction or seed it from an existing volume.
+
+This release does not eliminate every possible OOM. The legacy unbounded form of
+`GET /api/buckets/{bucket}/list` can still materialise a whole very large folder; a separate post-gate
+request for one million files reproduced an OOM. The normal browser view already paginates, the path is
+unchanged from 3.7.0, and the server-side ceiling and remaining client pagination are tracked in #59.
+
 ### Fixed
 
 - **A folder holding only objects could never be covered by delta discovery, so its bucket never

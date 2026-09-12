@@ -310,7 +310,7 @@ async def s3_error_handler(request, exc):
 
 
 _app_start_time = time.time()
-SAIRO_VERSION = "3.7.0"
+SAIRO_VERSION = "3.7.1"
 
 
 def _version_gt(a: str, b: str) -> bool:
