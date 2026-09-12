@@ -13,6 +13,16 @@ Each version release produces all three artifacts from the same `v*` tag:
 
 ---
 
+## v3.7.1
+
+**Large flat folders can certify freshness without forcing continuous full crawls.**
+
+- Delta discovery now recognises a folder dominated by direct objects and hands it to the existing bounded target-listing phase. Wide sub-folder trees still degrade safely instead of becoming accidental full crawls.
+- Promoted flat prefixes are capped by `DELTA_FLAT_MAX_OBJECTS` (default 2,000,000), and discovery retains counts instead of millions of object dictionaries.
+- A stalled search-index rebuild no longer freezes its bucket, corrupt-index health probes are time-bounded, and the status path no longer scans every object merely to test whether one exists.
+- Release gate: 20 buckets and 18.5M objects matched provider truth; six consecutive flat-bucket deltas certified; a 9.9M reconcile and FTS rebuild completed with 569 MiB peak anonymous memory and no crawler-window restarts or OOM kills.
+- Cold reconstruction at 1 GiB remains unsupported. The legacy unbounded listing response is unchanged and tracked in [#59](https://github.com/AshwathStephen/sairo/issues/59); the normal browser view already paginates.
+
 ## v3.7.0
 
 **The crawler keeps up with the storage instead of re-copying it** (Core program: SAE-63…SAE-85)
