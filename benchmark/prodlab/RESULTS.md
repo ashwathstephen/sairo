@@ -305,3 +305,49 @@ identities (a rollout resets `restartCount`, so one real OOM computed as zero); 
 only the live container, where an OOM hides its evidence in the terminated one; a missing FTS
 generation passed vacuously; and `seg-main` was scored on `status` alone rather than on
 `last_error` being clear and `last_crawl_end >= last_attempt_at`.
+
+---
+
+## Run 13 — 3.7.1 release gate: flat-prefix freshness, 20 buckets / 18.5M objects, 1 GiB pod
+
+The exact candidate started against an index already present on the persistent volume, matching the
+deployed restart path rather than a cold reconstruction. The volume had previously run 3.7.0 and
+intermediate candidates; this proves compatibility with the persisted index, not a byte-for-byte direct
+3.7.0-to-candidate transition.
+
+`seg-flatwide` supplied the missing production shape: three prefixes with 1,000,000 objects directly
+under each and no sub-folders. At 3M objects its full crawl took 199.0 s, exceeding
+`LARGE_BUCKET_SECONDS` (60), so subsequent refreshes exercised delta discovery rather than masking the
+new path with short full crawls.
+
+### Crawler gate window
+
+| Metric | Result |
+|---|---|
+| Objects vs provider truth | 18,500,000 / 18,500,000 — all 20 buckets exact |
+| Flat-prefix promotions | 21 |
+| Truncated discovery walks | 0; pre-fix: every cycle |
+| Consecutive certified deltas on the flat bucket | 6 |
+| 9.9M-object reconcile | 869.8 s; one stale key removed |
+| Search-index rebuild, 9.9M keys | 1,034.0 s |
+| Peak anonymous memory | 569 MiB |
+| Restarts / OOM kills / `database is locked` | 0 / 0 / 0 |
+| Rebuilds abandoned to `REBUILD_MAX_DURATION` | 0 |
+| Search indexes at gate completion | 20 of 20 healthy; no orphaned shadow table |
+| Telemetry | disabled for the entire gate |
+
+`DELTA_FLAT_MAX_OBJECTS` did not fire live because each promoted prefix held 1M objects against its
+2M default; the rejection path is unit-tested.
+
+### Separately measured limits
+
+Cold reconstruction was not part of the crawler verdict. Building the 15.8M-object form of the lab
+index from an empty volume restarted twice at 1 GiB, and 3.7.0 cannot complete the equivalent phase at
+that memory limit either. Reconstruction at this scale requires a larger pod or a seeded volume.
+
+After the successful crawler window, a deliberately unbounded `GET /list` request materialised
+1,000,000 file rows in one response (21.3 s) and OOM-killed the pod. The persisted index recovered with
+all 18.5M objects intact. This endpoint behaviour predates 3.7.1 and is outside the crawler change;
+the normal browser view already uses pagination. Server-side protection and pagination for the remaining
+legacy callers are tracked in issue #59. The bounded control (`limit=200`) returned the same prefix's
+first page in 1,203 ms with a continuation cursor.
