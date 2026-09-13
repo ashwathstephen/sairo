@@ -5,7 +5,7 @@ import {
   getLifecycle, putLifecycle, deleteLifecycle,
   getCors, putCors, deleteCors,
   getBucketPolicy, putBucketPolicy, deleteBucketPolicy,
-  getBucketAcl, putBucketAcl, getBucketTagging, putBucketTagging,
+  getBucketAcl, putBucketAcl, getBucketTagging, putBucketTagging, PUBLIC_URL_TAG,
   getMultipartUploads, abortMultipart, abortAllMultipart, getObjectLock,
 } from "../api";
 
@@ -17,6 +17,8 @@ export default function BucketSettings({ bucket, onClose, role }) {
   const [policy, setPolicy] = useState(null);
   const [acl, setAcl] = useState(null);
   const [tags, setTags] = useState(null);
+  const [publicBase, setPublicBase] = useState(null);   // null = not edited yet: show the saved tag
+  const [publicSaved, setPublicSaved] = useState(false);
   const [multipart, setMultipart] = useState(null);
   const [objectLock, setObjectLock] = useState(null);
   const [crawl, setCrawl] = useState(null);
@@ -476,6 +478,21 @@ export default function BucketSettings({ bucket, onClose, role }) {
 
             {activeTab === "tags" && tags && (
               <div>
+                <h3>Public URL base</h3>
+                <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
+                  If this bucket is served publicly (a CDN or public hostname), set its base URL here; object dialogs then offer a ready-to-copy public link. Stored as the bucket tag <span className="mono">{PUBLIC_URL_TAG}</span>.
+                </p>
+                <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center" }}>
+                  <input type="url" placeholder="https://cdn.example.com/files" aria-label="Public URL base" value={publicBase ?? (tags.tags[PUBLIC_URL_TAG] || "")}
+                         onChange={(e) => { setPublicBase(e.target.value); setPublicSaved(false); }} className="filter-input" style={{ flex: 1 }} disabled={!isAdmin} />
+                  {isAdmin && <button className="btn-primary btn-xs" onClick={async () => {
+                    const updated = { ...tags.tags }; const v = (publicBase ?? tags.tags[PUBLIC_URL_TAG] ?? "").trim();
+                    if (v) updated[PUBLIC_URL_TAG] = v; else delete updated[PUBLIC_URL_TAG];
+                    try { await putBucketTagging(bucket, updated); setTags({ tags: updated }); setPublicBase(null); setPublicSaved(true); }
+                    catch (e) { setAlertMessage("Failed to save public URL: " + (e.message || "Unknown error")); }
+                  }}>Save</button>}
+                  {publicSaved && <span className="muted" style={{ fontSize: 12 }} aria-live="polite">Saved</span>}
+                </div>
                 <h3>Bucket Tags</h3>
                 {Object.keys(tags.tags).length === 0 ? (
                   <p className="muted">No tags</p>

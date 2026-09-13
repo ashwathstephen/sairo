@@ -921,6 +921,16 @@ export async function changePassword(oldPassword, newPassword) {
   return res.json();
 }
 
+// ── Public URL per bucket (#28) ─────────────────────────────
+// Stored as a bucket tag so it needs no schema and travels with the bucket.
+export const PUBLIC_URL_TAG = "sairo:public-url";
+
+export function publicObjectUrl(base, key) {
+  if (!base || !key) return null;
+  const path = key.split("/").map(encodeURIComponent).join("/");
+  return `${base.replace(/\/+$/, "")}/${path}`;
+}
+
 // ── 2FA / TOTP ────────────────────────────────────────────
 
 export async function setup2FA() {

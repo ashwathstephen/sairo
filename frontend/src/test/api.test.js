@@ -2,7 +2,7 @@
  * Tests for api.js utility functions.
  */
 import { describe, it, expect } from "vitest";
-import { formatSize, formatDate } from "../api";
+import { formatSize, formatDate, publicObjectUrl } from "../api";
 
 describe("formatSize", () => {
   it("formats 0 bytes", () => {
@@ -48,5 +48,15 @@ describe("formatDate", () => {
     const result = formatDate("2024-01-15T10:30:00Z");
     expect(result).toBeTruthy();
     expect(result).not.toBe("—");
+  });
+});
+
+describe("publicObjectUrl (#28)", () => {
+  it("joins the base and the key, encoding path segments", () => {
+    expect(publicObjectUrl("https://cdn.example.com/files/", "a b/ü/x.png")).toBe("https://cdn.example.com/files/a%20b/%C3%BC/x.png");
+  });
+  it("is null without a base or key", () => {
+    expect(publicObjectUrl("", "k")).toBeNull();
+    expect(publicObjectUrl("https://cdn.example.com", "")).toBeNull();
   });
 });

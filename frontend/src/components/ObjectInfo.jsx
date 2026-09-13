@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import ConfirmDialog from "./ConfirmDialog";
-import { formatSize, formatDate, getObjectInfo, getObjectVersions, getPresignedUrl, getObjectTagging, putObjectTagging, getObjectAcl, putObjectAcl, versionRestore, versionDelete, getVersionPresignedUrl, createShareLink } from "../api";
+import { getBucketTagging, publicObjectUrl, PUBLIC_URL_TAG, formatSize, formatDate, getObjectInfo, getObjectVersions, getPresignedUrl, getObjectTagging, putObjectTagging, getObjectAcl, putObjectAcl, versionRestore, versionDelete, getVersionPresignedUrl, createShareLink } from "../api";
 
 export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
   const isAdmin = role === "admin";
@@ -9,6 +9,8 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
   const [tags, setTags] = useState(null);
   const [acl, setAcl] = useState(null);
   const [presignedUrl, setPresignedUrl] = useState(null);
+  const [publicBase, setPublicBase] = useState("");   // bucket tag sairo:public-url (a CDN or public host in front of the bucket)
+  const [publicCopied, setPublicCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [copySuccess, setCopySuccess] = useState(false);
   const [activeTab, setActiveTab] = useState("details");
@@ -32,7 +34,9 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
       getObjectVersions(bucket, fileKey),
       getObjectTagging(bucket, fileKey).catch(() => ({ tags: {} })),
       getObjectAcl(bucket, fileKey).catch(() => ({ owner: {}, grants: [] })),
-    ]).then(([infoData, versionData, tagData, aclData]) => {
+      getBucketTagging(bucket).catch(() => ({ tags: {} })),
+    ]).then(([infoData, versionData, tagData, aclData, bucketTags]) => {
+      setPublicBase((bucketTags.tags || {})[PUBLIC_URL_TAG] || "");
       setInfo(infoData);
       setVersions(versionData);
       setTags(tagData);
@@ -306,6 +310,19 @@ export default function ObjectInfo({ bucket, fileKey, onClose, role }) {
 
             {activeTab === "share" && (
               <div>
+                {publicBase && (
+                  <>
+                    <h3>Public link</h3>
+                    <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>This bucket is served publicly from a configured base URL (Bucket Settings → Tags).</p>
+                    <div className="presigned-url">
+                      <input type="text" value={publicObjectUrl(publicBase, fileKey)} readOnly className="url-input" aria-label="Public link" />
+                      <button onClick={() => { navigator.clipboard.writeText(publicObjectUrl(publicBase, fileKey)); setPublicCopied(true); setTimeout(() => setPublicCopied(false), 2000); }} className="btn-primary">
+                        {publicCopied ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                    <hr style={{ border: "none", borderTop: "1px solid var(--border-light)", margin: "16px 0" }} />
+                  </>
+                )}
                 <h3>Presigned URL</h3>
                 <div className="presigned-actions">
                   <button onClick={() => generatePresignedUrl(1)}>1 hour</button>
